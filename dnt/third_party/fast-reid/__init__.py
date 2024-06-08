@@ -1,0 +1,1 @@
+from fast_reid_interfece import get_cfg, FastReIDInterface, preprocess, postprocess

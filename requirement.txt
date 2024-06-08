@@ -1,0 +1,48 @@
+# Pytorch
+--find-links https://download.pytorch.org/whl/cu116
+torch>=1.12.0+cu116
+torchvision>=0.13.0+cu116 
+torchaudio>=0.12.0 
+
+# YOLO V8
+ultralytics
+
+# python development tools
+python-dev-tools
+
+# General
+cython
+cython_bbox
+easydict
+faiss-cpu
+faiss-gpu
+filterpy
+gdown
+geopandas
+h5py
+lap
+loguru
+matplotlib
+motmetrics
+ninja
+numpy
+numpy_indexed
+opencv-contrib-python
+opencv-python
+pandas
+Pillow
+prettytable
+pycocotools
+pyyaml
+scikit-image
+scikit-learn
+scipy
+shapely
+sympy
+tabulate
+tensorboard
+termcolor
+thop
+tqdm
+vidgear
+yacs
