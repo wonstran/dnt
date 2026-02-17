@@ -1,6 +1,7 @@
 # DNT: Dedection and Tracking
 
 Python package for video-based traffic analysis: detection, tracking, labeling, and post-processing.
+Surrogate safety measures (SSMs) can be generated using the **Traffic Surrogate Safety Analysis (TSSA)** package.
 
 ## Features
 
