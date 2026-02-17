@@ -7,7 +7,6 @@ Python package for video-based traffic analysis: detection, tracking, labeling, 
 - Object detection (`dnt.detect.Detector`, YOLO/RT-DETR backend).
 - Multi-object tracking (`dnt.track.Tracker`, BoxMOT backend).
 - Video labeling/visualization (`dnt.label.Labeler`).
-- Track filtering and geometry-based selection (`dnt.filter.Filter`).
 - Track post-processing:
   - RTS interpolation for trajectory gaps.
   - Tracklet linking (stitching broken IDs).
@@ -118,7 +117,6 @@ labeler.draw_tracks(
 - `dnt.detect`
 - `dnt.track`
 - `dnt.label`
-- `dnt.filter`
 - `dnt.track.post_process`
 
 ## Author
