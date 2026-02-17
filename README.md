@@ -1,4 +1,4 @@
-# DNT
+# DNT: Dedection and Tracking
 
 Python package for video-based traffic analysis: detection, tracking, labeling, and post-processing.
 
@@ -31,6 +31,9 @@ pip install -r requirements.txt
 pip install dnt
 
 ```
+## API Manual
+
+https://wonstran.github.io/dnt/
 
 ## Quick Workflow
 
