@@ -62,6 +62,11 @@ plugins:
             merge_init_into_class: true
             members_order: source
             inherited_members: true
+  - with-pdf:
+      output_path: site/dnt-manual.pdf
+      cover: true
+      back_cover: true
+      toc_title: Table of Contents
 
 markdown_extensions:
   - admonition

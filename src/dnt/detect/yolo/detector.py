@@ -104,7 +104,7 @@ class Detector:
         Inference device to use. If `"auto"`, the detector will pick an
         available accelerator first (`cuda` → `xpu` → `mps`) and fall back to CPU. Default is
         `"auto"`.
-    enable_half : bool, optional
+    half : bool, optional
         Whether to enable half-precision inference. This is only effective on
         GPU (CUDA). Default is `False`.
 
