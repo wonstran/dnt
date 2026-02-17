@@ -1,10 +1,12 @@
 torch
 torchvision
 torchaudio
-ultralytics>=8.2
+ultralytics>=8.4.1
+boxmot
 cython
 cython_bbox
 easydict
+easyocr
 faiss-cpu
 faiss-gpu-cu12
 filterpy
@@ -25,10 +27,12 @@ Pillow
 prettytable
 pycocotools
 pyyaml
+requests
 scikit-image
 scikit-learn>=1.5
 scipy>=1.13
 shapely
+shapelysmooth
 sympy
 tabulate
 tensorboard
@@ -37,3 +41,6 @@ thop
 tqdm
 vidgear
 yacs
+dateparser
+openpyxl
+pytz

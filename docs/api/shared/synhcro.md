@@ -1,0 +1,3 @@
+# Synchronization
+
+::: dnt.shared.synhcro

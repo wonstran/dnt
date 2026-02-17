@@ -1,0 +1,73 @@
+site_name: dnt API Manual
+site_description: API documentation generated from dnt docstrings
+repo_url: https://github.com/wonstran/dnt
+repo_name: wonstran/dnt
+docs_dir: docs
+site_dir: site
+watch:
+  - src/dnt
+
+theme:
+  name: material
+  features:
+    - navigation.tabs
+    - navigation.sections
+    - navigation.indexes
+    - content.code.copy
+    - search.suggest
+    - search.highlight
+
+nav:
+  - Home: index.md
+  - Quickstart: quickstart.md
+  - API Reference:
+      - api/index.md
+      - Package: api/dnt.md
+      - Detection:
+          - api/detect/index.md
+          - YOLO: api/detect/yolov8.md
+          - Signal Detection: api/detect/signal.md
+          - Timestamp: api/detect/timestamp.md
+      - Tracking:
+          - api/track/index.md
+          - Tracker: api/track/tracker.md
+          - Post Processing: api/track/post_process.md
+          - Re-classification: api/track/re_class.md
+      - Engine:
+          - api/engine/index.md
+          - BBox IoU: api/engine/bbox_iou.md
+          - BBox Interpolation: api/engine/bbox_interp.md
+          - Clustering: api/engine/cluster.md
+          - IoB: api/engine/iob.md
+      - Filter: api/filter/filter.md
+      - Label: api/label/labeler.md
+      - Shared Utilities:
+          - api/shared/index.md
+          - Files: api/shared/files.md
+          - Download: api/shared/download.md
+          - Utilities: api/shared/util.md
+          - Synchronization: api/shared/synhcro.md
+
+plugins:
+  - search
+  - mkdocstrings:
+      handlers:
+        python:
+          paths: [src]
+          options:
+            docstring_style: numpy
+            show_source: true
+            show_signature_annotations: true
+            separate_signature: true
+            merge_init_into_class: true
+            members_order: source
+            inherited_members: true
+
+markdown_extensions:
+  - admonition
+  - pymdownx.details
+  - pymdownx.superfences
+  - pymdownx.highlight
+  - pymdownx.inlinehilite
+  - toc:
+      permalink: true
