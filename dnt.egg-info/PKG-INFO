@@ -1,6 +1,6 @@
 Metadata-Version: 2.4
 Name: dnt
-Version: 0.3.2.0
+Version: 0.3.2.1
 Summary: A Python tool for video-based traffic analytiscs
 Author-email: Zhenyu Wang <wonstran@hotmail.com>
 Project-URL: Homepage, https://its.cutr.usf.edu/dnt/
@@ -66,9 +66,10 @@ Requires-Dist: openpyxl
 Requires-Dist: pytz
 Dynamic: license-file
 
-# DNT
+# DNT: Dedection and Tracking
 
 Python package for video-based traffic analysis: detection, tracking, labeling, and post-processing.
+Surrogate safety measures (SSMs) can be generated using the **Traffic Surrogate Safety Analysis (TSSA)** package.
 
 ## Features
 
@@ -96,8 +97,12 @@ python3 -m venv .venv
 source .venv/bin/activate
 pip install -U pip
 pip install -r requirements.txt
-pip install -e .
+pip install dnt
+
 ```
+## API Manual
+
+https://wonstran.github.io/dnt/
 
 ## Quick Workflow
 

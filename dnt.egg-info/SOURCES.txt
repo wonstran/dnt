@@ -21,10 +21,11 @@ examples/example_track.py
 src/dnt/__init__.py
 src/dnt/detect/__init__.py
 src/dnt/detect/timestamp.py
+src/dnt/detect/signal/__init__.py
 src/dnt/detect/signal/detector.py
-src/dnt/detect/yolov8/__init__.py
-src/dnt/detect/yolov8/detector.py
-src/dnt/detect/yolov8/segmentor.py
+src/dnt/detect/yolo/__init__.py
+src/dnt/detect/yolo/detector.py
+src/dnt/detect/yolo/segmentor.py
 src/dnt/engine/__init__.py
 src/dnt/engine/bbox_interp.py
 src/dnt/engine/bbox_iou.py
