@@ -1,0 +1,110 @@
+Metadata-Version: 2.4
+Name: dnt
+Version: 0.3.2.0
+Summary: A Python tool for video-based traffic analytiscs
+Author-email: Zhenyu Wang <wonstran@hotmail.com>
+Project-URL: Homepage, https://its.cutr.usf.edu/dnt/
+Keywords: traffic,vehicle,trajectory,safety
+Classifier: Development Status :: 3 - Alpha
+Classifier: Intended Audience :: End Users/Desktop
+Classifier: License :: OSI Approved :: MIT License
+Classifier: Programming Language :: Python :: 3
+Classifier: Programming Language :: Python :: 3.9
+Classifier: Programming Language :: Python :: 3.10
+Classifier: Programming Language :: Python :: 3.11
+Classifier: Programming Language :: Python :: 3.12
+Classifier: Programming Language :: Python :: 3.13
+Classifier: Topic :: Software Development :: Build Tools
+Requires-Python: >=3.9
+Description-Content-Type: text/markdown
+License-File: LICENSE.md
+Requires-Dist: torch
+Requires-Dist: torchvision
+Requires-Dist: torchaudio
+Requires-Dist: ultralytics>=8.2
+Requires-Dist: cython
+Requires-Dist: cython_bbox
+Requires-Dist: easydict
+Requires-Dist: faiss-cpu
+Requires-Dist: faiss-gpu-cu12
+Requires-Dist: filterpy
+Requires-Dist: gdown
+Requires-Dist: geopandas
+Requires-Dist: h5py
+Requires-Dist: lapx
+Requires-Dist: loguru
+Requires-Dist: matplotlib>=3.9
+Requires-Dist: motmetrics
+Requires-Dist: ninja
+Requires-Dist: numpy<3,>=2.2
+Requires-Dist: numpy_indexed
+Requires-Dist: opencv-contrib-python
+Requires-Dist: opencv-python
+Requires-Dist: pandas>=2.2
+Requires-Dist: Pillow
+Requires-Dist: prettytable
+Requires-Dist: pycocotools
+Requires-Dist: pyyaml
+Requires-Dist: scikit-image
+Requires-Dist: scikit-learn>=1.5
+Requires-Dist: scipy>=1.13
+Requires-Dist: shapely
+Requires-Dist: sympy
+Requires-Dist: tabulate
+Requires-Dist: tensorboard
+Requires-Dist: termcolor
+Requires-Dist: thop
+Requires-Dist: tqdm
+Requires-Dist: vidgear
+Requires-Dist: yacs
+Dynamic: license-file
+
+# Project Title
+
+A Python package for video-based traffic analysis.
+
+## Description
+
+This tool can generate vehicel trajectories using real-time object detection and multiple object tracking technologies. Based on the trajectory data, the tool can prodcue various safety and operational analytics.
+
+## Getting Started
+
+### Dependencies
+
+* OS: Ubuntu 20.04 or higher
+* Python: 3.7 or higher
+* Libarary: pytorch (>=1.12 with cuda), pandas, tqdm, numpy, scipy, matplotlib, ultralytics
+
+### Installing
+```
+Setup enviroment:
+
+    python3.x -m venv dnt (you may replace dnt with you specified name; python version >3.9)
+    sudo apt-get install python3.x-dev  
+    pip install python-dev-tools
+
+pip install torch==1.12.0+cu116 torchvision==0.13.0+cu116 torchaudio==0.12.0 --extra-index-url https://download.pytorch.org/whl/cu116
+pip install dnt
+```
+
+### Executing program
+
+Call APIs from Python codes
+
+
+## Authors
+
+Zhenyu Wang [@wonstran@hotmail.com](mailto:wonstran@hotmail.com)
+
+## Version History
+
+* 0.2
+    * Replace darknet with pytorch
+    * Adopt YOLO v8 as backend for object detection
+    * See [commit change]() or See [release history]()
+* 0.1
+    * Initial Release
+
+## License
+
+This project is licensed under the MIT License - see the LICENSE file for details
