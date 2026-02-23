@@ -13,7 +13,7 @@ if str(SRC) not in sys.path:
 from dnt.detect import Detector, DetectorModel
 from dnt.label import Labeler, LabelMethod
 from dnt.label.labeler import Labeler, LabelMethod
-from dnt.track import BOTSORTConfig, ReIDWeights, Tracker, interpolate_tracks_rts, link_tracklets
+from dnt.track import BoTSORTConfig, ReIDWeights, Tracker, interpolate_tracks_rts, link_tracklets
 
 base_dir = "/mnt/e/videos/tmc/before/009/View_South/videos/4-19-23"
 input_video = f"{base_dir}/4-19-23-hiv00307.mp4"
@@ -27,7 +27,7 @@ os.makedirs(label_dir, exist_ok=True)
 detector = Detector(model=DetectorModel.RTDETRx, device="auto")
 # detector.detect(input_video, det_file)
 
-cfg = BOTSORTConfig(ReIDWeights.CLIP_VEHICLEID)
+cfg = BoTSORTConfig(ReIDWeights.CLIP_VEHICLEID)
 tracker = Tracker(cfg, device="auto")
 # tracks = tracker.track(det_file, track_file, input_video)
 

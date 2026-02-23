@@ -180,18 +180,21 @@ class Filter:
         video_index: int | None = None,
         video_tot: int | None = None,
     ) -> pd.DataFrame:
-        """Filter tracks by zones.
+        """Filter tracks by polygon zones using an aggregate ID match.
+
         Inputs:
-            tracks: tracks
-            zones: a list of polygons
-            method - 'include' (default), 'exclude'
-            ref_point - the reference point of a track bbox,
-                defalt is br, others - bl, bc, tl, tc, tr, cl, cc, cr
-            offset - the offset to ref_point, default is (0, 0)
-            video_index - video index
-            video_tot - total videos
-        Return:
-            Filtered tracks
+            tracks - input tracks.
+            zones - polygons used for matching.
+            method - 'include' (default) or 'exclude'.
+            ref_point - bbox reference point (default: 'bc'); options include
+                bl, bc, br, tl, tc, tr, cl, cc, cr.
+            offset - offset applied to the reference point, default is (0, 0).
+            video_index - video index for progress display.
+            video_tot - total video count for progress display.
+
+        Returns:
+            Filtered tracks.
+
         """
         if offset is None:
             offset = (0, 0)
@@ -299,17 +302,20 @@ class Filter:
         video_index: int | None = None,
         video_tot: int | None = None,
     ) -> pd.DataFrame:
-        """Filter tracks by zones.
+        """Filter frame rows by polygon zones.
+
         Inputs:
-            tracks - tracks
-            zones - zones (polygon)
-            method - 'include' (default) include the tracks if they are within the zones; 'exclude' exclude the tracks if they are within the zones
-            ref_point - the reference point of a track bbox, defalt is bottom_point, center_point, left_up, right_up, left_buttom, right_buttom
-            offset - the offset to ref_point, default is (0, 0)
-            video_index - video index
-            video_tot - total videos
-        Return:
-            Filtered tracks
+            tracks - input tracks.
+            zones - polygons used for matching.
+            method - 'include' (default) keeps matching rows; 'exclude' drops them.
+            ref_point - bbox reference point (default: 'bc').
+            offset - offset applied to the reference point, default is (0, 0).
+            video_index - video index for progress display.
+            video_tot - total video count for progress display.
+
+        Returns:
+            Filtered frame rows.
+
         """
         if offset is None:
             offset = (0, 0)
@@ -427,7 +433,7 @@ class Filter:
                      'filter' - filter tracks within zones
                      'label' - label tracks with zone index
             ref_point - the reference point of a track bbox,
-                        br - buttom_right,
+                        br - bottom_right,
                         bl - bottom_left
                         bc - bottom_center
                         cc - center_point,
@@ -437,11 +443,10 @@ class Filter:
                         tl - top_left,
                         tr - top_right,
             offset - the offset to ref_point, default is (0, 0)
-            aggregate - combine outputs to one dataframe, add zone column
-            zone_name - if aggregate, the field name of zone variable, default is 'zone'
+            zone_name - field name used when method='label', default is 'zone'
             video_index - video index
             video_tot - total videos
-        Return:
+        Returns:
             Filtered tracks
         """
         if offset is None:
@@ -538,7 +543,7 @@ class Filter:
                 the lines, exclude - exclude tracks crossing the lines
             video_index - the index of video for processing
             video_tot - the total number of videos
-        Return:
+        Returns:
             a DataFrame of [FRAME, TRACK_ID, TOPX, TOPY, WIDTH, LENGTH, RESERVED, RESERVED, RESERVED]
         """
         track_ids = tracks[1].unique()
@@ -601,13 +606,13 @@ class Filter:
             lines - a list of LineString
             method - filtering method, include (default) - including tracks crossing the
                 lines, exclude - exclude tracks crossing the lines
-            tolerance - if a bbox intesect the reference lines of (number of lanes -
+            tolerance - if a bbox intersects the reference lines of (number of lanes -
                 tolerance), it is hit. default is 0.
             force_line_indexes: the line indexes that a bbox must intersect for matching
-            bbox_size - the size of detection bbox, default is 0 - the orginal bbox
+            bbox_size - the size of detection bbox, default is 0 - the original bbox
             video_index - the index of video for processing
             video_tot - the total number of videos
-        Return:
+        Returns:
             a DataFrame of [FRAME, TRACK_ID, TOPX, TOPY, WIDTH, LENGTH, RESERVED,
                 RESERVED, RESERVED]
         """

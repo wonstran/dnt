@@ -690,15 +690,16 @@ class Tracker:
         video_file: str | None = None,
         show: bool = False,
         video_index: int | None = None,
-        total_videos: int | None = None,
+        video_tot: int | None = None,
+        message: str | None = None,
     ) -> pd.DataFrame:
         """Run tracking on a single detection file using BoxMOT.
 
         Parameters
         ----------
         det_file : str
-            Path to detection file (CSV format with columns:
-            frame, x1, y1, width, height, confidence, class_id).
+            Path to detection file in DNT detection format
+            (frame, -, x, y, width, height, confidence, class_id).
         out_file : str
             Path to write tracking results. If empty string, results are not saved.
         video_file : str, optional
@@ -709,8 +710,11 @@ class Tracker:
             'q' to stop tracking early.
         video_index : int, optional
             Index of current video in batch (for progress bar display).
-        total_videos : int, optional
+        video_tot : int, optional
             Total number of videos in batch (for complete progress context).
+        message : str | None, optional
+            Optional progress text shown in the progress bar. If None, the
+            video stem is used (default: None).
 
         Returns
         -------
@@ -752,7 +756,8 @@ class Tracker:
             out_file=out_file,
             show=show,
             video_index=video_index,
-            total_videos=total_videos,
+            video_tot=video_tot,
+            message=message,
         )
 
     def track_batch(
@@ -762,6 +767,7 @@ class Tracker:
         output_path: str | None = None,
         is_overwrite: bool = False,
         is_report: bool = True,
+        message: str | None = None,
     ) -> list[str]:
         """Run tracking on multiple detection files sequentially.
 
@@ -781,6 +787,9 @@ class Tracker:
             If False (default), skip tracking for videos with existing output files.
         is_report : bool, optional
             If True (default), include skipped files in returned list.
+        message : str | None, optional
+            Optional progress text shown in each tracking progress bar.
+            If None (default), each video's stem is used.
 
         Returns
         -------
@@ -829,7 +838,8 @@ class Tracker:
                 out_file=track_file if track_file else "",  # track() expects a path
                 video_file=video_file,
                 video_index=idx,
-                total_videos=total_videos,
+                video_tot=total_videos,
+                message=message,
             )
 
             if track_file:
@@ -1083,7 +1093,8 @@ class Tracker:
         out_file: str,
         show: bool = False,
         video_index: int | None = None,
-        total_videos: int | None = None,
+        video_tot: int | None = None,
+        message: str | None = None,
     ) -> pd.DataFrame:
         """Execute BoxMOT tracking on one video with corresponding detections.
 
@@ -1103,8 +1114,11 @@ class Tracker:
             If True, display tracking preview (default: False).
         video_index : int | None, optional
             Index in batch progression (for UI display).
-        total_videos : int | None, optional
+        video_tot : int | None, optional
             Total videos in batch (for UI display).
+        message : str | None, optional
+            Optional progress text shown in the progress bar. If None, the
+            video stem is used.
 
         Returns
         -------
@@ -1112,7 +1126,6 @@ class Tracker:
             Tracking results with TRACK_FIELDS columns.
 
         """
-        """Run BoxMOT tracking on one video/detection pair and return track records."""
         detections = pd.read_csv(det_file, header=None).to_numpy()
         if detections.size == 0 or len(detections) == 0:
             return pd.DataFrame(columns=self.TRACK_FIELDS)
@@ -1134,10 +1147,11 @@ class Tracker:
             half=self.half,
         )
 
-        desc = f"Tracking {Path(video_file).stem}"
+        pbar_message = message if message is not None else Path(video_file).stem
+        desc = f"Tracking {pbar_message}"
         pbar = tqdm(total=total_frames, desc=desc, unit="frames")
-        if video_index is not None and total_videos is not None:
-            pbar.set_description_str(f"Tracking {video_index} of {total_videos} - {Path(video_file).stem}")
+        if video_index is not None and video_tot is not None:
+            pbar.set_description_str(f"Tracking {video_index} of {video_tot} - {pbar_message}")
 
         results: list[list[float | int]] = []
         cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)

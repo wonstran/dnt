@@ -21,7 +21,7 @@ from .tracker import (
     BoostTrackConfig as BoostTrackConfig,
 )
 from .tracker import (
-    BoTSORTConfig as BOTSORTConfig,
+    BoTSORTConfig as BoTSORTConfig,
 )
 from .tracker import (
     ByteTrackConfig as ByteTrackConfig,
@@ -54,8 +54,12 @@ from .tracker import (
     Tracker as Tracker,
 )
 
+# Backward-compat aliases for historical exported names.
+BOTSORTConfig = BoTSORTConfig
+SFSortConfig = SFSORTConfig
+
 __all__ = [
-    "BOTSORTConfig",
+    "BoTSORTConfig",
     "BoostTrackConfig",
     "ByteTrackConfig",
     "DeepOCSORTConfig",
@@ -66,7 +70,8 @@ __all__ = [
     "ReClass",
     "ReIDWeights",
     "SFSORTConfig",
-    "SFSortConfig",
     "StrongSORTConfig",
     "Tracker",
+    "interpolate_tracks_rts",
+    "link_tracklets",
 ]

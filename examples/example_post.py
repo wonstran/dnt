@@ -12,7 +12,7 @@ if str(SRC) not in sys.path:
 from dnt.detect import Detector, DetectorModel
 from dnt.label import Labeler, LabelMethod
 from dnt.label.labeler import Labeler, LabelMethod
-from dnt.track import BOTSORTConfig, ReIDWeights, Tracker, interpolate_tracks_rts
+from dnt.track import BoTSORTConfig, ReIDWeights, Tracker, interpolate_tracks_rts
 
 input_video = "/mnt/d/videos/sample/short-off-ramp.mp4"
 det_file = "/mnt/d/videos/sample/dets/short-off-ramp_det.txt"
@@ -25,7 +25,7 @@ label_dir = "/mnt/d/videos/sample/labels/track_clips"
 detector = Detector(model=DetectorModel.RTDETRx, device="auto")
 # detector.detect(input_video, det_file)
 
-cfg = BOTSORTConfig(ReIDWeights.CLIP_VEHICLEID)
+cfg = BoTSORTConfig(ReIDWeights.CLIP_VEHICLEID)
 tracker = Tracker(cfg, device="auto")
 tracks = tracker.track(det_file, track_file, input_video)
 

@@ -213,7 +213,7 @@ class Detector:
         end_frame: int | None = None,
         verbose: bool = True,
         show: bool = False,
-        disp_filename: bool = False,
+        message: str | None = None,
     ) -> pd.DataFrame:
         """Run object detection on a video and return per-frame detections.
 
@@ -235,8 +235,9 @@ class Detector:
             Whether to show a progress bar. Default is True.
         show : bool, optional
             Whether to display the video frames with detections. Default is False.
-        disp_filename: bool, optional
-            Whether to show the file name in the progress bar. Default is False.
+        message : str | None, optional
+            Optional message shown in the progress bar description.
+            Default is None.
 
         Returns
         -------
@@ -270,21 +271,18 @@ class Detector:
 
         # Some codecs return 0 or -1 for frame count
         if verbose:
-            if tot_frames <= 0:
-                pbar = tqdm(desc="Detecting", unit="frame")
-            else:
-                pbar = tqdm(total=frame_total, desc="Detecting", unit="frame")
-
             if (video_index is not None) and (video_tot is not None):
                 desc = f"Detecting {video_index} of {video_tot}"
-                if disp_filename:
-                    desc += f" - {Path(input_video).name}"
-                    pbar.set_description_str(desc)
             else:
                 desc = "Detecting"
-                if disp_filename:
-                    desc += f" {Path(input_video).name}"
-                    pbar.set_description_str(desc)
+
+            if message is not None:
+                desc += f" {message}"
+
+            if tot_frames <= 0:
+                pbar = tqdm(desc=desc, unit="frame")
+            else:
+                pbar = tqdm(total=frame_total, desc=desc, unit="frame")
 
         results: list[dict] = []
         frame_idx = start_frame
@@ -508,7 +506,7 @@ class Detector:
         is_overwrite: bool = False,
         is_report: bool = True,
         verbose: bool = True,
-        disp_filename: bool = True,
+        message: str | None = None,
     ) -> list[str]:
         """Run detection on multiple videos and optionally write per-video output files.
 
@@ -527,8 +525,9 @@ class Detector:
             included in the returned list.
         verbose : bool, optional
             If True, prints progress messages. Default is True.
-        disp_filename: bool, optional
-            If True, prints file name in progress bar. Default is True.
+        message : str | None, optional
+            Optional message shown in each progress bar description.
+            Default is None.
 
         Returns
         -------
@@ -564,7 +563,7 @@ class Detector:
                 video_index=idx,
                 video_tot=total_videos,
                 verbose=verbose,
-                disp_filename=disp_filename,
+                message=message,
             )
 
             if iou_file is not None:

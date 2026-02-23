@@ -34,7 +34,7 @@ class_list = [0, 1, 2, 3, 5, 7]
 filter_class_iou(iou_file, iou_file_filtered, class_list)
 
 tracker = Tracker(cfg=Config.get_cfg_botsort())
-tracker.track(iou_file_filtered, track_file, video_file, video_index=1, total_videos=1)
+tracker.track(iou_file_filtered, track_file, video_file, video_index=1, video_tot=1)
 """
 labeler = Labeler()
 # labeler.draw_dets(input_video=video_file, output_video=label_file, det_file=det_file)

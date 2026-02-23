@@ -11,7 +11,7 @@ if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 from dnt.label.labeler import Labeler
-from dnt.track import ByteTrackConfig, Tracker
+from dnt.track import BoTSORTConfig, Tracker
 
 """
 input_video = "/mnt/d/videos/samples/ped_veh.mp4"
@@ -30,16 +30,16 @@ track_file = "/mnt/d/videos/sample/tracks/traffic_track.txt"
 label_file = "/mnt/d/videos/sample/labels/traffic_track.mp4"
 
 tic = time.time()
-cfg = ByteTrackConfig()
+cfg = BoTSORTConfig()
 
 print(cfg)
 tracker = Tracker(cfg, device="auto")
-tracker.track(det_file, track_file, input_video)
+tracker.track(det_file, track_file, input_video, message="vehicle", video_index=1, video_tot=2)
 
 toc = time.time()
 print("Time:", int(toc - tic))
 
 labeler = Labeler()
-labeler.draw_tracks(track_file=track_file, input_video=input_video, output_video=label_file, tail=100)
+# labeler.draw_tracks(track_file=track_file, input_video=input_video, output_video=label_file, tail=100)
 
 print("ok")
