@@ -2328,18 +2328,18 @@
 
     <div class="doc doc-contents ">
 
-        <p>Filter tracks by zones.
-Inputs:
-    tracks: tracks
-    zones: a list of polygons
-    method - 'include' (default), 'exclude'
-    ref_point - the reference point of a track bbox,
-        defalt is br, others - bl, bc, tl, tc, tr, cl, cc, cr
-    offset - the offset to ref_point, default is (0, 0)
-    video_index - video index
-    video_tot - total videos
-Return:
-    Filtered tracks</p>
+        <p>Filter tracks by polygon zones using an aggregate ID match.</p>
+<p>Inputs:
+    tracks - input tracks.
+    zones - polygons used for matching.
+    method - 'include' (default) or 'exclude'.
+    ref_point - bbox reference point (default: 'bc'); options include
+        bl, bc, br, tl, tc, tr, cl, cc, cr.
+    offset - offset applied to the reference point, default is (0, 0).
+    video_index - video index for progress display.
+    video_tot - total video count for progress display.</p>
+<p>Returns:
+    Filtered tracks.</p>
 
 
             <details class="mkdocstrings-source">
@@ -2461,7 +2461,10 @@ Return:
 <span class="normal">286</span>
 <span class="normal">287</span>
 <span class="normal">288</span>
-<span class="normal">289</span></pre></div></td><td class="code"><div><pre><span></span><code><span class="nd">@staticmethod</span>
+<span class="normal">289</span>
+<span class="normal">290</span>
+<span class="normal">291</span>
+<span class="normal">292</span></pre></div></td><td class="code"><div><pre><span></span><code><span class="nd">@staticmethod</span>
 <span class="k">def</span><span class="w"> </span><span class="nf">filter_tracks_by_zones_agg</span><span class="p">(</span>
     <span class="n">tracks</span><span class="p">:</span> <span class="n">pd</span><span class="o">.</span><span class="n">DataFrame</span><span class="p">,</span>
     <span class="n">zones</span><span class="p">:</span> <span class="n">geometry</span><span class="o">.</span><span class="n">MultiPolygon</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
@@ -2472,18 +2475,21 @@ Return:
     <span class="n">video_index</span><span class="p">:</span> <span class="nb">int</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
     <span class="n">video_tot</span><span class="p">:</span> <span class="nb">int</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
 <span class="p">)</span> <span class="o">-&gt;</span> <span class="n">pd</span><span class="o">.</span><span class="n">DataFrame</span><span class="p">:</span>
-<span class="w">    </span><span class="sd">&quot;&quot;&quot;Filter tracks by zones.</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Filter tracks by polygon zones using an aggregate ID match.</span>
+
 <span class="sd">    Inputs:</span>
-<span class="sd">        tracks: tracks</span>
-<span class="sd">        zones: a list of polygons</span>
-<span class="sd">        method - &#39;include&#39; (default), &#39;exclude&#39;</span>
-<span class="sd">        ref_point - the reference point of a track bbox,</span>
-<span class="sd">            defalt is br, others - bl, bc, tl, tc, tr, cl, cc, cr</span>
-<span class="sd">        offset - the offset to ref_point, default is (0, 0)</span>
-<span class="sd">        video_index - video index</span>
-<span class="sd">        video_tot - total videos</span>
-<span class="sd">    Return:</span>
-<span class="sd">        Filtered tracks</span>
+<span class="sd">        tracks - input tracks.</span>
+<span class="sd">        zones - polygons used for matching.</span>
+<span class="sd">        method - &#39;include&#39; (default) or &#39;exclude&#39;.</span>
+<span class="sd">        ref_point - bbox reference point (default: &#39;bc&#39;); options include</span>
+<span class="sd">            bl, bc, br, tl, tc, tr, cl, cc, cr.</span>
+<span class="sd">        offset - offset applied to the reference point, default is (0, 0).</span>
+<span class="sd">        video_index - video index for progress display.</span>
+<span class="sd">        video_tot - total video count for progress display.</span>
+
+<span class="sd">    Returns:</span>
+<span class="sd">        Filtered tracks.</span>
+
 <span class="sd">    &quot;&quot;&quot;</span>
     <span class="k">if</span> <span class="n">offset</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
         <span class="n">offset</span> <span class="o">=</span> <span class="p">(</span><span class="mi">0</span><span class="p">,</span> <span class="mi">0</span><span class="p">)</span>
@@ -2611,25 +2617,22 @@ Return:
 
     <div class="doc doc-contents ">
 
-        <p>Filter tracks by zones.
-Inputs:
-    tracks - tracks
-    zones - zones (polygon)
-    method - 'include' (default) include the tracks if they are within the zones; 'exclude' exclude the tracks if they are within the zones
-    ref_point - the reference point of a track bbox, defalt is bottom_point, center_point, left_up, right_up, left_buttom, right_buttom
-    offset - the offset to ref_point, default is (0, 0)
-    video_index - video index
-    video_tot - total videos
-Return:
-    Filtered tracks</p>
+        <p>Filter frame rows by polygon zones.</p>
+<p>Inputs:
+    tracks - input tracks.
+    zones - polygons used for matching.
+    method - 'include' (default) keeps matching rows; 'exclude' drops them.
+    ref_point - bbox reference point (default: 'bc').
+    offset - offset applied to the reference point, default is (0, 0).
+    video_index - video index for progress display.
+    video_tot - total video count for progress display.</p>
+<p>Returns:
+    Filtered frame rows.</p>
 
 
             <details class="mkdocstrings-source">
               <summary>Source code in <code>src/dnt/filter/filter.py</code></summary>
-              <div class="highlight"><table class="highlighttable"><tr><td class="linenos"><div class="linenodiv"><pre><span></span><span class="normal">291</span>
-<span class="normal">292</span>
-<span class="normal">293</span>
-<span class="normal">294</span>
+              <div class="highlight"><table class="highlighttable"><tr><td class="linenos"><div class="linenodiv"><pre><span></span><span class="normal">294</span>
 <span class="normal">295</span>
 <span class="normal">296</span>
 <span class="normal">297</span>
@@ -2742,7 +2745,13 @@ Return:
 <span class="normal">404</span>
 <span class="normal">405</span>
 <span class="normal">406</span>
-<span class="normal">407</span></pre></div></td><td class="code"><div><pre><span></span><code><span class="nd">@staticmethod</span>
+<span class="normal">407</span>
+<span class="normal">408</span>
+<span class="normal">409</span>
+<span class="normal">410</span>
+<span class="normal">411</span>
+<span class="normal">412</span>
+<span class="normal">413</span></pre></div></td><td class="code"><div><pre><span></span><code><span class="nd">@staticmethod</span>
 <span class="k">def</span><span class="w"> </span><span class="nf">filter_frames_by_zones_agg</span><span class="p">(</span>
     <span class="n">tracks</span><span class="p">:</span> <span class="n">pd</span><span class="o">.</span><span class="n">DataFrame</span><span class="p">,</span>
     <span class="n">zones</span><span class="p">:</span> <span class="n">geometry</span><span class="o">.</span><span class="n">MultiPolygon</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
@@ -2753,17 +2762,20 @@ Return:
     <span class="n">video_index</span><span class="p">:</span> <span class="nb">int</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
     <span class="n">video_tot</span><span class="p">:</span> <span class="nb">int</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
 <span class="p">)</span> <span class="o">-&gt;</span> <span class="n">pd</span><span class="o">.</span><span class="n">DataFrame</span><span class="p">:</span>
-<span class="w">    </span><span class="sd">&quot;&quot;&quot;Filter tracks by zones.</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Filter frame rows by polygon zones.</span>
+
 <span class="sd">    Inputs:</span>
-<span class="sd">        tracks - tracks</span>
-<span class="sd">        zones - zones (polygon)</span>
-<span class="sd">        method - &#39;include&#39; (default) include the tracks if they are within the zones; &#39;exclude&#39; exclude the tracks if they are within the zones</span>
-<span class="sd">        ref_point - the reference point of a track bbox, defalt is bottom_point, center_point, left_up, right_up, left_buttom, right_buttom</span>
-<span class="sd">        offset - the offset to ref_point, default is (0, 0)</span>
-<span class="sd">        video_index - video index</span>
-<span class="sd">        video_tot - total videos</span>
-<span class="sd">    Return:</span>
-<span class="sd">        Filtered tracks</span>
+<span class="sd">        tracks - input tracks.</span>
+<span class="sd">        zones - polygons used for matching.</span>
+<span class="sd">        method - &#39;include&#39; (default) keeps matching rows; &#39;exclude&#39; drops them.</span>
+<span class="sd">        ref_point - bbox reference point (default: &#39;bc&#39;).</span>
+<span class="sd">        offset - offset applied to the reference point, default is (0, 0).</span>
+<span class="sd">        video_index - video index for progress display.</span>
+<span class="sd">        video_tot - total video count for progress display.</span>
+
+<span class="sd">    Returns:</span>
+<span class="sd">        Filtered frame rows.</span>
+
 <span class="sd">    &quot;&quot;&quot;</span>
     <span class="k">if</span> <span class="n">offset</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
         <span class="n">offset</span> <span class="o">=</span> <span class="p">(</span><span class="mi">0</span><span class="p">,</span> <span class="mi">0</span><span class="p">)</span>
@@ -2900,7 +2912,7 @@ Return:
              'filter' - filter tracks within zones
              'label' - label tracks with zone index
     ref_point - the reference point of a track bbox,
-                br - buttom_right,
+                br - bottom_right,
                 bl - bottom_left
                 bc - bottom_center
                 cc - center_point,
@@ -2910,23 +2922,16 @@ Return:
                 tl - top_left,
                 tr - top_right,
     offset - the offset to ref_point, default is (0, 0)
-    aggregate - combine outputs to one dataframe, add zone column
-    zone_name - if aggregate, the field name of zone variable, default is 'zone'
+    zone_name - field name used when method='label', default is 'zone'
     video_index - video index
     video_tot - total videos
-Return:
+Returns:
     Filtered tracks</p>
 
 
             <details class="mkdocstrings-source">
               <summary>Source code in <code>src/dnt/filter/filter.py</code></summary>
-              <div class="highlight"><table class="highlighttable"><tr><td class="linenos"><div class="linenodiv"><pre><span></span><span class="normal">409</span>
-<span class="normal">410</span>
-<span class="normal">411</span>
-<span class="normal">412</span>
-<span class="normal">413</span>
-<span class="normal">414</span>
-<span class="normal">415</span>
+              <div class="highlight"><table class="highlighttable"><tr><td class="linenos"><div class="linenodiv"><pre><span></span><span class="normal">415</span>
 <span class="normal">416</span>
 <span class="normal">417</span>
 <span class="normal">418</span>
@@ -3033,7 +3038,12 @@ Return:
 <span class="normal">519</span>
 <span class="normal">520</span>
 <span class="normal">521</span>
-<span class="normal">522</span></pre></div></td><td class="code"><div><pre><span></span><code><span class="nd">@staticmethod</span>
+<span class="normal">522</span>
+<span class="normal">523</span>
+<span class="normal">524</span>
+<span class="normal">525</span>
+<span class="normal">526</span>
+<span class="normal">527</span></pre></div></td><td class="code"><div><pre><span></span><code><span class="nd">@staticmethod</span>
 <span class="k">def</span><span class="w"> </span><span class="nf">filter_tracks_by_zones</span><span class="p">(</span>
     <span class="n">tracks</span><span class="p">:</span> <span class="n">pd</span><span class="o">.</span><span class="n">DataFrame</span><span class="p">,</span>
     <span class="n">zones</span><span class="p">:</span> <span class="nb">list</span><span class="p">[</span><span class="n">Polygon</span><span class="p">]</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
@@ -3054,7 +3064,7 @@ Return:
 <span class="sd">                 &#39;filter&#39; - filter tracks within zones</span>
 <span class="sd">                 &#39;label&#39; - label tracks with zone index</span>
 <span class="sd">        ref_point - the reference point of a track bbox,</span>
-<span class="sd">                    br - buttom_right,</span>
+<span class="sd">                    br - bottom_right,</span>
 <span class="sd">                    bl - bottom_left</span>
 <span class="sd">                    bc - bottom_center</span>
 <span class="sd">                    cc - center_point,</span>
@@ -3064,11 +3074,10 @@ Return:
 <span class="sd">                    tl - top_left,</span>
 <span class="sd">                    tr - top_right,</span>
 <span class="sd">        offset - the offset to ref_point, default is (0, 0)</span>
-<span class="sd">        aggregate - combine outputs to one dataframe, add zone column</span>
-<span class="sd">        zone_name - if aggregate, the field name of zone variable, default is &#39;zone&#39;</span>
+<span class="sd">        zone_name - field name used when method=&#39;label&#39;, default is &#39;zone&#39;</span>
 <span class="sd">        video_index - video index</span>
 <span class="sd">        video_tot - total videos</span>
-<span class="sd">    Return:</span>
+<span class="sd">    Returns:</span>
 <span class="sd">        Filtered tracks</span>
 <span class="sd">    &quot;&quot;&quot;</span>
     <span class="k">if</span> <span class="n">offset</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
@@ -3184,18 +3193,13 @@ Return:
         the lines, exclude - exclude tracks crossing the lines
     video_index - the index of video for processing
     video_tot - the total number of videos
-Return:
+Returns:
     a DataFrame of [FRAME, TRACK_ID, TOPX, TOPY, WIDTH, LENGTH, RESERVED, RESERVED, RESERVED]</p>
 
 
             <details class="mkdocstrings-source">
               <summary>Source code in <code>src/dnt/filter/filter.py</code></summary>
-              <div class="highlight"><table class="highlighttable"><tr><td class="linenos"><div class="linenodiv"><pre><span></span><span class="normal">524</span>
-<span class="normal">525</span>
-<span class="normal">526</span>
-<span class="normal">527</span>
-<span class="normal">528</span>
-<span class="normal">529</span>
+              <div class="highlight"><table class="highlighttable"><tr><td class="linenos"><div class="linenodiv"><pre><span></span><span class="normal">529</span>
 <span class="normal">530</span>
 <span class="normal">531</span>
 <span class="normal">532</span>
@@ -3249,7 +3253,12 @@ Return:
 <span class="normal">580</span>
 <span class="normal">581</span>
 <span class="normal">582</span>
-<span class="normal">583</span></pre></div></td><td class="code"><div><pre><span></span><code><span class="nd">@staticmethod</span>
+<span class="normal">583</span>
+<span class="normal">584</span>
+<span class="normal">585</span>
+<span class="normal">586</span>
+<span class="normal">587</span>
+<span class="normal">588</span></pre></div></td><td class="code"><div><pre><span></span><code><span class="nd">@staticmethod</span>
 <span class="k">def</span><span class="w"> </span><span class="nf">filter_tracks_by_lines</span><span class="p">(</span>
     <span class="n">tracks</span><span class="p">:</span> <span class="n">pd</span><span class="o">.</span><span class="n">DataFrame</span><span class="p">,</span>
     <span class="n">lines</span><span class="p">:</span> <span class="nb">list</span><span class="p">[</span><span class="n">LineString</span><span class="p">]</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
@@ -3266,7 +3275,7 @@ Return:
 <span class="sd">            the lines, exclude - exclude tracks crossing the lines</span>
 <span class="sd">        video_index - the index of video for processing</span>
 <span class="sd">        video_tot - the total number of videos</span>
-<span class="sd">    Return:</span>
+<span class="sd">    Returns:</span>
 <span class="sd">        a DataFrame of [FRAME, TRACK_ID, TOPX, TOPY, WIDTH, LENGTH, RESERVED, RESERVED, RESERVED]</span>
 <span class="sd">    &quot;&quot;&quot;</span>
     <span class="n">track_ids</span> <span class="o">=</span> <span class="n">tracks</span><span class="p">[</span><span class="mi">1</span><span class="p">]</span><span class="o">.</span><span class="n">unique</span><span class="p">()</span>
@@ -3348,25 +3357,20 @@ Return:
     lines - a list of LineString
     method - filtering method, include (default) - including tracks crossing the
         lines, exclude - exclude tracks crossing the lines
-    tolerance - if a bbox intesect the reference lines of (number of lanes -
+    tolerance - if a bbox intersects the reference lines of (number of lanes -
         tolerance), it is hit. default is 0.
     force_line_indexes: the line indexes that a bbox must intersect for matching
-    bbox_size - the size of detection bbox, default is 0 - the orginal bbox
+    bbox_size - the size of detection bbox, default is 0 - the original bbox
     video_index - the index of video for processing
     video_tot - the total number of videos
-Return:
+Returns:
     a DataFrame of [FRAME, TRACK_ID, TOPX, TOPY, WIDTH, LENGTH, RESERVED,
         RESERVED, RESERVED]</p>
 
 
             <details class="mkdocstrings-source">
               <summary>Source code in <code>src/dnt/filter/filter.py</code></summary>
-              <div class="highlight"><table class="highlighttable"><tr><td class="linenos"><div class="linenodiv"><pre><span></span><span class="normal">585</span>
-<span class="normal">586</span>
-<span class="normal">587</span>
-<span class="normal">588</span>
-<span class="normal">589</span>
-<span class="normal">590</span>
+              <div class="highlight"><table class="highlighttable"><tr><td class="linenos"><div class="linenodiv"><pre><span></span><span class="normal">590</span>
 <span class="normal">591</span>
 <span class="normal">592</span>
 <span class="normal">593</span>
@@ -3454,7 +3458,12 @@ Return:
 <span class="normal">675</span>
 <span class="normal">676</span>
 <span class="normal">677</span>
-<span class="normal">678</span></pre></div></td><td class="code"><div><pre><span></span><code><span class="nd">@staticmethod</span>
+<span class="normal">678</span>
+<span class="normal">679</span>
+<span class="normal">680</span>
+<span class="normal">681</span>
+<span class="normal">682</span>
+<span class="normal">683</span></pre></div></td><td class="code"><div><pre><span></span><code><span class="nd">@staticmethod</span>
 <span class="k">def</span><span class="w"> </span><span class="nf">filter_tracks_by_lines_v2</span><span class="p">(</span>
     <span class="n">tracks</span><span class="p">:</span> <span class="n">pd</span><span class="o">.</span><span class="n">DataFrame</span><span class="p">,</span>
     <span class="n">lines</span><span class="p">:</span> <span class="nb">list</span><span class="p">[</span><span class="n">LineString</span><span class="p">]</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
@@ -3473,13 +3482,13 @@ Return:
 <span class="sd">        lines - a list of LineString</span>
 <span class="sd">        method - filtering method, include (default) - including tracks crossing the</span>
 <span class="sd">            lines, exclude - exclude tracks crossing the lines</span>
-<span class="sd">        tolerance - if a bbox intesect the reference lines of (number of lanes -</span>
+<span class="sd">        tolerance - if a bbox intersects the reference lines of (number of lanes -</span>
 <span class="sd">            tolerance), it is hit. default is 0.</span>
 <span class="sd">        force_line_indexes: the line indexes that a bbox must intersect for matching</span>
-<span class="sd">        bbox_size - the size of detection bbox, default is 0 - the orginal bbox</span>
+<span class="sd">        bbox_size - the size of detection bbox, default is 0 - the original bbox</span>
 <span class="sd">        video_index - the index of video for processing</span>
 <span class="sd">        video_tot - the total number of videos</span>
-<span class="sd">    Return:</span>
+<span class="sd">    Returns:</span>
 <span class="sd">        a DataFrame of [FRAME, TRACK_ID, TOPX, TOPY, WIDTH, LENGTH, RESERVED,</span>
 <span class="sd">            RESERVED, RESERVED]</span>
 <span class="sd">    &quot;&quot;&quot;</span>
@@ -3593,12 +3602,7 @@ Return:
 
             <details class="mkdocstrings-source">
               <summary>Source code in <code>src/dnt/filter/filter.py</code></summary>
-              <div class="highlight"><table class="highlighttable"><tr><td class="linenos"><div class="linenodiv"><pre><span></span><span class="normal">680</span>
-<span class="normal">681</span>
-<span class="normal">682</span>
-<span class="normal">683</span>
-<span class="normal">684</span>
-<span class="normal">685</span>
+              <div class="highlight"><table class="highlighttable"><tr><td class="linenos"><div class="linenodiv"><pre><span></span><span class="normal">685</span>
 <span class="normal">686</span>
 <span class="normal">687</span>
 <span class="normal">688</span>
@@ -3647,7 +3651,12 @@ Return:
 <span class="normal">731</span>
 <span class="normal">732</span>
 <span class="normal">733</span>
-<span class="normal">734</span></pre></div></td><td class="code"><div><pre><span></span><code><span class="nd">@staticmethod</span>
+<span class="normal">734</span>
+<span class="normal">735</span>
+<span class="normal">736</span>
+<span class="normal">737</span>
+<span class="normal">738</span>
+<span class="normal">739</span></pre></div></td><td class="code"><div><pre><span></span><code><span class="nd">@staticmethod</span>
 <span class="k">def</span><span class="w"> </span><span class="nf">interpolate_tracks_rts</span><span class="p">(</span>
     <span class="n">tracks</span><span class="p">:</span> <span class="n">pd</span><span class="o">.</span><span class="n">DataFrame</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
     <span class="n">track_file</span><span class="p">:</span> <span class="nb">str</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>

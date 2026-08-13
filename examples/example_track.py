@@ -24,6 +24,7 @@ det_file = "/mnt/d/videos/samples/dets/traffic_iou.txt"
 track_file = "/mnt/d/videos/samples/tracks/traffic_track_dsort.txt"
 label_video = "/mnt/d/videos/samples/labels/traffic_track.mp4"
 """
+
 input_video = "/mnt/d/videos/sample/traffic.mp4"
 det_file = "/mnt/d/videos/sample/dets/traffic_det.txt"
 track_file = "/mnt/d/videos/sample/tracks/traffic_track.txt"
@@ -40,6 +41,6 @@ toc = time.time()
 print("Time:", int(toc - tic))
 
 labeler = Labeler()
-# labeler.draw_tracks(track_file=track_file, input_video=input_video, output_video=label_file, tail=100)
+labeler.draw_tracks(track_file=track_file, input_video=input_video, output_video=label_file)
 
 print("ok")
