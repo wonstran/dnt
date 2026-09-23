@@ -9,7 +9,7 @@ import numpy as np
 import pandas as pd
 from tqdm import tqdm
 
-from ..detect import Detector
+from ..detect import Detector, DetectorModel
 from ..engine.iob import iobs
 
 
@@ -46,10 +46,10 @@ class ReClass:
 
     def __init__(
         self,
+        model: DetectorModel | str = DetectorModel.RTDETRx,
+        weights: str | None = None,
         num_frames: int = 25,
         threshold: float = 0.75,
-        model: str = "rtdetr",
-        weights: str = "x",
         device: str = "auto",
         default_class: int = 0,
         match_class: list | None = None,
@@ -58,14 +58,14 @@ class ReClass:
 
         Parameters
         ----------
+        model : DetectorModel or str
+            Detection model (DetectorModel or its name), default RT-DETR-x
+        weights : str or None
+            Optional custom weights path passed to Detector, default None
         num_frames : int
             Number of frames to consider for re-classification, default 25
         threshold : float
             Threshold for matching, default 0.75
-        model : str
-            Detection model to use, default 'rtdetr'
-        weights : str
-            Weights for the detection model, default 'x'
         device : str
             Device to use for detection, default 'auto'
         default_class : int
@@ -74,7 +74,7 @@ class ReClass:
             List of classes to match, default [1, 36] (bicycle, skateboard/scooter)
 
         """
-        self.detector = Detector(model=model, device=device)
+        self.detector = Detector(model=model, weights=weights, device=device)
         self.num_frames = num_frames
         self.threshold = threshold
         self.default_class = default_class

@@ -68,6 +68,18 @@ RTDETR_MODELS = {
 }
 
 
+def _coerce_model(model: "DetectorModel | str") -> DetectorModel:
+    """Accept a DetectorModel, its value ('rtdetr-x.pt'), its stem ('rtdetr-x') or its name ('RTDETRx')."""
+    if isinstance(model, DetectorModel):
+        return model
+    text = str(model).strip().lower()
+    for candidate in DetectorModel:
+        if text in {candidate.value.lower(), candidate.value.lower().removesuffix(".pt"), candidate.name.lower()}:
+            return candidate
+    valid = [m.value.removesuffix(".pt") for m in DetectorModel]
+    raise ValueError(f"Unknown detector model {model!r}. Valid: {valid}")
+
+
 class Detector:
     """A wrapper around Ultralytics detection models for running object detection on
     videos and selected frames.
@@ -124,7 +136,7 @@ class Detector:
 
     def __init__(
         self,
-        model: DetectorModel = DetectorModel.YOLO26x,
+        model: DetectorModel | str = DetectorModel.YOLO26x,
         weights: str | None = None,
         conf: float = 0.25,
         nms: float = 0.7,
@@ -154,6 +166,8 @@ class Detector:
             Whether to use half precision (GPU only). Default is False.
 
         """
+        model = _coerce_model(model)
+
         # Load model
         cwd = Path(__file__).parent.absolute()
         model_dir = cwd / "models"
@@ -182,6 +196,18 @@ class Detector:
         self.device = resolve_device(device)
         # half precision only makes sense on CUDA (any index)
         self.half = half_allowed(self.device, half)
+
+    def _results_to_df(self, results: list[dict]) -> pd.DataFrame:
+        """Convert per-box dicts (frame,res,x,y,x2,y2,conf,class) to DET_FIELDS with detect()'s rounding."""
+        if not results:
+            return pd.DataFrame(columns=self.DET_FIELDS)
+        df = pd.DataFrame(results, columns=["frame", "res", "x", "y", "x2", "y2", "conf", "class"])
+        df["w"] = (df["x2"] - df["x"]).astype(int)
+        df["h"] = (df["y2"] - df["y"]).astype(int)
+        df["x"] = df["x"].astype(int)
+        df["y"] = df["y"].astype(int)
+        df["conf"] = df["conf"].round(2)
+        return df[self.DET_FIELDS].reset_index(drop=True)
 
     def detect(
         self,
@@ -352,14 +378,7 @@ class Detector:
                 empty_df.to_csv(iou_file, index=False, header=False)
             return empty_df
 
-        else:
-            results_df = pd.DataFrame(results, columns=["frame", "res", "x", "y", "x2", "y2", "conf", "class"])
-            results_df["w"] = (results_df["x2"] - results_df["x"]).astype(int)
-            results_df["h"] = (results_df["y2"] - results_df["y"]).astype(int)
-            results_df["x"] = results_df["x"].astype(int)
-            results_df["y"] = results_df["y"].astype(int)
-            results_df["conf"] = results_df["conf"].round(2)
-            results_df = results_df[self.DET_FIELDS].reset_index(drop=True)
+        results_df = self._results_to_df(results)
 
         if iou_file:
             folder = Path(iou_file).parent
@@ -461,23 +480,7 @@ class Detector:
             pbar.close()
         cap.release()
 
-        # no detections at all
-
-        if not results:
-            return pd.DataFrame(columns=self.DET_FIELDS)
-
-        df = pd.DataFrame(results)
-        # compute width/height and round
-        df["w"] = (df["x2"] - df["x"]).round(0)
-        df["h"] = (df["y2"] - df["y"]).round(0)
-        df["x"] = df["x"].round(1)
-        df["y"] = df["y"].round(1)
-        df["conf"] = df["conf"].round(2)
-        df["class"] = df["class"].round(0).astype(int)
-
-        df = df[self.DET_FIELDS].reset_index(drop=True)
-
-        return df
+        return self._results_to_df(results)
 
     def detect_batch(
         self,
