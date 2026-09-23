@@ -1,0 +1,10 @@
+# Reviewed 0.3.2.4 defects that exempt a golden case from byte comparison (spec §5.3).
+# Add an entry ONLY in a separate, maintainer-reviewed commit, after diagnosing the failure as a genuine
+# 0.3.2.4 defect (not environment, data or weights). Required fields (validated by tools/golden_cases.py):
+#   id, tracker (case id), exception_type, message_regex (full match), raised_at ("file.py:function" of the
+#   innermost frame), root_cause, reviewed_by, reviewed_on (YYYY-MM-DD),
+#   evidence (repo-relative path that must resolve inside tests/golden/defects/, e.g. the saved
+#   unexpected_<case>.txt traceback; absolute paths, '..' escapes and symlinks leaving it are rejected).
+# Any edit to this file after golden generation fails the golden tests until tools/make_golden.py is rerun.
+# make_golden.py never writes this file.
+defects: []
