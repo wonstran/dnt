@@ -11,7 +11,6 @@ import sys
 import warnings
 from dataclasses import MISSING, asdict, dataclass, field, fields
 from enum import Enum, StrEnum
-from inspect import signature
 from pathlib import Path
 from typing import Any, ClassVar
 
@@ -20,6 +19,9 @@ import numpy as np
 import pandas as pd
 import yaml
 from tqdm import tqdm
+
+from .._device import half_allowed, resolve_device, to_boxmot_device
+from . import _boxmot_compat as bx
 
 # ensure local imports work if this is run as a script
 sys.path.append(os.path.dirname(__file__))
@@ -668,6 +670,38 @@ BoxMOTModelParams = (
 )
 
 
+_CONFIG_CLASS_NAMES = {
+    "botsort": "BoTSORTConfig", "boosttrack": "BoostTrackConfig", "bytetrack": "ByteTrackConfig",
+    "ocsort": "OCSORTConfig", "strongsort": "StrongSORTConfig", "deepocsort": "DeepOCSORTConfig",
+    "hybridsort": "HybridSORTConfig", "sfsort": "SFSORTConfig",
+}
+
+
+def _plan_tracker(
+    config: MOTBaseConfig, *, device: str | None = "auto", half: bool | None = False
+) -> bx.TrackerBuild:
+    """Resolve `config` into BoxMOT `create_tracker` arguments (spec §2.3)."""
+    return bx.build_tracker_args(
+        config_name=type(config).__name__,
+        model=config.model.value,
+        tuning=config.tuning_values(),
+        per_class=config.per_class,
+        reid_weights=getattr(config, "reid_weights", None),
+        extra_kwargs=dict(config.extra_kwargs),
+        tracker_device=device,
+        tracker_half=half,
+        default_reid_weight=Tracker.DEFAULT_REID_WEIGHT,
+        config_names=_CONFIG_CLASS_NAMES,
+    )
+
+
+def _build_tracker_args(
+    config: MOTBaseConfig, *, device: str | None = "auto", half: bool | None = False
+) -> dict:
+    """Return the `evolve_param_dict` dnt passes to BoxMOT for `config`."""
+    return _plan_tracker(config, device=device, half=half).evolve_param_dict
+
+
 class Tracker:
     """Unified interface for BoxMOT tracking and track post-processing.
 
@@ -931,71 +965,25 @@ class Tracker:
         device: str | None = None,
         half: bool | None = None,
     ) -> Any:
-        """Build a BoxMOT tracker instance from a model enum and typed config."""
+        """Build a BoxMOT tracker instance from a typed config (spec §2.3)."""
         _configure_boxmot_logging(boxmot_verbose)
         _patch_boxmot_requirements_installer()
-
         try:
-            # BoxMOT API moved across versions:
-            # - newer: boxmot.create_tracker / boxmot.trackers.tracker_zoo.create_tracker
-            # - older: boxmot.tracker_zoo.create_tracker
-            try:
-                from boxmot import create_tracker  # type: ignore
-            except ImportError:
-                try:
-                    from boxmot.trackers.tracker_zoo import create_tracker  # type: ignore
-                except ImportError:
-                    from boxmot.tracker_zoo import create_tracker  # type: ignore
+            from boxmot import create_tracker  # type: ignore
         except ImportError as exc:
-            msg = "BoxMOT support requires the `boxmot` package. Install it before using `Tracker`."
+            msg = "BoxMOT support requires `boxmot==16.0.11`. Install it before using `Tracker`."
             raise ImportError(msg) from exc
 
-        tracker_kwargs = {"tracker_type": model.value}
-        tracker_kwargs.update(config.to_kwargs())
-        if device is not None:
-            tracker_kwargs["device"] = device
-        if half is not None:
-            tracker_kwargs["half"] = half
-        tracker_kwargs["device"] = Tracker._resolve_boxmot_device(tracker_kwargs.get("device"))
-        if tracker_kwargs.get("reid_weights") is None and model in {
-            MOTModels.BOTSORT,
-            MOTModels.BOOSTTRACK,
-            MOTModels.STRONGSORT,
-            MOTModels.DEEPOCSORT,
-            MOTModels.HYBRIDSORT,
-        }:
-            tracker_kwargs["reid_weights"] = Tracker.DEFAULT_REID_WEIGHT
-
-        tracker_kwargs["reid_weights"] = Tracker._resolve_reid_weights_path(tracker_kwargs.get("reid_weights"))
-
-        sig = signature(create_tracker)
-        filtered_kwargs = {
-            key: value for key, value in tracker_kwargs.items() if key in sig.parameters and value is not None
-        }
-        return create_tracker(**filtered_kwargs)
-
-    @staticmethod
-    def _resolve_boxmot_device(device: Any) -> str | None:
-        """Normalize device value for BoxMOT and avoid invalid `device='auto'`."""
-        if device is None:
-            return None
-
-        device_str = str(device).strip()
-        if device_str.lower() != "auto":
-            return device_str
-
-        if os.environ.get("CUDA_VISIBLE_DEVICES", "").strip().lower() == "auto":
-            os.environ.pop("CUDA_VISIBLE_DEVICES", None)
-
-        try:
-            import torch
-
-            if torch.cuda.is_available() and torch.cuda.device_count() > 0:
-                return "0"
-        except Exception:
-            pass
-
-        return "cpu"
+        plan = _plan_tracker(config, device=device, half=half)
+        resolved = resolve_device(plan.device)
+        return create_tracker(
+            tracker_type=plan.tracker_type,
+            reid_weights=Tracker._resolve_reid_weights_path(plan.reid_weights),
+            device=to_boxmot_device(resolved),
+            half=half_allowed(resolved, bool(plan.half)),
+            per_class=plan.per_class,
+            evolve_param_dict=plan.evolve_param_dict,
+        )
 
     @staticmethod
     def _resolve_reid_weights_path(reid_weights: ReIDWeights | str | None) -> str | None:
