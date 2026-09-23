@@ -103,3 +103,13 @@ select = [
 ]
 
 [tool.ruff.format]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-m 'not model and not golden and not slow'"
+markers = [
+  "model: downloads real model weights (opt-in)",
+  "golden: needs DNT_REF_CLIP and DNT_GOLDEN_DIR (opt-in)",
+  "slow: builds and installs the wheel (CI wheel job)",
+]
+filterwarnings = ["error::FutureWarning:dnt.*"]
