@@ -25,7 +25,7 @@ label_dir = "/mnt/d/videos/sample/labels/track_clips"
 detector = Detector(model=DetectorModel.RTDETRx, device="auto")
 # detector.detect(input_video, det_file)
 
-cfg = BoTSORTConfig(ReIDWeights.CLIP_VEHICLEID)
+cfg = BoTSORTConfig(reid_weights=ReIDWeights.CLIP_VEHICLEID)
 tracker = Tracker(cfg, device="auto")
 tracks = tracker.track(det_file, track_file, input_video)
 
