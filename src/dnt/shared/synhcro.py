@@ -19,7 +19,7 @@ class Synchronizer:
         self,
         videos: List[str],
         ref_frame: int,
-        ref_time: int,  # unix ms
+        ref_time: int | float,  # unix ms
         ref_timezone: str = "US/Eastern",
         offsets: Optional[List[int]] = None,  # offsets in FRAMES
     ) -> None:
@@ -29,7 +29,7 @@ class Synchronizer:
             ref_frame: Reference frame number.
             ref_time: Reference time in unix ms.
             ref_timezone: Timezone string for reference time.
-            offsets: Optional list of frame offsets for each video.
+            offsets: optional list of integers, one per video, in frames of that video. offsets[0] must be 0, because video 0 is placed by ref_frame and ref_time, and ref_time is the wall-clock time at ref_frame of video 0. For i ≥ 1, video i starts offsets[i] frames after the end of video i−1; positive values add a gap and negative values add an overlap. Offsets are relative to the previous video, not cumulative.
         """
         self.videos = videos
         self.ref_frame = int(ref_frame)
@@ -55,12 +55,20 @@ class Synchronizer:
         offsets = self.offsets if self.offsets is not None else [0] * len(self.videos)
         if len(offsets) != len(self.videos):
             raise ValueError(f"offsets length ({len(offsets)}) must match videos length ({len(self.videos)})")
+        for o in offsets:
+            if isinstance(o, bool) or not isinstance(o, (int, np.integer)):
+                raise ValueError(f"offsets must be integers (frames of each video); got {o!r}")
+        if offsets[0] != 0:
+            raise ValueError("offsets[0] must be 0; position video 0 with ref_frame/ref_time")
 
         results = []
         ref_frame = self.ref_frame
-        ref_time = self.ref_time  # ms
+        ref_time: float = self.ref_time  # ms; carried unrounded between videos (spec §3.1)
 
         for i, video in enumerate(self.videos):
+            if i > 0:
+                # T_i(f) = E_{i-1} + (f + o_i) * p_i  ==  add_unix_time(ref_frame=-o_i, ref_time=E_{i-1})
+                ref_frame = -int(offsets[i])
             df, fps = self.add_unix_time(
                 video, ref_frame, ref_time, message=message, video_index=i + 1, video_tot=len(self.videos)
             )
@@ -77,17 +85,11 @@ class Synchronizer:
                 basename = os.path.splitext(os.path.basename(video))[0]
                 df.to_csv(os.path.join(output_path, f"{basename}_time.csv"), index=False)
 
-            # Prepare next video's reference time
             if i < len(self.videos) - 1:
-                next_video = self.videos[i + 1]
-                next_fps = Detector.get_fps(next_video)
-                if next_fps <= 0:
-                    raise ValueError(f"fps is invalid for {next_video}")
-
                 if df.empty:
                     raise ValueError(f"DataFrame for video {video} is empty; cannot determine last unix_time.")
-
-                ref_frame = 0
+                # E_i = T_i(n_i): one frame after the last frame of video i
+                ref_time = ref_time + (len(df) - ref_frame) * (1000.0 / fps)
 
         if not results:
             return pd.DataFrame(columns=["frame", "unix_time", "video"] + (["local_time"] if local else []))
@@ -98,7 +100,7 @@ class Synchronizer:
     def add_unix_time(
         video: str,
         ref_frame: int,
-        ref_time: int,
+        ref_time: int | float,
         video_index: Optional[int] = None,
         video_tot: Optional[int] = None,
         message: bool = False,
@@ -112,7 +114,7 @@ class Synchronizer:
             Video file path.
         ref_frame : int
             Reference frame number.
-        ref_time : int
+        ref_time : int | float
             Reference time in unix milliseconds.
         video_index : int, optional
             Index of the video for progress messages (default is None).
@@ -132,6 +134,8 @@ class Synchronizer:
             If fps is zero or negative, or if video frame count is invalid.
         """
         fps = Detector.get_fps(video)
+        if fps <= 0:
+            raise ValueError(f"fps is invalid for {video}")
         ms_per_frame = 1000.0 / fps
         n_frames = int(Detector.get_frames(video))
         frames = np.arange(n_frames, dtype=np.int64)
