@@ -24,9 +24,6 @@ from tqdm import tqdm
 from .._device import half_allowed, resolve_device, to_boxmot_device
 from . import _boxmot_compat as bx
 
-# ensure local imports work if this is run as a script
-sys.path.append(os.path.dirname(__file__))
-
 
 def _configure_boxmot_logging(boxmot_verbose: bool) -> None:
     """Configure BoxMOT logger verbosity.

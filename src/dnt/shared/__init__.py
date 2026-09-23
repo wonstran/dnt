@@ -1,5 +1,1 @@
-import os
-import sys
-
-sys.path.append(os.path.dirname(__file__))
-from .synhcro import Synchronizer
+from .synhcro import Synchronizer as Synchronizer

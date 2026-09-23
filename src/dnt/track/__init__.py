@@ -3,11 +3,6 @@
 This module provides tracking utilities and classes for object detection.
 """
 
-import os
-import sys
-
-sys.path.append(os.path.join(os.path.dirname(__file__)))
-
 try:
     from .re_class import ReClass as ReClass
 except ModuleNotFoundError:

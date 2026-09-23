@@ -9,8 +9,9 @@ import torch.nn as nn
 import torchvision.models as models
 import torchvision.transforms as transforms
 from PIL import Image
-from shared.download import download_file
 from tqdm import tqdm
+
+from ...shared.download import download_file
 
 
 class Model(nn.Module):

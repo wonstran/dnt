@@ -9,7 +9,6 @@ import itertools
 import os
 import random
 import subprocess
-import sys
 from ast import literal_eval
 from enum import Enum
 
@@ -32,10 +31,7 @@ import numpy as np
 import pandas as pd
 from tqdm import tqdm
 
-sys.path.append(os.path.dirname(__file__))
-sys.path.append(os.path.join(os.path.dirname(__file__), ".."))
-
-from shared.util import load_classes
+from ..shared.util import load_classes
 
 DRAW_COLUMNS = ["frame", "type", "coords", "color", "size", "thick", "desc", "fill", "alpha"]
 TRACK_COLUMNS = ["frame", "track", "x", "y", "w", "h", "score", "cls", "r3", "r4"]
