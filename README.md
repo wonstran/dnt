@@ -56,12 +56,12 @@ dets = detector.detect(
 ```python
 from dnt.track import ByteTrackConfig, Tracker
 
-cfg = ByteTrackConfig()
-tracker = Tracker(cfg=cfg, device="auto")
+config = ByteTrackConfig()
+tracker = Tracker(config=config, device="auto")
 tracks = tracker.track(
-    input_video="/path/to/video.mp4",
     det_file="/path/to/dets.txt",
-    output_file="/path/to/tracks.txt",
+    out_file="/path/to/tracks.txt",
+    video_file="/path/to/video.mp4",
 )
 ```
 
