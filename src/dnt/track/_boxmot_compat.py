@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import importlib
 import inspect
+import warnings
 from dataclasses import dataclass
 from functools import cache
 from pathlib import Path
@@ -69,6 +70,14 @@ SFSORT_RANGES: dict[str, tuple[float | str, float | str]] = {
     "low_th": (0.0, "high_th"),
     "match_th_second": (0.0, 1.0),
 }
+
+# ReID targets that ran with reid_weights=None on 0.3.2.4 (tests/data/tracker_type_reid_none.json).
+REID_NONE_TARGETS_OK: frozenset[str] = frozenset()
+
+FACTORY_KEYS = (
+    "tracker_type", "evolve_param_dict", "tracker_config", "per_class", "reid_weights", "device",
+    "half",
+)
 
 
 @cache
@@ -154,6 +163,10 @@ def validate_user_values(
             raise ValueError(msg)
 
 
+def _deprecated(message: str) -> None:
+    warnings.warn(message, DeprecationWarning, stacklevel=4)
+
+
 def build_tracker_args(
     *,
     config_name: str,
@@ -167,18 +180,114 @@ def build_tracker_args(
     default_reid_weight: str,
     config_names: dict[str, str],
 ) -> TrackerBuild:
-    """Resolve a dnt config into `create_tracker` arguments (spec §2.3)."""
-    base = boxmot_yaml_defaults(model)
+    """Resolve a dnt config into `create_tracker` arguments (spec §2.3, §2.8, §2.8.1).
+
+    Reproduces 0.3.2.4's handling of factory-level `extra_kwargs` keys exactly;
+    only values 0.3.2.4 silently ignored now raise.
+    """
+    from .._device import resolve_device
+
+    extra = dict(extra_kwargs)
+
+    # 1. target tracker (§2.8.1)
+    target = model
+    override = extra.pop("tracker_type", None)
+    if override is not None and override != model:
+        if override not in TRACKER_TYPES:
+            msg = (f"{config_name}: unknown tracker_type {override!r}. "
+                   f"Valid: {sorted(TRACKER_TYPES)}")
+            raise ValueError(msg)
+        if tuning:
+            msg = (f"{config_name}: extra_kwargs['tracker_type']={override!r} runs a different "
+                   f"tracker, so {sorted(tuning)} cannot apply to it; set them on "
+                   f"{config_names[override]} instead.")
+            raise ValueError(msg)
+        _deprecated(f"{config_name}: the extra_kwargs['tracker_type'] override is deprecated and "
+                    f"will be removed in dnt 0.4; use {config_names[override]}.")
+        target = override
+
+    # 2. base arguments (§2.3 step 1)
+    evolve = extra.pop("evolve_param_dict", None)
+    tracker_config = extra.pop("tracker_config", None)
+    if evolve is not None and tracker_config is not None:
+        msg = (f"{config_name}: pass only one of extra_kwargs "
+               "'evolve_param_dict' / 'tracker_config'.")
+        raise ValueError(msg)
+    if evolve is not None:
+        if not isinstance(evolve, dict):
+            raise TypeError(f"{config_name}: extra_kwargs['evolve_param_dict'] must be a dict.")
+        base, user_base = dict(evolve), True
+        _deprecated(f"{config_name}: extra_kwargs['evolve_param_dict'] is BoxMOT-16-specific and "
+                    "will be removed in dnt 0.4; use config fields.")
+    elif tracker_config is not None:
+        path = Path(tracker_config)
+        if not path.is_file():
+            msg = f"{config_name}: extra_kwargs['tracker_config'] not found: {tracker_config}"
+            raise FileNotFoundError(msg)
+        base, user_base = load_boxmot_yaml(path), True
+        _deprecated(f"{config_name}: extra_kwargs['tracker_config'] is BoxMOT-16-specific and "
+                    "will be removed in dnt 0.4; use config fields.")
+    else:
+        base, user_base = boxmot_yaml_defaults(target), False
+    if user_base:
+        ignored = sorted(set(base) - accepted_params(target))
+        if ignored:
+            warnings.warn(f"{config_name}: BoxMOT {BOXMOT_VERSION} ignores {ignored} for {target}; "
+                          "passed through unchanged as in dnt 0.3.2.x.", UserWarning, stacklevel=3)
+
+    # 3. per_class (extra wins, as in 0.3.2.4)
+    if "per_class" in extra:
+        per_class = bool(extra.pop("per_class"))
+        _deprecated(f"{config_name}: extra_kwargs['per_class'] is deprecated; use the per_class "
+                    "field.")
+
+    # 4. reid_weights (0.3.2.4 rule: default keyed on the config's own model)
+    if "reid_weights" in extra:
+        extra_rw = extra.pop("reid_weights")
+        if target not in REID_TRACKERS:
+            msg = (f"{config_name}: {target} uses no ReID weights; remove "
+                   "extra_kwargs['reid_weights'].")
+            raise ValueError(msg)
+        reid_weights = extra_rw
+        _deprecated(f"{config_name}: extra_kwargs['reid_weights'] is deprecated; use the "
+                    "reid_weights field.")
+    if reid_weights is None and model in REID_TRACKERS:
+        reid_weights = default_reid_weight
+    if target in REID_TRACKERS and reid_weights is None and target not in REID_NONE_TARGETS_OK:
+        msg = (f"{config_name}: tracker_type={target!r} needs ReID weights; use "
+               f"{config_names[target]}.")
+        raise ValueError(msg)
+    if target not in REID_TRACKERS:
+        reid_weights = None
+
+    # 5. device / half (Tracker argument wins unless it is None, as in 0.3.2.4)
+    device, half = tracker_device, tracker_half
+    if "device" in extra:
+        extra_device = extra.pop("device")
+        if device is None:
+            device = extra_device
+            _deprecated(f"{config_name}: extra_kwargs['device'] is deprecated; use "
+                        "Tracker(device=...).")
+        elif resolve_device(extra_device) != resolve_device(device):
+            msg = (f"{config_name}: extra_kwargs['device']={extra_device!r} conflicts with "
+                   f"Tracker(device={device!r}); pass Tracker(device=...) only.")
+            raise ValueError(msg)
+    if "half" in extra:
+        extra_half = bool(extra.pop("half"))
+        if half is None:
+            half = extra_half
+            _deprecated(f"{config_name}: extra_kwargs['half'] is deprecated; use "
+                        "Tracker(half=...).")
+        elif extra_half != bool(half):
+            msg = (f"{config_name}: extra_kwargs['half']={extra_half!r} conflicts with "
+                   f"Tracker(half={half!r}); pass Tracker(half=...) only.")
+            raise ValueError(msg)
+
+    # 6. tracker parameters: fields + remaining extra keys, validated against the target
     user = dict(tuning)
-    for key, value in extra_kwargs.items():
+    for key, value in extra.items():
         if key in user:
             raise ValueError(f"{config_name}: '{key}' is set both as a field and in extra_kwargs.")
         user[key] = value
-    validate_user_values(config_name, model, user, base)
-    if reid_weights is None and model in REID_TRACKERS:
-        reid_weights = default_reid_weight
-    if model not in REID_TRACKERS:
-        reid_weights = None
-    return TrackerBuild(
-        model, {**base, **user}, reid_weights, per_class, tracker_device, tracker_half
-    )
+    validate_user_values(config_name, target, user, base)
+    return TrackerBuild(target, {**base, **user}, reid_weights, per_class, device, half)
