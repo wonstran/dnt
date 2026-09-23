@@ -130,12 +130,15 @@ def interpolate_tracks_rts(
     if tracks is None:
         if not track_file:
             raise ValueError("Either `tracks` or `track_file` must be provided.")
-        tracks = pd.read_csv(track_file)
+        try:
+            tracks = pd.read_csv(track_file, header=None)
+        except pd.errors.EmptyDataError:
+            tracks = pd.DataFrame(columns=col_names)
 
     if len(tracks) == 0:
         out = tracks.copy()
         if output_file:
-            out.to_csv(output_file, index=False)
+            out.to_csv(output_file, index=False, header=False)
         return out
 
     df = tracks.copy()
