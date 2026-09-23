@@ -9,7 +9,7 @@ import os
 import subprocess
 import sys
 import warnings
-from dataclasses import MISSING, asdict, dataclass, field, fields
+from dataclasses import asdict, dataclass, field, fields
 from enum import Enum, StrEnum
 from pathlib import Path
 from typing import Any, ClassVar
@@ -200,7 +200,7 @@ class MOTBaseConfig:
     dnt_config_version: int = CONFIG_VERSION
 
     def __post_init__(self) -> None:
-        """Coerce `model`, check the format version."""
+        """Coerce `model`, check the format version, flag unpacked 0.3.2.x dicts."""
         if not isinstance(self.model, MOTModels):
             self.model = MOTModels(str(self.model))
         if self.dnt_config_version != CONFIG_VERSION:
@@ -209,6 +209,26 @@ class MOTBaseConfig:
                 f"this dnt reads {CONFIG_VERSION}."
             )
             raise ValueError(msg)
+        self._warn_if_unpacked_legacy()
+
+    def _warn_if_unpacked_legacy(self) -> None:
+        """Warn when every tuning field equals its 0.3.2.4 default (an unpacked old dict; §2.7)."""
+        model = self.model.value
+        old = bx.LEGACY_0324_DEFAULTS.get(model)
+        if not old or type(self).__name__ != _CONFIG_CLASS_NAMES.get(model):
+            return
+        renamed = {bx._RENAMES.get(k, k): v for k, v in old.items()}
+        if any(getattr(self, k, None) != v for k, v in renamed.items()):
+            return
+        yaml_defaults = bx.boxmot_yaml_defaults(model)
+        if any(k in yaml_defaults and yaml_defaults[k] != v for k, v in renamed.items()):
+            warnings.warn(
+                f"{type(self).__name__}: every setting equals its dnt 0.3.2.4 default; this looks "
+                f"like an unpacked 0.3.2.x dict. Use {type(self).__name__}.from_dict(d) to migrate "
+                "it (untouched defaults then follow BoxMOT, as they did in 0.3.2.x).",
+                UserWarning,
+                stacklevel=3,
+            )
 
     def tuning_values(self) -> dict[str, Any]:
         """Return the tuning fields the user set (non-None), excluding non-tuning fields."""
@@ -219,16 +239,17 @@ class MOTBaseConfig:
         }
 
     def to_kwargs(self) -> dict[str, Any]:
-        """Convert dataclass fields to keyword arguments for BoxMOT tracker creation."""
+        """Convert dataclass fields to keyword arguments (kept for compatibility)."""
         kwargs = asdict(self)
-        kwargs.pop("model", None)
-        kwargs.pop("extra_kwargs", None)
+        for key in ("model", "extra_kwargs", "dnt_config_version"):
+            kwargs.pop(key, None)
         kwargs.update(self.extra_kwargs)
         return kwargs
 
     def to_dict(self) -> dict[str, Any]:
-        """Return dataclass values as a serializable dictionary."""
-        return self._yaml_safe(asdict(self))
+        """Return a serializable mapping that starts with `dnt_config_version`."""
+        data = self._yaml_safe(asdict(self))
+        return {"dnt_config_version": data.pop("dnt_config_version"), **data}
 
     @staticmethod
     def _yaml_safe(value: Any) -> Any:
@@ -244,22 +265,54 @@ class MOTBaseConfig:
         return value
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> "MOTBaseConfig":
-        """Build a parameter object from a dictionary.
+    def from_dict(
+        cls, data: dict[str, Any], legacy: bool | str = "auto", *, _source: str = "dict"
+    ) -> "MOTBaseConfig":
+        """Build a config from a mapping (spec §2.7).
 
-        Unknown keys are stored in `extra_kwargs`.
+        Parameters
+        ----------
+        data : dict
+            Mapping from `to_dict()` (any dnt version) or hand-written.
+        legacy : {"auto", True, False}
+            "auto" migrates a mapping only if it has no `dnt_config_version` and exactly the
+            0.3.2.4 field set; True requires that shape; False never migrates.
+
         """
-        valid_fields = {f.name for f in fields(cls)}
-        known = {k: v for k, v in data.items() if k in valid_fields}
-        unknown = {k: v for k, v in data.items() if k not in valid_fields}
-
-        if "model" in known and not isinstance(known["model"], MOTModels):
-            known["model"] = MOTModels(str(known["model"]))
-
-        params = cls(**known)
+        if legacy not in ("auto", True, False):
+            raise ValueError("legacy must be 'auto', True or False.")
+        data = dict(data)
+        version = data.pop("dnt_config_version", None)
+        if version is not None and version != CONFIG_VERSION:
+            msg = (
+                f"{_source}: unsupported dnt_config_version {version!r}; "
+                f"this dnt reads {CONFIG_VERSION}."
+            )
+            raise ValueError(msg)
+        shaped = version is None and bx.is_legacy_shape(data)
+        if legacy is True and not shaped:
+            msg = (
+                f"{_source}: not a dnt 0.3.2.x config (legacy=True needs the exact 0.3.2.4 field "
+                "set and no dnt_config_version)."
+            )
+            raise ValueError(msg)
+        if shaped and legacy is not False:
+            data = bx.migrate_legacy(data, source=_source)
+        valid = {f.name for f in fields(cls)}
+        known = {k: v for k, v in data.items() if k in valid}
+        unknown = {k: v for k, v in data.items() if k not in valid}
+        with warnings.catch_warnings():
+            if legacy is False:
+                warnings.filterwarnings("ignore", message=".*unpacked 0.3.2.x dict.*")
+            params = cls(**known)
         if unknown:
             params.extra_kwargs.update(unknown)
         return params
+
+    @classmethod
+    def from_legacy_dict(cls, data: dict[str, Any]) -> "MOTBaseConfig":
+        """Explicitly migrate a dnt 0.3.2.x mapping (alias of ``from_dict(data, legacy=True)``)."""
+        return cls.from_dict(data, legacy=True)
 
     def export_yaml(self, yaml_file: str) -> None:
         """Export parameters to a YAML file."""
@@ -269,14 +322,14 @@ class MOTBaseConfig:
             yaml.safe_dump(self.to_dict(), f, sort_keys=False)
 
     @classmethod
-    def import_yaml(cls, yaml_file: str) -> "MOTBaseConfig":
-        """Import parameters from a YAML file."""
+    def import_yaml(cls, yaml_file: str, legacy: bool | str = "auto") -> "MOTBaseConfig":
+        """Import parameters from a YAML file (0.3.2.x files are migrated; spec §2.7)."""
         with Path(yaml_file).open("r", encoding="utf-8") as f:
             data = yaml.safe_load(f) or {}
         if not isinstance(data, dict):
             msg = f"Invalid YAML content in {yaml_file}: expected a mapping."
             raise ValueError(msg)
-        return cls.from_dict(data)
+        return cls.from_dict(data, legacy=legacy, _source=str(yaml_file))
 
 
 @dataclass(kw_only=True)
@@ -781,7 +834,7 @@ class Tracker:
         self.boxmot_verbose = boxmot_verbose
         self.output_score_cls = output_score_cls
         yaml_path = config_yaml
-        resolved_config = config or config
+        resolved_config = config
         self.model_config_yaml = yaml_path
 
         if yaml_path:
@@ -1067,8 +1120,8 @@ class Tracker:
             yaml.safe_dump(config.to_dict(), f, sort_keys=False)
 
     @staticmethod
-    def import_config_from_yaml(yaml_file: str) -> BoxMOTModelParams:
-        """Import model-aware BoxMOT config from a YAML file."""
+    def import_config_from_yaml(yaml_file: str, legacy: bool | str = "auto") -> BoxMOTModelParams:
+        """Import model-aware BoxMOT config from a YAML file (0.3.2.x files are migrated; §2.7)."""
         with Path(yaml_file).open("r", encoding="utf-8") as f:
             data = yaml.safe_load(f) or {}
         if not isinstance(data, dict):
@@ -1077,7 +1130,7 @@ class Tracker:
 
         model = MOTModels(str(data.get("model", MOTModels.BOTSORT.value)))
         param_cls = Tracker._params_class_for_model(model)
-        return param_cls.from_dict(data)
+        return param_cls.from_dict(data, legacy=legacy, _source=str(yaml_file))
 
     # Backward-compatible wrappers.
     @staticmethod
@@ -1089,9 +1142,9 @@ class Tracker:
         Tracker.export_config_to_yaml(yaml_file=yaml_file, config=params)
 
     @staticmethod
-    def import_params_from_yaml(yaml_file: str) -> BoxMOTModelParams:
-        """Import model-aware BoxMOT params from a YAML file (backward-compatible wrapper)."""
-        return Tracker.import_config_from_yaml(yaml_file=yaml_file)
+    def import_params_from_yaml(yaml_file: str, legacy: bool | str = "auto") -> BoxMOTModelParams:
+        """Backward-compatible wrapper for `import_config_from_yaml`."""
+        return Tracker.import_config_from_yaml(yaml_file=yaml_file, legacy=legacy)
 
     def export_current_config_to_yaml(self, yaml_file: str) -> None:
         """Export this tracker's active model and config to YAML."""

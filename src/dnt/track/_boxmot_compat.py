@@ -79,6 +79,76 @@ FACTORY_KEYS = (
     "half",
 )
 
+# dnt 0.3.2.4 dataclass defaults for tuning fields (checked against git show 063a9b5 by tests).
+LEGACY_0324_DEFAULTS: dict[str, dict[str, Any]] = {
+    "botsort": {"track_high_thresh": 0.5, "track_low_thresh": 0.1, "new_track_thresh": 0.6,
+                "match_thresh": 0.8, "track_buffer": 30, "with_reid": True,
+                "proximity_thresh": 0.5, "appearance_thresh": 0.25},
+    "boosttrack": {"det_thresh": 0.3, "max_age": 30, "min_hits": 3, "iou_threshold": 0.3,
+                   "asso_func": "iou"},
+    "bytetrack": {"track_thresh": 0.5, "match_thresh": 0.8, "track_buffer": 30, "frame_rate": 30},
+    "ocsort": {"det_thresh": 0.3, "max_age": 30, "min_hits": 3, "iou_threshold": 0.3,
+               "asso_func": "iou", "delta_t": 3, "inertia": 0.2},
+    "strongsort": {"max_dist": 0.2, "max_iou_dist": 0.7, "max_age": 70, "n_init": 3,
+                   "nn_budget": 100, "ema_alpha": 0.9, "mc_lambda": 0.995},
+    "deepocsort": {"det_thresh": 0.3, "max_age": 30, "min_hits": 3, "iou_threshold": 0.3,
+                   "asso_func": "iou", "delta_t": 3, "inertia": 0.2},
+    "hybridsort": {"det_thresh": 0.3, "max_age": 30, "min_hits": 3, "iou_threshold": 0.3,
+                   "asso_func": "iou"},
+    "sfsort": {"det_thresh": 0.3, "max_age": 30, "min_hits": 3, "iou_threshold": 0.3,
+               "asso_func": "iou"},
+}
+LEGACY_0324_FIELDS: dict[str, frozenset[str]] = {
+    m: frozenset({"model", "per_class", "extra_kwargs"}
+                 | ({"reid_weights"} if m in REID_TRACKERS else set()) | set(d))
+    for m, d in LEGACY_0324_DEFAULTS.items()
+}
+_RENAMES = {"max_dist": "max_cos_dist"}
+
+
+def is_legacy_shape(data: dict[str, Any]) -> bool:
+    """Return True only for the exact field set dnt 0.3.2.x's to_dict()/export wrote."""
+    if "dnt_config_version" in data or "model" not in data:
+        return False
+    fields_ = LEGACY_0324_FIELDS.get(str(data["model"]))
+    return fields_ is not None and frozenset(data) == fields_
+
+
+def migrate_legacy(data: dict[str, Any], *, source: str) -> dict[str, Any]:
+    """Migrate a 0.3.2.x mapping (spec §2.7).
+
+    Untouched old defaults -> None, changed values kept.
+    """
+    model = str(data["model"])
+    out = dict(data)
+    migrated, kept = [], []
+    for key, old_default in LEGACY_0324_DEFAULTS[model].items():
+        value = out.pop(key)
+        new_key = _RENAMES.get(key, key)
+        effective = new_key in EFFECTIVE_PARAMS[model]
+        if value == old_default:
+            migrated.append(key)
+            if effective:
+                out[new_key] = None
+        elif not effective:
+            hint = NON_EFFECTIVE_HINTS.get(model, {}).get(key, _NO_EQUIVALENT)
+            raise ValueError(
+                f"{source}: '{key}'={value!r} has no effect on {model} in BoxMOT "
+                f"{BOXMOT_VERSION}; {hint}."
+            )
+        else:
+            out[new_key] = value
+            kept.append(key)
+    warnings.warn(
+        f"{source}: migrated a dnt 0.3.2.x tracker config. Reset to BoxMOT defaults (they equalled "
+        f"the old dnt defaults, which 0.3.2.x never applied): {migrated}. Kept as your settings, "
+        f"now in effect: {kept}. Re-save with dnt 0.3.3 (adds dnt_config_version: 2) or set values "
+        "explicitly.",
+        DeprecationWarning,
+        stacklevel=4,
+    )
+    return out
+
 
 @cache
 def tracker_class(tracker_type: str) -> type:
