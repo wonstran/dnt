@@ -1,5 +1,5 @@
-recursive-include dnt *.py
-recursive-include dnt *.yaml
-recursive-include dnt *.yml
-recursive-include dnt *.names
-recursive-exclude __pycache__ *
+include README.md LICENSE.md
+recursive-include src/dnt *.py *.yaml *.yml *.names
+include src/dnt/track/reid_weights/osnet_x1_0_msmt17.pt
+include src/dnt/detect/signal/weights/ped_signal.pt
+global-exclude __pycache__ *.py[cod]

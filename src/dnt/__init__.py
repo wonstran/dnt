@@ -3,4 +3,4 @@
 This package provides detection and tracking functionality.
 """
 
-__version__ = "0.3.2.4"
+__version__ = "0.3.3"

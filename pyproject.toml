@@ -4,11 +4,12 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "dnt"
-version = "0.3.2.4"
-description = "A Python tool for video-based traffic analytiscs"
+version = "0.3.3"
+description = "A Python tool for video-based traffic analytics"
 readme = "README.md"
-requires-python = ">=3.9"
-license = { file = "LICENSE" }
+requires-python = ">=3.11"
+license = "MIT"
+license-files = ["LICENSE.md"]
 authors = [
   { name = "Zhenyu Wang", email = "wonstran@hotmail.com" },
 ]
@@ -16,64 +17,36 @@ keywords = ["traffic", "vehicle", "trajectory", "safety"]
 classifiers = [
   "Development Status :: 3 - Alpha",
   "Intended Audience :: End Users/Desktop",
-  "License :: OSI Approved :: MIT License",
   "Programming Language :: Python :: 3",
-  "Programming Language :: Python :: 3.9",
-  "Programming Language :: Python :: 3.10",
   "Programming Language :: Python :: 3.11",
   "Programming Language :: Python :: 3.12",
   "Programming Language :: Python :: 3.13",
-  "Topic :: Software Development :: Build Tools",
+]
+dependencies = [
+  "torch>=2.2",
+  "torchvision",
+  "ultralytics>=8.4.14,<9",
+  "boxmot==16.0.11",
+  "numpy>=2.2,<3",
+  "pandas>=2.2,<3",
+  "opencv-python>=4.7,<5",
+  "scipy>=1.13",
+  "filterpy",
+  "pyyaml",
+  "tqdm",
+  "requests",
+  "Pillow",
+  "shapely>=2",
+  "geopandas",
+  "easyocr",
+  "dateparser",
+  "pytz",
+  "cython_bbox",
 ]
 
-dependencies = [
-  "torch",
-  "torchvision",
-  "torchaudio",
-  "ultralytics>=8.4.1",
-  "boxmot",
-  "cython",
-  "cython_bbox",
-  "easydict",
-  "easyocr",
-  "faiss-cpu",
-  "faiss-gpu-cu12",
-  "filterpy",
-  "gdown",
-  "geopandas",
-  "h5py",
-  "lapx",
-  "loguru",
-  "matplotlib>=3.9",
-  "motmetrics",
-  "ninja",
-  "numpy>=2.2,<3",
-  "numpy_indexed",
-  "opencv-contrib-python",
-  "opencv-python",
-  "pandas>=2.2",
-  "Pillow",
-  "prettytable",
-  "pycocotools",
-  "pyyaml",
-  "requests",
-  "scikit-image",
-  "scikit-learn>=1.5",
-  "scipy>=1.13",
-  "shapely",
-  "shapelysmooth",
-  "sympy",
-  "tabulate",
-  "tensorboard",
-  "termcolor",
-  "thop",
-  "tqdm",
-  "vidgear",
-  "yacs",
-  "dateparser",
-  "openpyxl",
-  "pytz",
-]
+[project.optional-dependencies]
+dev = ["pytest", "pytest-cov", "ruff", "build"]
+docs = ["mkdocs-material", "mkdocstrings[python]", "mkdocs-with-pdf"]
 
 [project.urls]
 Homepage = "https://github.com/wonstran/dnt"
@@ -87,20 +60,19 @@ include-package-data = true
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.setuptools.package-data]
+dnt = [
+  "shared/data/*.names",
+  "track/reid_weights/osnet_x1_0_msmt17.pt",
+  "detect/signal/weights/ped_signal.pt",
+]
+
 [tool.ruff]
 line-length = 100
 target-version = "py311"
 
 [tool.ruff.lint]
-select = [
-  "E", "F",   
-  "I",        
-  "UP",       
-  "B",        
-  "SIM",      
-  "RUF",       
-  "D"       
-]
+select = ["E", "F", "I", "UP", "B", "SIM", "RUF", "D"]
 
 [tool.ruff.format]
 
