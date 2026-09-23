@@ -39,6 +39,7 @@ from shared.util import load_classes
 
 DRAW_COLUMNS = ["frame", "type", "coords", "color", "size", "thick", "desc", "fill", "alpha"]
 TRACK_COLUMNS = ["frame", "track", "x", "y", "w", "h", "score", "cls", "r3", "r4"]
+DET_COLUMNS = ["frame", "res", "x", "y", "w", "h", "conf", "class"]
 BRIGHT_COLORS_BGR: tuple[tuple[int, int, int], ...] = (
     (0, 255, 255),
     (255, 255, 0),
@@ -1088,6 +1089,8 @@ class Labeler:
         if end_frame is None:
             end_frame = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) - 1
 
+        cap.release()
+
         selected_tracks = tracks.loc[(tracks["frame"] >= start_frame) & (tracks["frame"] <= end_frame)].copy()
 
         pbar_desc = ""
@@ -1248,6 +1251,8 @@ class Labeler:
         """
         if dets is None:
             dets = pd.read_csv(det_file, header=None)
+        elif list(dets.columns) == DET_COLUMNS:
+            dets = dets.set_axis(range(len(DET_COLUMNS)), axis=1)
 
         names = load_classes()
 
@@ -1259,6 +1264,8 @@ class Labeler:
             start_frame = 0
         if end_frame is None:
             end_frame = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) - 1
+
+        cap.release()
 
         selected_dets = dets.loc[(dets[0] >= start_frame) & (dets[0] <= end_frame)].copy()
 
@@ -1290,6 +1297,8 @@ class Labeler:
                 alpha,
             ])
             pbar.update()
+
+        pbar.close()
 
         results.sort()
         results = list(results for results, _ in itertools.groupby(results))
@@ -1723,14 +1732,14 @@ class Labeler:
                             final_color = _bright_color(int(id))
                             cv2.rectangle(img, (int(x1), int(y1)), (int(x2), int(y2)), final_color, thick)
 
-                            if prefix is None:
-                                frame_file = os.path.join(output_path, str(id) + "_" + str(frame) + ".jpg")
-                            else:
-                                frame_file = os.path.join(
-                                    output_path, prefix + "-" + str(id) + "_" + str(frame) + ".jpg"
-                                )
+                        if prefix is None:
+                            frame_file = os.path.join(output_path, str(int(id)) + "_" + str(int(frame)) + ".jpg")
+                        else:
+                            frame_file = os.path.join(
+                                output_path, prefix + "-" + str(int(id)) + "_" + str(int(frame)) + ".jpg"
+                            )
 
-                            cv2.imwrite(frame_file, img)
+                        cv2.imwrite(frame_file, img)
                     else:
                         break
 
