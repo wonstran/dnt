@@ -16,6 +16,8 @@ import torch
 from tqdm import tqdm
 from ultralytics import RTDETR, YOLO
 
+from ..._device import half_allowed, resolve_device
+
 
 class DetectorModel(str, Enum):  # noqa: UP042
     """Enum of available YOLO and RT-DETR model weights.
@@ -178,30 +180,9 @@ class Detector:
         self.nms = nms
         self.max_det = max_det
 
-        # device selection
-        requested_device = str(device).lower().strip()
-        requested_backend = requested_device.split(":", maxsplit=1)[0]
-        valid_devices = {"auto", "cuda", "xpu", "mps", "cpu"}
-        if requested_backend not in valid_devices:
-            raise ValueError(
-                f"Invalid device={device!r}. Choose one of {sorted(valid_devices)} or backend:index like 'cuda:0'."
-            )
-
-        backend_available = {
-            "cuda": torch.cuda.is_available(),
-            "xpu": hasattr(torch, "xpu") and hasattr(torch.xpu, "is_available") and torch.xpu.is_available(),
-            "mps": hasattr(torch.backends, "mps") and torch.backends.mps.is_available(),
-            "cpu": True,
-        }
-
-        if requested_backend == "auto":
-            auto_priority = ("cuda", "xpu", "mps", "cpu")
-            self.device = next(d for d in auto_priority if backend_available[d])
-        else:
-            self.device = requested_device if backend_available[requested_backend] else "cpu"
-
-        # half precision only makes sense on GPU
-        self.half = half and (self.device == "cuda")
+        self.device = resolve_device(device)
+        # half precision only makes sense on CUDA (any index)
+        self.half = half_allowed(self.device, half)
 
     def detect(
         self,
