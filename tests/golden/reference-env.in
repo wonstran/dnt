@@ -1,0 +1,21 @@
+# Reference environment for golden comparisons (spec §5.1). Python 3.12.
+torch==2.10.0
+torchvision==0.25.0
+ultralytics==8.4.14
+boxmot==16.0.11
+numpy==2.4.2
+pandas==2.3.3
+opencv-python==4.13.0.92
+scipy==1.17.0
+filterpy==1.4.5
+pyyaml
+tqdm
+requests
+Pillow
+shapely>=2
+geopandas
+easyocr
+dateparser
+pytz
+cython_bbox
+pytest

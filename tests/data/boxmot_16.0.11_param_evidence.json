@@ -1,0 +1,268 @@
+{
+  "boosttrack": {
+    "det_thresh": {
+      "code": "remain_inds = dets[:, 4] >= self.det_thresh",
+      "file": "boosttrack/boosttrack.py",
+      "line": 272
+    },
+    "iou_threshold": {
+      "code": "self.iou_threshold,",
+      "file": "boosttrack/boosttrack.py",
+      "line": 299
+    },
+    "max_age": {
+      "code": "self.trackers = [trk for trk in self.trackers if trk.time_since_update <= self.max_age]",
+      "file": "boosttrack/boosttrack.py",
+      "line": 338
+    },
+    "min_hits": {
+      "code": "trk.hit_streak >= self.min_hits or self.frame_count <= self.min_hits",
+      "file": "boosttrack/boosttrack.py",
+      "line": 332
+    }
+  },
+  "botsort": {
+    "appearance_thresh": {
+      "code": "emb_dists[emb_dists > self.appearance_thresh] = 1.0",
+      "file": "botsort/botsort.py",
+      "line": 246
+    },
+    "cmc_method": {
+      "code": "self.cmc = get_cmc_method(cmc_method)()",
+      "file": "botsort/botsort.py",
+      "line": 107
+    },
+    "frame_rate": {
+      "code": "self.buffer_size = int(frame_rate / 30.0 * track_buffer)",
+      "file": "botsort/botsort.py",
+      "line": 94
+    },
+    "match_thresh": {
+      "code": "dists, thresh=self.match_thresh",
+      "file": "botsort/botsort.py",
+      "line": 253
+    },
+    "new_track_thresh": {
+      "code": "if track.conf < self.new_track_thresh:",
+      "file": "botsort/botsort.py",
+      "line": 363
+    },
+    "proximity_thresh": {
+      "code": "ious_dists_mask = ious_dists > self.proximity_thresh",
+      "file": "botsort/botsort.py",
+      "line": 240
+    },
+    "track_buffer": {
+      "code": "self.buffer_size = int(frame_rate / 30.0 * track_buffer)",
+      "file": "botsort/botsort.py",
+      "line": 94
+    },
+    "track_high_thresh": {
+      "code": "first_mask = confs > self.track_high_thresh",
+      "file": "botsort/botsort.py",
+      "line": 191
+    },
+    "track_low_thresh": {
+      "code": "confs > self.track_low_thresh, confs < self.track_high_thresh",
+      "file": "botsort/botsort.py",
+      "line": 188
+    },
+    "with_reid": {
+      "code": "if self.with_reid and embs is None:",
+      "file": "botsort/botsort.py",
+      "line": 124
+    }
+  },
+  "bytetrack": {
+    "frame_rate": {
+      "code": "self.buffer_size = int(frame_rate / 30.0 * track_buffer)",
+      "file": "bytetrack/bytetrack.py",
+      "line": 168
+    },
+    "match_thresh": {
+      "code": "dists, thresh=self.match_thresh",
+      "file": "bytetrack/bytetrack.py",
+      "line": 232
+    },
+    "min_conf": {
+      "code": "inds_low = confs > self.min_conf",
+      "file": "bytetrack/bytetrack.py",
+      "line": 202
+    },
+    "track_buffer": {
+      "code": "self.buffer_size = int(frame_rate / 30.0 * track_buffer)",
+      "file": "bytetrack/bytetrack.py",
+      "line": 168
+    },
+    "track_thresh": {
+      "code": "remain_inds = confs > self.track_thresh",
+      "file": "bytetrack/bytetrack.py",
+      "line": 200
+    }
+  },
+  "deepocsort": {
+    "asso_func": {
+      "code": "iou_left = self.asso_func(left_dets, left_trks)",
+      "file": "deepocsort/deepocsort.py",
+      "line": 427
+    },
+    "delta_t": {
+      "code": "for dt in range(self.delta_t, 0, -1):",
+      "file": "deepocsort/deepocsort.py",
+      "line": 157
+    },
+    "det_thresh": {
+      "code": "remain_inds = scores > self.det_thresh",
+      "file": "deepocsort/deepocsort.py",
+      "line": 340
+    },
+    "inertia": {
+      "code": "self.inertia,",
+      "file": "deepocsort/deepocsort.py",
+      "line": 406
+    },
+    "iou_threshold": {
+      "code": "if iou_left.max() > self.iou_threshold:",
+      "file": "deepocsort/deepocsort.py",
+      "line": 433
+    },
+    "max_age": {
+      "code": "if trk.time_since_update > self.max_age:",
+      "file": "deepocsort/deepocsort.py",
+      "line": 495
+    },
+    "min_hits": {
+      "code": "trk.hit_streak >= self.min_hits or self.frame_count <= self.min_hits",
+      "file": "deepocsort/deepocsort.py",
+      "line": 485
+    }
+  },
+  "hybridsort": {
+    "asso_func": {
+      "code": "ASSO_FUNCS[self.asso_func_name],  # from BaseTracker",
+      "file": "hybridsort/hybridsort.py",
+      "line": 578
+    },
+    "det_thresh": {
+      "code": "remain_inds = confs > self.det_thresh",
+      "file": "hybridsort/hybridsort.py",
+      "line": 511
+    },
+    "iou_threshold": {
+      "code": "if iou_left.max() > self.iou_threshold:",
+      "file": "hybridsort/hybridsort.py",
+      "line": 625
+    },
+    "max_age": {
+      "code": "if trk.time_since_update > self.max_age:",
+      "file": "hybridsort/hybridsort.py",
+      "line": 723
+    },
+    "min_hits": {
+      "code": "if (trk.time_since_update < 1) and (trk.hit_streak >= self.min_hits or self.frame_count <= self.min_hits):",
+      "file": "hybridsort/hybridsort.py",
+      "line": 710
+    }
+  },
+  "ocsort": {
+    "asso_func": {
+      "code": "iou_left = self.asso_func(",
+      "file": "ocsort/ocsort.py",
+      "line": 337
+    },
+    "delta_t": {
+      "code": "for i in range(self.delta_t):",
+      "file": "ocsort/ocsort.py",
+      "line": 146
+    },
+    "det_thresh": {
+      "code": "remain_inds = confs > self.det_thresh",
+      "file": "ocsort/ocsort.py",
+      "line": 279
+    },
+    "inertia": {
+      "code": "self.inertia,",
+      "file": "ocsort/ocsort.py",
+      "line": 322
+    },
+    "iou_threshold": {
+      "code": "self.asso_threshold: float = self.iou_threshold  # Use from BaseTracker",
+      "file": "ocsort/ocsort.py",
+      "line": 239
+    },
+    "max_age": {
+      "code": "if trk.time_since_update > self.max_age:",
+      "file": "ocsort/ocsort.py",
+      "line": 440
+    },
+    "min_hits": {
+      "code": "trk.hit_streak >= self.min_hits or self.frame_count <= self.min_hits",
+      "file": "ocsort/ocsort.py",
+      "line": 430
+    }
+  },
+  "sfsort": {
+    "high_th": {
+      "code": "hth = self.high_th",
+      "file": "sfsort/sfsort.py",
+      "line": 251
+    },
+    "low_th": {
+      "code": "intermediate_score = np.logical_and(self.low_th < scores, scores < hth)",
+      "file": "sfsort/sfsort.py",
+      "line": 216
+    },
+    "match_th_first": {
+      "code": "mth = self.match_th_first",
+      "file": "sfsort/sfsort.py",
+      "line": 253
+    },
+    "match_th_second": {
+      "code": "matches, _, unmatched_detections = linear_assignment(cost, self.match_th_second)",
+      "file": "sfsort/sfsort.py",
+      "line": 224
+    },
+    "new_track_th": {
+      "code": "nth = self.new_track_th",
+      "file": "sfsort/sfsort.py",
+      "line": 252
+    }
+  },
+  "strongsort": {
+    "ema_alpha": {
+      "code": "self.ema_alpha * self.features[-1] + (1 - self.ema_alpha) * feature",
+      "file": "strongsort/sort/track.py",
+      "line": 181
+    },
+    "max_age": {
+      "code": "self.max_age,",
+      "file": "strongsort/sort/tracker.py",
+      "line": 132
+    },
+    "max_cos_dist": {
+      "code": "metric=NearestNeighborDistanceMetric(\"cosine\", max_cos_dist, nn_budget),",
+      "file": "strongsort/strongsort.py",
+      "line": 80
+    },
+    "max_iou_dist": {
+      "code": "self.max_iou_dist,",
+      "file": "strongsort/sort/tracker.py",
+      "line": 148
+    },
+    "mc_lambda": {
+      "code": "self.mc_lambda,",
+      "file": "strongsort/sort/tracker.py",
+      "line": 119
+    },
+    "n_init": {
+      "code": "self.n_init,",
+      "file": "strongsort/sort/tracker.py",
+      "line": 164
+    },
+    "nn_budget": {
+      "code": "metric=NearestNeighborDistanceMetric(\"cosine\", max_cos_dist, nn_budget),",
+      "file": "strongsort/strongsort.py",
+      "line": 80
+    }
+  }
+}

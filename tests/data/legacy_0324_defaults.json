@@ -1,0 +1,66 @@
+{
+  "boosttrack": {
+    "asso_func": "iou",
+    "det_thresh": 0.3,
+    "iou_threshold": 0.3,
+    "max_age": 30,
+    "min_hits": 3
+  },
+  "botsort": {
+    "appearance_thresh": 0.25,
+    "match_thresh": 0.8,
+    "new_track_thresh": 0.6,
+    "proximity_thresh": 0.5,
+    "track_buffer": 30,
+    "track_high_thresh": 0.5,
+    "track_low_thresh": 0.1,
+    "with_reid": true
+  },
+  "bytetrack": {
+    "frame_rate": 30,
+    "match_thresh": 0.8,
+    "track_buffer": 30,
+    "track_thresh": 0.5
+  },
+  "deepocsort": {
+    "asso_func": "iou",
+    "delta_t": 3,
+    "det_thresh": 0.3,
+    "inertia": 0.2,
+    "iou_threshold": 0.3,
+    "max_age": 30,
+    "min_hits": 3
+  },
+  "hybridsort": {
+    "asso_func": "iou",
+    "det_thresh": 0.3,
+    "iou_threshold": 0.3,
+    "max_age": 30,
+    "min_hits": 3
+  },
+  "ocsort": {
+    "asso_func": "iou",
+    "delta_t": 3,
+    "det_thresh": 0.3,
+    "inertia": 0.2,
+    "iou_threshold": 0.3,
+    "max_age": 30,
+    "min_hits": 3
+  },
+  "sfsort": {
+    "asso_func": "iou",
+    "det_thresh": 0.3,
+    "iou_threshold": 0.3,
+    "max_age": 30,
+    "min_hits": 3
+  },
+  "strongsort": {
+    "ema_alpha": 0.9,
+    "max_age": 70,
+    "max_dist": 0.2,
+    "max_iou_dist": 0.7,
+    "mc_lambda": 0.995,
+    "n_init": 3,
+    "nn_budget": 100
+  }
+}

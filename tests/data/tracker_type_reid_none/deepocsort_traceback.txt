@@ -1,0 +1,28 @@
+Traceback (most recent call last):
+  File "/home/wonstran/dnt/detntrack_0.3.2/tools/probe_reid_none.py", line 28, in <module>
+    Tracker(config=cfg, device="cpu").track(str(dets), str(work / f"{target}.txt"), str(video))
+  File "/home/wonstran/dnt/dnt-0.3.2.4-baseline/src/dnt/track/tracker.py", line 753, in track
+    return self._track_boxmot(
+           ^^^^^^^^^^^^^^^^^^^
+  File "/home/wonstran/dnt/dnt-0.3.2.4-baseline/src/dnt/track/tracker.py", line 1142, in _track_boxmot
+    tracker = self._build_boxmot_tracker(
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/wonstran/dnt/dnt-0.3.2.4-baseline/src/dnt/track/tracker.py", line 899, in _build_boxmot_tracker
+    return create_tracker(**filtered_kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/wonstran/dnt/dnt-baseline-venv/lib/python3.12/site-packages/boxmot/trackers/tracker_zoo.py", line 92, in create_tracker
+    tracker = tracker_class(**tracker_args)
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/wonstran/dnt/dnt-baseline-venv/lib/python3.12/site-packages/boxmot/trackers/deepocsort/deepocsort.py", line 308, in __init__
+    self.model = ReidAutoBackend(
+                 ^^^^^^^^^^^^^^^^
+  File "/home/wonstran/dnt/dnt-baseline-venv/lib/python3.12/site-packages/boxmot/reid/core/auto_backend.py", line 42, in __init__
+    ) = self.model_type(w)  # get backend
+        ^^^^^^^^^^^^^^^^^^
+  File "/home/wonstran/dnt/dnt-baseline-venv/lib/python3.12/site-packages/boxmot/reid/core/auto_backend.py", line 125, in model_type
+    self.check_suffix(p, sf)  # checks
+    ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/wonstran/dnt/dnt-baseline-venv/lib/python3.12/site-packages/boxmot/reid/core/auto_backend.py", line 104, in check_suffix
+    files = [file] if isinstance(file, (str, Path)) else list(file)
+                                                         ^^^^^^^^^^
+TypeError: 'NoneType' object is not iterable

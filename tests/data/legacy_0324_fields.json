@@ -1,0 +1,95 @@
+{
+  "boosttrack": [
+    "asso_func",
+    "det_thresh",
+    "extra_kwargs",
+    "iou_threshold",
+    "max_age",
+    "min_hits",
+    "model",
+    "per_class",
+    "reid_weights"
+  ],
+  "botsort": [
+    "appearance_thresh",
+    "extra_kwargs",
+    "match_thresh",
+    "model",
+    "new_track_thresh",
+    "per_class",
+    "proximity_thresh",
+    "reid_weights",
+    "track_buffer",
+    "track_high_thresh",
+    "track_low_thresh",
+    "with_reid"
+  ],
+  "bytetrack": [
+    "extra_kwargs",
+    "frame_rate",
+    "match_thresh",
+    "model",
+    "per_class",
+    "track_buffer",
+    "track_thresh"
+  ],
+  "deepocsort": [
+    "asso_func",
+    "delta_t",
+    "det_thresh",
+    "extra_kwargs",
+    "inertia",
+    "iou_threshold",
+    "max_age",
+    "min_hits",
+    "model",
+    "per_class",
+    "reid_weights"
+  ],
+  "hybridsort": [
+    "asso_func",
+    "det_thresh",
+    "extra_kwargs",
+    "iou_threshold",
+    "max_age",
+    "min_hits",
+    "model",
+    "per_class",
+    "reid_weights"
+  ],
+  "ocsort": [
+    "asso_func",
+    "delta_t",
+    "det_thresh",
+    "extra_kwargs",
+    "inertia",
+    "iou_threshold",
+    "max_age",
+    "min_hits",
+    "model",
+    "per_class"
+  ],
+  "sfsort": [
+    "asso_func",
+    "det_thresh",
+    "extra_kwargs",
+    "iou_threshold",
+    "max_age",
+    "min_hits",
+    "model",
+    "per_class"
+  ],
+  "strongsort": [
+    "ema_alpha",
+    "extra_kwargs",
+    "max_age",
+    "max_dist",
+    "max_iou_dist",
+    "mc_lambda",
+    "model",
+    "n_init",
+    "nn_budget",
+    "per_class",
+    "reid_weights"
+  ]
+}

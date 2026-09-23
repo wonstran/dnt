@@ -1,0 +1,14 @@
+{
+  "model": "botsort",
+  "per_class": false,
+  "extra_kwargs": {},
+  "reid_weights": "osnet_x1_0_msmt17.pt",
+  "track_high_thresh": 0.5,
+  "track_low_thresh": 0.1,
+  "new_track_thresh": 0.6,
+  "match_thresh": 0.8,
+  "track_buffer": 30,
+  "with_reid": true,
+  "proximity_thresh": 0.5,
+  "appearance_thresh": 0.25
+}

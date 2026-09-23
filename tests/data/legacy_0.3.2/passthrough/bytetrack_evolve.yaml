@@ -1,0 +1,9 @@
+model: bytetrack
+per_class: false
+extra_kwargs:
+  evolve_param_dict:
+    track_thresh: 0.7
+track_thresh: 0.5
+match_thresh: 0.8
+track_buffer: 30
+frame_rate: 30

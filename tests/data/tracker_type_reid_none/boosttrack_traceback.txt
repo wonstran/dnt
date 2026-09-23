@@ -1,0 +1,19 @@
+Traceback (most recent call last):
+  File "/home/wonstran/dnt/detntrack_0.3.2/tools/probe_reid_none.py", line 28, in <module>
+    Tracker(config=cfg, device="cpu").track(str(dets), str(work / f"{target}.txt"), str(video))
+  File "/home/wonstran/dnt/dnt-0.3.2.4-baseline/src/dnt/track/tracker.py", line 753, in track
+    return self._track_boxmot(
+           ^^^^^^^^^^^^^^^^^^^
+  File "/home/wonstran/dnt/dnt-0.3.2.4-baseline/src/dnt/track/tracker.py", line 1181, in _track_boxmot
+    outputs = tracker.update(dets, frame)
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/wonstran/dnt/dnt-baseline-venv/lib/python3.12/site-packages/boxmot/trackers/basetracker.py", line 201, in wrapper
+    return method(self, dets, img, *args[2:], **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/wonstran/dnt/dnt-baseline-venv/lib/python3.12/site-packages/boxmot/trackers/basetracker.py", line 218, in wrapper
+    return update_method(self, dets=dets, img=img, embs=embs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/wonstran/dnt/dnt-baseline-venv/lib/python3.12/site-packages/boxmot/trackers/boosttrack/boosttrack.py", line 280, in update
+    dets_embs = self.reid_model.get_features(dets[:, :4], img)
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AttributeError: 'NoneType' object has no attribute 'get_features'

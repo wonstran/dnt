@@ -1,0 +1,8 @@
+model: bytetrack
+per_class: false
+extra_kwargs:
+  tracker_type: ocsort
+track_thresh: 0.5
+match_thresh: 0.8
+track_buffer: 30
+frame_rate: 30
