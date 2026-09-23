@@ -49,4 +49,5 @@ def test_export_track_frames_without_bbox_writes_files(synthetic_video, tmp_path
     tracks = pd.DataFrame([[0, 1, 10, 10, 20, 20, 0.9, 2, -1, -1],
                            [1, 1, 12, 10, 20, 20, 0.9, 2, -1, -1]])
     lab.Labeler.export_track_frames(str(video), tracks, str(tmp_path / "frames"), bbox=False)
-    assert sorted(p.name for p in (tmp_path / "frames").iterdir()) == ["1_0.jpg", "1_1.jpg"]
+    # naming unchanged from 0.3.2.4 (iterrows yields float frame numbers)
+    assert sorted(p.name for p in (tmp_path / "frames").iterdir()) == ["1_0.0.jpg", "1_1.0.jpg"]

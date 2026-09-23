@@ -1733,10 +1733,10 @@ class Labeler:
                             cv2.rectangle(img, (int(x1), int(y1)), (int(x2), int(y2)), final_color, thick)
 
                         if prefix is None:
-                            frame_file = os.path.join(output_path, str(int(id)) + "_" + str(int(frame)) + ".jpg")
+                            frame_file = os.path.join(output_path, str(id) + "_" + str(frame) + ".jpg")
                         else:
                             frame_file = os.path.join(
-                                output_path, prefix + "-" + str(int(id)) + "_" + str(int(frame)) + ".jpg"
+                                output_path, prefix + "-" + str(id) + "_" + str(frame) + ".jpg"
                             )
 
                         cv2.imwrite(frame_file, img)
