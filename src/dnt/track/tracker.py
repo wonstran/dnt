@@ -1243,9 +1243,16 @@ class Tracker:
             Tracking results with TRACK_FIELDS columns.
 
         """
-        detections = pd.read_csv(det_file, header=None).to_numpy()
-        if detections.size == 0 or len(detections) == 0:
-            return pd.DataFrame(columns=self.TRACK_FIELDS)
+        try:
+            detections = pd.read_csv(det_file, header=None).to_numpy()
+        except pd.errors.EmptyDataError:
+            detections = np.empty((0, 8))
+        if len(detections) == 0:
+            empty = pd.DataFrame(columns=self.TRACK_FIELDS)
+            if out_file:
+                Path(out_file).parent.mkdir(parents=True, exist_ok=True)
+                empty.to_csv(out_file, index=False, header=False)
+            return empty
 
         start_frame = int(detections[:, 0].min())
         end_frame = int(detections[:, 0].max())
@@ -1294,10 +1301,7 @@ class Tracker:
             else:
                 dets = np.empty((0, 6), dtype=float)
 
-            try:
-                outputs = tracker.update(dets, frame)
-            except TypeError:
-                outputs = tracker.update(dets, frame, None)
+            outputs = tracker.update(dets, frame)
 
             frame_tracks = self._parse_boxmot_outputs(
                 outputs,
