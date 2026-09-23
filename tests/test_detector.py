@@ -1,3 +1,5 @@
+import inspect
+
 import pandas as pd
 import pytest
 
@@ -54,3 +56,11 @@ def test_reclass_with_real_detector_class(fake):
     from dnt.track.re_class import ReClass
 
     ReClass(device="cpu")
+
+
+def test_reclass_positional_order_unchanged():
+    """Ensure ReClass parameter order is unchanged for backward compatibility."""
+    from dnt.track.re_class import ReClass
+
+    params = list(inspect.signature(ReClass.__init__).parameters)[1:5]
+    assert params == ["num_frames", "threshold", "model", "weights"]

@@ -46,10 +46,10 @@ class ReClass:
 
     def __init__(
         self,
-        model: DetectorModel | str = DetectorModel.RTDETRx,
-        weights: str | None = None,
         num_frames: int = 25,
         threshold: float = 0.75,
+        model: DetectorModel | str = DetectorModel.RTDETRx,
+        weights: str | None = None,
         device: str = "auto",
         default_class: int = 0,
         match_class: list | None = None,
@@ -58,14 +58,14 @@ class ReClass:
 
         Parameters
         ----------
-        model : DetectorModel or str
-            Detection model (DetectorModel or its name), default RT-DETR-x
-        weights : str or None
-            Optional custom weights path passed to Detector, default None
         num_frames : int
             Number of frames to consider for re-classification, default 25
         threshold : float
             Threshold for matching, default 0.75
+        model : DetectorModel or str
+            Detection model (DetectorModel or its name), default RT-DETR-x
+        weights : str or None
+            Optional custom weights path passed to Detector, default None
         device : str
             Device to use for detection, default 'auto'
         default_class : int
