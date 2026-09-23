@@ -10,7 +10,6 @@ from enum import Enum
 from pathlib import Path
 
 import cv2
-import torch
 from tqdm import tqdm
 from ultralytics import YOLO
 

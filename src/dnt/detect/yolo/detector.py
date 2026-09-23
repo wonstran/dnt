@@ -12,7 +12,6 @@ from time import time
 
 import cv2
 import pandas as pd
-import torch
 from tqdm import tqdm
 from ultralytics import RTDETR, YOLO
 
