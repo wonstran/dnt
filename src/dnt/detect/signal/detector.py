@@ -10,7 +10,6 @@ import torchvision.models as models
 import torchvision.transforms as transforms
 from PIL import Image
 from shared.download import download_file
-from torchvision.models.resnet import ResNet18_Weights
 from tqdm import tqdm
 
 
@@ -43,7 +42,7 @@ class Model(nn.Module):
         """
         super().__init__()
 
-        self.resnet18 = models.resnet18(weights=ResNet18_Weights.DEFAULT)
+        self.resnet18 = models.resnet18(weights=None)
         self.resnet18.fc = nn.Linear(512, num_class)
 
     def forward(self, x):
@@ -134,7 +133,7 @@ class SignalDetector:
         else:
             self.device = "cpu"
 
-        self.model.load_state_dict(torch.load(weights))
+        self.model.load_state_dict(torch.load(weights, map_location=self.device))
         self.model.to(self.device)
 
         self.batchsz = batchsz
@@ -206,7 +205,7 @@ class SignalDetector:
 
                 batch_pred = self.predict(batch).flatten()
                 results = np.append(results, batch_pred, axis=0)
-                zones = np.append(zones, np.tile(np.array(list(range(len(self.det_zones)))), self.batchsz), axis=0)
+                zones = np.append(zones, np.tile(np.array(list(range(len(self.det_zones)))), len(temp_frames)), axis=0)
                 frames = np.append(frames, np.repeat(np.array(temp_frames), len(self.det_zones)), axis=0)
 
                 batch = []
