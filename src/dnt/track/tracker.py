@@ -8,11 +8,12 @@ import contextlib
 import os
 import subprocess
 import sys
-from dataclasses import asdict, dataclass, field, fields
+import warnings
+from dataclasses import MISSING, asdict, dataclass, field, fields
 from enum import Enum, StrEnum
 from inspect import signature
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 
 import cv2
 import numpy as np
@@ -162,7 +163,10 @@ class ReIDWeights(StrEnum):
     CLIP_VEHICLEID = "clip_vehicleid.pt"
 
 
-@dataclass
+CONFIG_VERSION = 2
+
+
+@dataclass(kw_only=True)
 class MOTBaseConfig:
     """Common configuration fields for BoxMOT tracker creation.
 
@@ -179,12 +183,38 @@ class MOTBaseConfig:
         Additional kwargs merged into tracker construction arguments
         (default: `{}`).
         Use this for BoxMOT arguments not explicitly represented in dataclasses.
+    dnt_config_version : int
+        Format marker for mappings produced by dnt >= 0.3.3 (always 2).
 
     """
+
+    NON_TUNING: ClassVar[frozenset[str]] = frozenset(
+        {"model", "per_class", "extra_kwargs", "dnt_config_version", "reid_weights", "max_dist"}
+    )
 
     model: MOTModels = MOTModels.BOTSORT
     per_class: bool = False
     extra_kwargs: dict[str, Any] = field(default_factory=dict)
+    dnt_config_version: int = CONFIG_VERSION
+
+    def __post_init__(self) -> None:
+        """Coerce `model`, check the format version."""
+        if not isinstance(self.model, MOTModels):
+            self.model = MOTModels(str(self.model))
+        if self.dnt_config_version != CONFIG_VERSION:
+            msg = (
+                f"Unsupported dnt_config_version {self.dnt_config_version!r}; "
+                f"this dnt reads {CONFIG_VERSION}."
+            )
+            raise ValueError(msg)
+
+    def tuning_values(self) -> dict[str, Any]:
+        """Return the tuning fields the user set (non-None), excluding non-tuning fields."""
+        return {
+            f.name: getattr(self, f.name)
+            for f in fields(self)
+            if f.name not in self.NON_TUNING and getattr(self, f.name) is not None
+        }
 
     def to_kwargs(self) -> dict[str, Any]:
         """Convert dataclass fields to keyword arguments for BoxMOT tracker creation."""
@@ -247,7 +277,7 @@ class MOTBaseConfig:
         return cls.from_dict(data)
 
 
-@dataclass
+@dataclass(kw_only=True)
 class BoTSORTConfig(MOTBaseConfig):
     """BoTSORT-specific parameters.
 
@@ -279,48 +309,56 @@ class BoTSORTConfig(MOTBaseConfig):
         `'clip_vehicleid.pt'`.
         Suggestions: use `"osnet_x1_0_msmt17.pt"` for pedestrians or
         `"clip_vehicleid.pt"` / `"clip_veri.pt"` for vehicles.
-    track_high_thresh : float
-        High score threshold for first association (default: `0.5`).
+    track_high_thresh : float | None
+        High score threshold for first association (default: None (BoxMOT 16: 0.6)).
         Increasing this is stricter and may reduce false matches but miss tracks.
-    track_low_thresh : float
-        Lower score threshold for second association (default: `0.1`).
+    track_low_thresh : float | None
+        Lower score threshold for second association (default: None (BoxMOT 16: 0.1)).
         Increasing this keeps fewer low-confidence detections.
-    new_track_thresh : float
-        Threshold to initialize new tracks (default: `0.6`).
+    new_track_thresh : float | None
+        Threshold to initialize new tracks (default: None (BoxMOT 16: 0.7)).
         Increasing this creates fewer new tracks and can reduce false positives.
-    match_thresh : float
-        Matching threshold for association (default: `0.8`).
+    match_thresh : float | None
+        Matching threshold for association (default: None (BoxMOT 16: 0.8)).
         Increasing this makes association more permissive.
-    track_buffer : int
-        Number of frames to keep lost tracks (default: `30`).
+    track_buffer : int | None
+        Number of frames to keep lost tracks (default: None (BoxMOT 16: 30)).
         Increasing this preserves IDs longer through occlusion, but may cause
         stale tracks to survive longer.
-    with_reid : bool
-        Whether to enable ReID-assisted association (default: `True`).
+    with_reid : bool | None
+        Whether to enable ReID-assisted association (default: None (BoxMOT 16 constructor default)).
         Options: `True`, `False`.
         Disabling this speeds up tracking but may increase ID switches.
-    proximity_thresh : float
-        Proximity threshold for ReID matching (default: `0.5`).
+    proximity_thresh : float | None
+        Proximity threshold for ReID matching (default: None (BoxMOT 16: 0.5)).
         Increasing this requires stronger geometric overlap before ReID is used.
-    appearance_thresh : float
-        Appearance similarity threshold for ReID matching (default: `0.25`).
+    appearance_thresh : float | None
+        Appearance similarity threshold for ReID matching (default: None (BoxMOT 16: 0.25)).
         Increasing this requires closer appearance match and is more conservative.
+    cmc_method : str | None
+        Camera motion compensation method (default: None (BoxMOT 16: "ecc")).
+        Typical options: `"ecc"`, `"orb"`, `"sift"`, `"sparseOptFlow"`, `"none"`.
+    frame_rate : int | None
+        Source video frame rate used by the tracker (default: None (BoxMOT 16 constructor default)).
+        Set this close to real FPS for best temporal behavior.
 
     """
 
     model: MOTModels = MOTModels.BOTSORT
     reid_weights: ReIDWeights | str | None = ReIDWeights.OSNET_X1_0_MSMT17
-    track_high_thresh: float = 0.5
-    track_low_thresh: float = 0.1
-    new_track_thresh: float = 0.6
-    match_thresh: float = 0.8
-    track_buffer: int = 30
-    with_reid: bool = True
-    proximity_thresh: float = 0.5
-    appearance_thresh: float = 0.25
+    track_high_thresh: float | None = None
+    track_low_thresh: float | None = None
+    new_track_thresh: float | None = None
+    match_thresh: float | None = None
+    track_buffer: int | None = None
+    with_reid: bool | None = None
+    proximity_thresh: float | None = None
+    appearance_thresh: float | None = None
+    cmc_method: str | None = None
+    frame_rate: int | None = None
 
 
-@dataclass
+@dataclass(kw_only=True)
 class BoostTrackConfig(MOTBaseConfig):
     """BoostTrack-specific parameters.
 
@@ -329,102 +367,105 @@ class BoostTrackConfig(MOTBaseConfig):
     reid_weights : ReIDWeights | str | None
         Optional ReID weights path (default: `"osnet_x1_0_msmt17.pt"`).
         Options: same built-in `.pt` names listed in `BoTSORTParams.reid_weights`.
-    det_thresh : float
-        Detection confidence threshold (default: `0.3`).
+    det_thresh : float | None
+        Detection confidence threshold (default: None (BoxMOT 16: 0.6)).
         Increasing this keeps only higher-confidence detections.
-    max_age : int
-        Maximum age of unmatched tracks (default: `30`).
+    max_age : int | None
+        Maximum age of unmatched tracks (default: None (BoxMOT 16: 60)).
         Increasing this keeps tracks alive longer when unmatched.
-    min_hits : int
-        Minimum hits before track confirmation (default: `3`).
+    min_hits : int | None
+        Minimum hits before track confirmation (default: None (BoxMOT 16: 3)).
         Increasing this delays confirmation and reduces short noisy tracks.
-    iou_threshold : float
-        IoU threshold for association (default: `0.3`).
+    iou_threshold : float | None
+        IoU threshold for association (default: None (BoxMOT 16: 0.3)).
         Increasing this demands tighter overlap to match detections.
-    asso_func : str
-        Association function name (default: `"iou"`).
-        Typical options: `"iou"`, `"giou"`, `"diou"`, `"ciou"`, `"centroid"`.
+    asso_func : str | None
+        Association function name. No effect in BoxMOT 16; raises ValueError if set.
 
     """
 
     model: MOTModels = MOTModels.BOOSTTRACK
     reid_weights: ReIDWeights | str | None = ReIDWeights.OSNET_X1_0_MSMT17
-    det_thresh: float = 0.3
-    max_age: int = 30
-    min_hits: int = 3
-    iou_threshold: float = 0.3
-    asso_func: str = "iou"
+    det_thresh: float | None = None
+    max_age: int | None = None
+    min_hits: int | None = None
+    iou_threshold: float | None = None
+    asso_func: str | None = None  # non-effective in BoxMOT 16 (spec §2.2); raises if set
 
 
-@dataclass
+@dataclass(kw_only=True)
 class ByteTrackConfig(MOTBaseConfig):
     """ByteTrack-specific parameters.
 
     Attributes
     ----------
-    track_thresh : float
-        Detection confidence threshold (default: `0.5`).
+    track_thresh : float | None
+        Detection confidence threshold (default: None (BoxMOT 16: 0.6)).
         Increasing this filters more weak detections.
-    match_thresh : float
-        Threshold for matching detections to tracks (default: `0.8`).
+    match_thresh : float | None
+        Threshold for matching detections to tracks (default: None (BoxMOT 16: 0.9)).
         Increasing this generally allows looser matching.
-    track_buffer : int
-        Number of frames to keep lost tracks (default: `30`).
+    track_buffer : int | None
+        Number of frames to keep lost tracks (default: None (BoxMOT 16: 30)).
         Increasing this keeps unmatched tracks longer.
-    frame_rate : int
-        Source video frame rate used by the tracker (default: `30`).
+    frame_rate : int | None
+        Source video frame rate used by the tracker (default: None (BoxMOT 16: 30)).
         Set this close to real FPS for best temporal behavior.
+    min_conf : float | None
+        Minimum detection confidence passed through to the tracker (default: None (BoxMOT 16: 0.1)).
+        Increasing this filters out lower-confidence detections before tracking.
 
     """
 
     model: MOTModels = MOTModels.BYTE_TRACK
-    track_thresh: float = 0.5
-    match_thresh: float = 0.8
-    track_buffer: int = 30
-    frame_rate: int = 30
+    track_thresh: float | None = None
+    match_thresh: float | None = None
+    track_buffer: int | None = None
+    frame_rate: int | None = None
+    min_conf: float | None = None
 
 
-@dataclass
+@dataclass(kw_only=True)
 class OCSORTConfig(MOTBaseConfig):
     """OCSORT-specific parameters.
 
     Attributes
     ----------
-    det_thresh : float
-        Detection confidence threshold (default: `0.3`).
+    det_thresh : float | None
+        Detection confidence threshold (default: None (BoxMOT 16: 0.6)).
         Increasing this reduces low-confidence detections.
-    max_age : int
-        Maximum age of unmatched tracks (default: `30`).
+    max_age : int | None
+        Maximum age of unmatched tracks (default: None (BoxMOT 16: 30)).
         Increasing this keeps tracks alive through longer gaps.
-    min_hits : int
-        Minimum hits before track confirmation (default: `3`).
+    min_hits : int | None
+        Minimum hits before track confirmation (default: None (BoxMOT 16: 3)).
         Increasing this reduces short-lived false tracks.
-    iou_threshold : float
-        IoU threshold for association (default: `0.3`).
+    iou_threshold : float | None
+        IoU threshold for association (default: None (BoxMOT 16 constructor default)).
         Increasing this makes matching stricter.
-    asso_func : str
-        Association function name (default: `"iou"`).
+    asso_func : str | None
+        Association function name (default: None (BoxMOT 16: "iou")).
         Typical options: `"iou"`, `"giou"`, `"diou"`, `"ciou"`, `"centroid"`.
-    delta_t : int
-        Time gap used by motion compensation (default: `3`).
+    delta_t : int | None
+        Time gap used by motion compensation (default: None (BoxMOT 16: 3)).
         Increasing this smooths longer motion history, but may lag quick turns.
-    inertia : float
-        Motion inertia weight (default: `0.2`).
+    inertia : float | None
+        Motion inertia weight (default: None (BoxMOT 16: 0.1)).
         Increasing this trusts previous velocity more.
 
     """
 
     model: MOTModels = MOTModels.OCSORT
-    det_thresh: float = 0.3
-    max_age: int = 30
-    min_hits: int = 3
-    iou_threshold: float = 0.3
-    asso_func: str = "iou"
-    delta_t: int = 3
-    inertia: float = 0.2
+    det_thresh: float | None = None
+    max_age: int | None = None
+    min_hits: int | None = None
+    iou_threshold: float | None = None
+    asso_func: str | None = None
+    delta_t: int | None = None
+    inertia: float | None = None
 
 
-@dataclass
+@dataclass(kw_only=True)
 class StrongSORTConfig(MOTBaseConfig):
     """StrongSORT-specific parameters.
 
@@ -433,42 +474,61 @@ class StrongSORTConfig(MOTBaseConfig):
     reid_weights : ReIDWeights | str | None
         Optional ReID weights path (default: `"osnet_x1_0_msmt17.pt"`).
         Options: same built-in `.pt` names listed in `BoTSORTParams.reid_weights`.
-    max_dist : float
-        Maximum cosine distance for appearance matching (default: `0.2`).
+    max_cos_dist : float | None
+        Maximum cosine distance for appearance matching (default: None (BoxMOT 16: 0.4)).
         Increasing this allows less similar appearance matches.
-    max_iou_dist : float
-        Maximum IoU distance for geometric matching (default: `0.7`).
+    max_dist : float | None
+        Deprecated alias of `max_cos_dist` (default: `None`).
+        Setting this emits a `DeprecationWarning` and moves the value into
+        `max_cos_dist`; setting both raises `ValueError`.
+    max_iou_dist : float | None
+        Maximum IoU distance for geometric matching (default: None (BoxMOT 16: 0.7)).
         Increasing this allows looser geometric matches.
-    max_age : int
-        Maximum age of unmatched tracks (default: `70`).
+    max_age : int | None
+        Maximum age of unmatched tracks (default: None (BoxMOT 16: 30)).
         Increasing this retains tracks through longer occlusions.
-    n_init : int
-        Minimum hits before track confirmation (default: `3`).
+    n_init : int | None
+        Minimum hits before track confirmation (default: None (BoxMOT 16: 3)).
         Increasing this delays confirmation and reduces unstable IDs.
-    nn_budget : int
-        Maximum size of appearance feature gallery (default: `100`).
+    nn_budget : int | None
+        Maximum size of appearance feature gallery (default: None (BoxMOT 16: 100)).
         Increasing this improves long-term matching memory at higher memory cost.
-    ema_alpha : float
-        EMA factor for appearance embeddings (default: `0.9`).
+    ema_alpha : float | None
+        EMA factor for appearance embeddings (default: None (BoxMOT 16: 0.9)).
         Increasing this smooths features more and reduces noise.
-    mc_lambda : float
-        Motion compensation blending factor (default: `0.995`).
+    mc_lambda : float | None
+        Motion compensation blending factor (default: None (BoxMOT 16: 0.98)).
         Increasing this gives more weight to motion compensation.
 
     """
 
     model: MOTModels = MOTModels.STRONGSORT
     reid_weights: ReIDWeights | str | None = ReIDWeights.OSNET_X1_0_MSMT17
-    max_dist: float = 0.2
-    max_iou_dist: float = 0.7
-    max_age: int = 70
-    n_init: int = 3
-    nn_budget: int = 100
-    ema_alpha: float = 0.9
-    mc_lambda: float = 0.995
+    max_cos_dist: float | None = None
+    max_dist: float | None = None  # deprecated alias of max_cos_dist
+    max_iou_dist: float | None = None
+    max_age: int | None = None
+    n_init: int | None = None
+    nn_budget: int | None = None
+    ema_alpha: float | None = None
+    mc_lambda: float | None = None
+
+    def __post_init__(self) -> None:
+        """Map the deprecated `max_dist` alias onto `max_cos_dist`."""
+        if self.max_dist is not None:
+            warnings.warn(
+                "StrongSORTConfig(max_dist=...) is deprecated; use max_cos_dist.",
+                DeprecationWarning,
+                stacklevel=3,
+            )
+            if self.max_cos_dist is not None:
+                msg = "StrongSORTConfig: set max_cos_dist or the deprecated max_dist, not both."
+                raise ValueError(msg)
+            self.max_cos_dist, self.max_dist = self.max_dist, None
+        super().__post_init__()
 
 
-@dataclass
+@dataclass(kw_only=True)
 class DeepOCSORTConfig(MOTBaseConfig):
     """DeepOCSORT-specific parameters.
 
@@ -477,42 +537,42 @@ class DeepOCSORTConfig(MOTBaseConfig):
     reid_weights : ReIDWeights | str | None
         Optional ReID weights path (default: `"osnet_x1_0_msmt17.pt"`).
         Options: same built-in `.pt` names listed in `BoTSORTParams.reid_weights`.
-    det_thresh : float
-        Detection confidence threshold (default: `0.3`).
+    det_thresh : float | None
+        Detection confidence threshold (default: None (BoxMOT 16: 0.5)).
         Increasing this keeps fewer low-confidence detections.
-    max_age : int
-        Maximum age of unmatched tracks (default: `30`).
+    max_age : int | None
+        Maximum age of unmatched tracks (default: None (BoxMOT 16: 30)).
         Increasing this keeps unmatched tracks alive longer.
-    min_hits : int
-        Minimum hits before track confirmation (default: `3`).
+    min_hits : int | None
+        Minimum hits before track confirmation (default: None (BoxMOT 16: 3)).
         Increasing this delays track confirmation.
-    iou_threshold : float
-        IoU threshold for association (default: `0.3`).
+    iou_threshold : float | None
+        IoU threshold for association (default: None (BoxMOT 16 constructor default)).
         Increasing this requires tighter overlap.
-    asso_func : str
-        Association function name (default: `"iou"`).
+    asso_func : str | None
+        Association function name (default: None (BoxMOT 16: "iou")).
         Typical options: `"iou"`, `"giou"`, `"diou"`, `"ciou"`, `"centroid"`.
-    delta_t : int
-        Time gap used by motion compensation (default: `3`).
+    delta_t : int | None
+        Time gap used by motion compensation (default: None (BoxMOT 16: 3)).
         Increasing this smooths over longer temporal windows.
-    inertia : float
-        Motion inertia weight (default: `0.2`).
+    inertia : float | None
+        Motion inertia weight (default: None (BoxMOT 16: 0.2)).
         Increasing this emphasizes velocity continuity.
 
     """
 
     model: MOTModels = MOTModels.DEEPOCSORT
     reid_weights: ReIDWeights | str | None = ReIDWeights.OSNET_X1_0_MSMT17
-    det_thresh: float = 0.3
-    max_age: int = 30
-    min_hits: int = 3
-    iou_threshold: float = 0.3
-    asso_func: str = "iou"
-    delta_t: int = 3
-    inertia: float = 0.2
+    det_thresh: float | None = None
+    max_age: int | None = None
+    min_hits: int | None = None
+    iou_threshold: float | None = None
+    asso_func: str | None = None
+    delta_t: int | None = None
+    inertia: float | None = None
 
 
-@dataclass
+@dataclass(kw_only=True)
 class HybridSORTConfig(MOTBaseConfig):
     """HybridSORT-specific parameters.
 
@@ -521,63 +581,79 @@ class HybridSORTConfig(MOTBaseConfig):
     reid_weights : ReIDWeights | str | None
         Optional ReID weights path (default: `"osnet_x1_0_msmt17.pt"`).
         Options: same built-in `.pt` names listed in `BoTSORTParams.reid_weights`.
-    det_thresh : float
-        Detection confidence threshold (default: `0.3`).
+    det_thresh : float | None
+        Detection confidence threshold (default: None (BoxMOT 16 constructor default)).
         Increasing this reduces weak detections.
-    max_age : int
-        Maximum age of unmatched tracks (default: `30`).
+    max_age : int | None
+        Maximum age of unmatched tracks (default: None (BoxMOT 16 constructor default)).
         Increasing this keeps tracks longer during occlusion.
-    min_hits : int
-        Minimum hits before track confirmation (default: `3`).
+    min_hits : int | None
+        Minimum hits before track confirmation (default: None (BoxMOT 16 constructor default)).
         Increasing this reduces early noisy tracks.
-    iou_threshold : float
-        IoU threshold for association (default: `0.3`).
+    iou_threshold : float | None
+        IoU threshold for association (default: None (BoxMOT 16 constructor default)).
         Increasing this makes IoU matching stricter.
-    asso_func : str
-        Association function name (default: `"iou"`).
+    asso_func : str | None
+        Association function name (default: None (BoxMOT 16 constructor default)).
         Typical options: `"iou"`, `"giou"`, `"diou"`, `"ciou"`, `"centroid"`.
 
     """
 
     model: MOTModels = MOTModels.HYBRIDSORT
     reid_weights: ReIDWeights | str | None = ReIDWeights.OSNET_X1_0_MSMT17
-    det_thresh: float = 0.3
-    max_age: int = 30
-    min_hits: int = 3
-    iou_threshold: float = 0.3
-    asso_func: str = "iou"
+    det_thresh: float | None = None
+    max_age: int | None = None
+    min_hits: int | None = None
+    iou_threshold: float | None = None
+    asso_func: str | None = None
 
 
-@dataclass
+@dataclass(kw_only=True)
 class SFSORTConfig(MOTBaseConfig):
     """SFSORT-specific parameters.
 
     Attributes
     ----------
-    det_thresh : float
-        Detection confidence threshold (default: `0.3`).
-        Increasing this reduces weak detections.
-    max_age : int
-        Maximum age of unmatched tracks (default: `30`).
-        Increasing this keeps tracks longer through brief misses.
-    min_hits : int
-        Minimum hits before track confirmation (default: `3`).
-        Increasing this reduces short-lived noisy tracks.
-    iou_threshold : float
-        IoU threshold for association (default: `0.3`).
-        Increasing this requires tighter overlap for matching.
-    asso_func : str
-        Association function name (default: `"iou"`).
-        Typical options: `"iou"`, `"giou"`, `"diou"`, `"ciou"`, `"centroid"`.
+    high_th : float | None
+        High score threshold for first-stage association (default: None (BoxMOT 16: 0.6)).
+        Increasing this is stricter and may reduce false matches but miss tracks.
+    low_th : float | None
+        Low score threshold for second-stage association (default: None (BoxMOT 16: 0.1)).
+        Increasing this keeps fewer low-confidence detections.
+    new_track_th : float | None
+        Threshold to initialize new tracks (default: None (BoxMOT 16: 0.7)).
+        Increasing this creates fewer new tracks and can reduce false positives.
+    match_th_first : float | None
+        Matching threshold for first-stage association (default: None (BoxMOT 16: 0.67)).
+        Increasing this makes first-stage association more permissive.
+    match_th_second : float | None
+        Matching threshold for second-stage association (default: None (BoxMOT 16: 0.3)).
+        Increasing this makes second-stage association more permissive.
+    det_thresh : float | None
+        Detection confidence threshold. No effect in BoxMOT 16; raises ValueError if set.
+    max_age : int | None
+        Maximum age of unmatched tracks. No effect in BoxMOT 16; raises ValueError if set.
+    min_hits : int | None
+        Minimum hits before track confirmation. No effect in BoxMOT 16; raises ValueError if set.
+    iou_threshold : float | None
+        IoU threshold for association. No effect in BoxMOT 16; raises ValueError if set.
+    asso_func : str | None
+        Association function name. No effect in BoxMOT 16; raises ValueError if set.
 
     """
 
     model: MOTModels = MOTModels.SFSORT
-    det_thresh: float = 0.3
-    max_age: int = 30
-    min_hits: int = 3
-    iou_threshold: float = 0.3
-    asso_func: str = "iou"
+    high_th: float | None = None
+    low_th: float | None = None
+    new_track_th: float | None = None
+    match_th_first: float | None = None
+    match_th_second: float | None = None
+    # non-effective in BoxMOT 16 (spec §2.2): kept for compatibility, raise if set
+    det_thresh: float | None = None
+    max_age: int | None = None
+    min_hits: int | None = None
+    iou_threshold: float | None = None
+    asso_func: str | None = None
 
 
 BoxMOTModelParams = (
