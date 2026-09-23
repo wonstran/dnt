@@ -6,6 +6,7 @@ post-processing utilities for infilling, clustering, and filtering tracks.
 
 import contextlib
 import os
+import re
 import subprocess
 import sys
 import warnings
@@ -977,7 +978,7 @@ class Tracker:
         total_videos = len(det_files)
 
         for idx, det_file in enumerate(det_files, start=1):
-            base_filename = os.path.splitext(os.path.basename(det_file))[0].replace("_iou", "")
+            base_filename = re.sub(r"_iou$", "", Path(det_file).stem)
 
             track_file = None
             if output_path:
