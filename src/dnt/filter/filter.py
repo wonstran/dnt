@@ -10,6 +10,8 @@ This module provides filtering utilities for detections and tracks based on:
 import geopandas as gpd
 import pandas as pd
 from shapely import LineString, Point, Polygon, geometry
+from shapely.geometry.base import BaseGeometry
+from shapely.ops import unary_union
 from tqdm import tqdm
 
 
@@ -48,7 +50,7 @@ class Filter:
     @staticmethod
     def filter_iou(
         detections: pd.DataFrame,
-        zones: geometry.MultiPolygon | None = None,
+        zones: BaseGeometry | list | None = None,
         class_list: list[int] | None = None,
         score_threshold: float = 0,
     ) -> pd.DataFrame:
@@ -77,26 +79,15 @@ class Filter:
         if class_list:
             detections = detections.loc[detections[7].isin(class_list)].copy()
 
-        if zones:
-            # filter locations
-            g = [
-                geometry.Point(xy)
-                for xy in zip((detections[2] + detections[4] / 2), (detections[3] + detections[5] / 2), strict=True)
-            ]
-            geo_detections = gpd.GeoDataFrame(detections, geometry=g)
+        if zones is None or (not isinstance(zones, BaseGeometry) and len(zones) == 0):
+            return detections
 
-            frames = geo_detections.loc[geo_detections.geometry.within(zones)].drop(columns="geometry")
-
-            if frames:
-                results = pd.concat(frames)
-                results = results[~results.index.duplicated()].reset_index(drop=True)
-            else:
-                results = pd.DataFrame()
-
-        else:
-            results = detections
-
-        return results
+        area = zones if isinstance(zones, BaseGeometry) else unary_union(list(zones))
+        centers = gpd.GeoSeries(
+            gpd.points_from_xy(detections[2] + detections[4] / 2, detections[3] + detections[5] / 2),
+            index=detections.index,
+        )
+        return detections.loc[centers.within(area).to_numpy()].reset_index(drop=True)
 
     @staticmethod
     def filter_tracks(
@@ -702,22 +693,7 @@ class Filter:
         video_tot: int | None = None,
     ) -> pd.DataFrame:
         """Backward-compatible wrapper for :func:`dnt.track.post_process.interpolate_tracks_rts`."""
-        import importlib.util
-        import sys
-        from pathlib import Path
-
-        post_file = Path(__file__).resolve().parents[1] / "track" / "post_process.py"
-        module_name = "dnt_track_post_process_dynamic"
-        module = sys.modules.get(module_name)
-        if module is None:
-            spec = importlib.util.spec_from_file_location(module_name, post_file)
-            if spec is None or spec.loader is None:
-                raise ImportError(f"Cannot load post_process module from: {post_file}")
-            module = importlib.util.module_from_spec(spec)
-            spec.loader.exec_module(module)
-            sys.modules[module_name] = module
-
-        _interpolate_tracks_rts = module.interpolate_tracks_rts
+        from ..track.post_process import interpolate_tracks_rts as _interpolate_tracks_rts
 
         return _interpolate_tracks_rts(
             tracks=tracks,
