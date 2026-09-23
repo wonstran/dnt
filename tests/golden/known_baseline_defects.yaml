@@ -7,4 +7,50 @@
 #   unexpected_<case>.txt traceback; absolute paths, '..' escapes and symlinks leaving it are rejected).
 # Any edit to this file after golden generation fails the golden tests until tools/make_golden.py is rerun.
 # make_golden.py never writes this file.
-defects: []
+defects:
+  - id: BX16-NP2-ocsort
+    tracker: ocsort
+    exception_type: TypeError
+    message_regex: 'only 0-dimensional arrays can be converted to Python scalars'
+    raised_at: xysr_kf.py:unfreeze
+    root_cause: >-
+      BoxMOT 16.0.11 KalmanBoxTracker.unfreeze() (motion/kalman_filters/aabb/xysr_kf.py:203) unpacks a
+      (4,1) history box into shape-(1,) arrays and calls float() on them; numpy>=2 raises TypeError
+      where numpy<2 coerced. Triggered whenever a lost track is re-detected. Present in dnt 0.3.2.4
+      (same BoxMOT and numpy); not a dnt defect. Fix path: BoxMOT upgrade in dnt 0.4.
+    reviewed_by: wonstran
+    reviewed_on: 2026-09-23
+    evidence: tests/golden/defects/BX16-NP2-ocsort.txt
+  - id: BX16-NP2-deepocsort
+    tracker: deepocsort
+    exception_type: TypeError
+    message_regex: 'only 0-dimensional arrays can be converted to Python scalars'
+    raised_at: xysr_kf.py:unfreeze
+    root_cause: >-
+      Same BoxMOT 16.0.11 xysr_kf.py unfreeze() numpy>=2 defect as BX16-NP2-ocsort, reached via
+      Deep OC-SORT's track update. Present in dnt 0.3.2.4.
+    reviewed_by: wonstran
+    reviewed_on: 2026-09-23
+    evidence: tests/golden/defects/BX16-NP2-deepocsort.txt
+  - id: BX16-NP2-hybridsort
+    tracker: hybridsort
+    exception_type: TypeError
+    message_regex: 'only 0-dimensional arrays can be converted to Python scalars'
+    raised_at: kalmanfilter_score_new.py:unfreeze
+    root_cause: >-
+      HybridSORT's own copy of the unfreeze() logic (trackers/hybridsort/kalmanfilter_score_new.py:427)
+      has the same numpy>=2 float() defect. Present in dnt 0.3.2.4.
+    reviewed_by: wonstran
+    reviewed_on: 2026-09-23
+    evidence: tests/golden/defects/BX16-NP2-hybridsort.txt
+  - id: BX16-NP2-bytetrack_to_ocsort
+    tracker: bytetrack_to_ocsort
+    exception_type: TypeError
+    message_regex: 'only 0-dimensional arrays can be converted to Python scalars'
+    raised_at: xysr_kf.py:unfreeze
+    root_cause: >-
+      ByteTrackConfig(extra_kwargs={"tracker_type": "ocsort"}) runs OC-SORT, which hits the same
+      BoxMOT 16.0.11 unfreeze() numpy>=2 defect as BX16-NP2-ocsort. Present in dnt 0.3.2.4.
+    reviewed_by: wonstran
+    reviewed_on: 2026-09-23
+    evidence: tests/golden/defects/BX16-NP2-bytetrack_to_ocsort.txt

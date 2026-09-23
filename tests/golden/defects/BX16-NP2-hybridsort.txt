@@ -1,0 +1,50 @@
+Traceback (most recent call last):
+  File "/home/wonstran/dnt/dnt-0.3.2.4-baseline/src/dnt/track/tracker.py", line 1181, in _track_boxmot
+    outputs = tracker.update(dets, frame)
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/wonstran/dnt/dnt-baseline-venv/lib/python3.12/site-packages/boxmot/trackers/basetracker.py", line 201, in wrapper
+    return method(self, dets, img, *args[2:], **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/wonstran/dnt/dnt-baseline-venv/lib/python3.12/site-packages/boxmot/trackers/basetracker.py", line 218, in wrapper
+    return update_method(self, dets=dets, img=img, embs=embs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/wonstran/dnt/dnt-baseline-venv/lib/python3.12/site-packages/boxmot/trackers/hybridsort/hybridsort.py", line 610, in update
+    self.active_tracks[m[1]].update(
+  File "/home/wonstran/dnt/dnt-baseline-venv/lib/python3.12/site-packages/boxmot/trackers/hybridsort/hybridsort.py", line 299, in update
+    self.kf.update(convert_bbox_to_z(bbox))
+  File "/home/wonstran/dnt/dnt-baseline-venv/lib/python3.12/site-packages/boxmot/trackers/hybridsort/kalmanfilter_score_new.py", line 491, in update
+    self.unfreeze()
+  File "/home/wonstran/dnt/dnt-baseline-venv/lib/python3.12/site-packages/boxmot/trackers/hybridsort/kalmanfilter_score_new.py", line 427, in unfreeze
+    r = w / float(h)
+            ^^^^^^^^
+TypeError: only 0-dimensional arrays can be converted to Python scalars
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/tmp/claude-1000/-home-wonstran-dnt-detntrack-0-3-2/1ac5af42-9f5f-4c9b-9fd1-5f0c97f50e1c/scratchpad/diagnose_cases.py", line 27, in <module>
+    gc.run_track(cls_name, kwargs, dets, clip, target)
+  File "/home/wonstran/dnt/detntrack_0.3.2/tools/golden_cases.py", line 171, in run_track
+    tr.Tracker(config=cfg, device="cpu", half=False).track(str(dets), str(out), str(video))
+  File "/home/wonstran/dnt/dnt-0.3.2.4-baseline/src/dnt/track/tracker.py", line 753, in track
+    return self._track_boxmot(
+           ^^^^^^^^^^^^^^^^^^^
+  File "/home/wonstran/dnt/dnt-0.3.2.4-baseline/src/dnt/track/tracker.py", line 1183, in _track_boxmot
+    outputs = tracker.update(dets, frame, None)
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/wonstran/dnt/dnt-baseline-venv/lib/python3.12/site-packages/boxmot/trackers/basetracker.py", line 201, in wrapper
+    return method(self, dets, img, *args[2:], **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/wonstran/dnt/dnt-baseline-venv/lib/python3.12/site-packages/boxmot/trackers/basetracker.py", line 218, in wrapper
+    return update_method(self, dets=dets, img=img, embs=embs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/wonstran/dnt/dnt-baseline-venv/lib/python3.12/site-packages/boxmot/trackers/hybridsort/hybridsort.py", line 644, in update
+    self.active_tracks[trk_ind].update(
+  File "/home/wonstran/dnt/dnt-baseline-venv/lib/python3.12/site-packages/boxmot/trackers/hybridsort/hybridsort.py", line 299, in update
+    self.kf.update(convert_bbox_to_z(bbox))
+  File "/home/wonstran/dnt/dnt-baseline-venv/lib/python3.12/site-packages/boxmot/trackers/hybridsort/kalmanfilter_score_new.py", line 491, in update
+    self.unfreeze()
+  File "/home/wonstran/dnt/dnt-baseline-venv/lib/python3.12/site-packages/boxmot/trackers/hybridsort/kalmanfilter_score_new.py", line 427, in unfreeze
+    r = w / float(h)
+            ^^^^^^^^
+TypeError: only 0-dimensional arrays can be converted to Python scalars
