@@ -77,6 +77,25 @@ select = ["E", "F", "I", "UP", "B", "SIM", "RUF", "D"]
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = ["D", "E501"]
 "tools/**" = ["D", "E501"]
+# Legacy lint baseline (dnt 0.3.3): exactly the rule codes these pre-existing modules violated
+# when CI adopted `ruff check src tests tools`. Every other rule is enforced for them. Shrink this
+# list as modules are cleaned up (sub-project B); never add codes to hide new violations.
+"src/dnt/detect/signal/detector.py" = ["D100", "D102", "E501", "RUF013"]
+"src/dnt/detect/yolo/detector.py" = ["E501"]
+"src/dnt/detect/yolo/segmentor.py" = ["E501"]
+"src/dnt/engine/bbox_interp.py" = ["E501"]
+"src/dnt/engine/bbox_iou.py" = ["E501"]
+"src/dnt/filter/filter.py" = ["B905", "E501", "E722"]
+"src/dnt/label/labeler.py" = ["E501"]
+"src/dnt/shared/__init__.py" = ["D104"]
+"src/dnt/shared/download.py" = ["D100", "D103", "I001"]
+"src/dnt/shared/files.py" = ["E501"]
+"src/dnt/shared/filter.py" = ["B006", "B905", "D100", "D103", "E501", "I001"]
+"src/dnt/shared/synhcro.py" = [
+  "D100", "D200", "D205", "D212", "D410", "D411", "D413", "E501", "RUF002", "UP006", "UP035", "UP045",
+]
+"src/dnt/track/post_process.py" = ["E501"]
+"src/dnt/track/re_class.py" = ["E501"]
 
 [tool.ruff.format]
 

@@ -14,7 +14,8 @@ A virtualenv lives at `.venv/`. Run `source .venv/bin/activate` first.
 pip install -r requirements.txt   # deps (requirements.txt is just `-e .[dev]`)
 pip install -e .                  # editable install of src/dnt
 python -m build                   # sdist + wheel into dist/ (setuptools backend)
-ruff check src                    # lint (rules: E,F,I,UP,B,SIM,RUF,D; line-length 100)
+ruff check src tests tools        # lint, as CI runs it (rules: E,F,I,UP,B,SIM,RUF,D; line-length 100;
+                                  # legacy modules have a per-file baseline in pyproject.toml — shrink it, never grow it)
 ruff format src                   # format
 mkdocs serve                      # API docs from numpy-style docstrings (mkdocstrings)
 mkdocs build                      # writes site/ and site/dnt-manual.pdf (with-pdf plugin)
