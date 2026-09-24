@@ -11,7 +11,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 A virtualenv lives at `.venv/`. Run `source .venv/bin/activate` first.
 
 ```bash
-pip install -r requirements.txt   # deps (torch index pinned to cu116 in requirements.txt)
+pip install -r requirements.txt   # deps (requirements.txt is just `-e .[dev]`)
 pip install -e .                  # editable install of src/dnt
 python -m build                   # sdist + wheel into dist/ (setuptools backend)
 ruff check src                    # lint (rules: E,F,I,UP,B,SIM,RUF,D; line-length 100)
@@ -51,7 +51,9 @@ Supporting modules:
 
 ### Import quirk
 
-Every package `__init__.py` (and some modules) append their own directory to `sys.path`. As a result, some modules use **non-relative sibling imports**, such as `from shared.util import ...` in `labeler.py` and `from shared.download import ...` in `signal/detector.py`. Keep this in mind when moving modules or adding imports. Changing these to package-relative imports is safer, but they have to keep working both from an installed wheel and from `src/` on `sys.path`.
+Since 0.3.3, imports are package-relative throughout (`from ..shared.util import ...`, etc.); the old
+`sys.path`-manipulation hacks and non-relative sibling imports (`from shared.util import ...`) were
+removed, along with the top-level module names (`detector`, `shared`, `filter`, ...) they used to expose.
 
 ### Conventions
 

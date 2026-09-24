@@ -100,8 +100,10 @@ class Detector:
 
     Parameters
     ----------
-    model : DetectorModel, optional
-        Built-in model weights to use (for example `DetectorModel.YOLO26x`).
+    model : DetectorModel or str, optional
+        Built-in model weights to use. Accepts a `DetectorModel` member
+        (`DetectorModel.YOLO26x`), its value / file name (`"yolo26x.pt"`),
+        its stem (`"yolo26x"`), or its enum name (`"YOLO26x"`).
         Default is `DetectorModel.YOLO26x`.
     weights : str, optional
         Optional custom model weights to load. If relative, path is resolved
@@ -148,8 +150,10 @@ class Detector:
 
         Parameters
         ----------
-        model : DetectorModel, optional
-            Built-in model to use. Default is "yolo26x".
+        model : DetectorModel or str, optional
+            Built-in model to use. Accepts a `DetectorModel` member, its value /
+            file name (`"yolo26x.pt"`), its stem (`"yolo26x"`), or its enum name
+            (`"YOLO26x"`). Default is "yolo26x".
         weights : str, optional
             Customized model weights to load.
             Default is None, which means using the built-in weights in `model` choice.

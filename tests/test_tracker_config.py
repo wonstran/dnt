@@ -67,3 +67,22 @@ def test_max_dist_and_max_cos_dist_conflict():
 
 def test_reid_default_kept():
     assert BoTSORTConfig().reid_weights == ReIDWeights.OSNET_X1_0_MSMT17
+
+
+def test_max_dist_set_after_construction_is_not_ignored():
+    from dnt.track.tracker import _build_tracker_args
+
+    cfg = StrongSORTConfig()
+    cfg.max_dist = 0.3
+    with pytest.warns(DeprecationWarning, match="max_cos_dist"):
+        args = _build_tracker_args(cfg, device="cpu")
+    assert args["max_cos_dist"] == 0.3
+
+
+def test_max_dist_set_after_construction_conflicts_with_max_cos_dist():
+    cfg = StrongSORTConfig(max_cos_dist=0.4)
+    cfg.max_dist = 0.3
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", DeprecationWarning)
+        with pytest.raises(ValueError, match="both"):
+            cfg.tuning_values()

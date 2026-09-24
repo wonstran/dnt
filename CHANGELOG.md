@@ -29,6 +29,11 @@
   ByteTrack, BoT-SORT, StrongSORT, BoostTrack and SF-SORT and the `evolve_param_dict` passthrough. OC-SORT,
   Deep OC-SORT, HybridSORT and a `tracker_type` override to OC-SORT are exempt (reviewed defects
   BX16-NP2-*): they crash identically on 0.3.2.4 and 0.3.3 (see Known issues).
+- `Tracker(device=...)` now uses the same device names as `Detector`: `auto`, `cpu`, `cuda`, `cuda:N`,
+  `mps`, `xpu[:N]`. BoxMOT-style bare indices such as `device="0"` now raise `ValueError` (use
+  `"cuda:0"`); `device="cuda"` now works. With `auto`, trackers use CUDA if available, then Apple MPS,
+  else CPU (XPU hosts track on CPU, as before) — on Apple Silicon, ReID trackers now run on MPS instead
+  of CPU.
 
 ### Fixed
 - `interpolate_tracks_rts(track_file=...)` no longer drops the first row (B3).

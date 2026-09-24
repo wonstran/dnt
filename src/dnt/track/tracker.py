@@ -580,6 +580,21 @@ class StrongSORTConfig(MOTBaseConfig):
             self.max_cos_dist, self.max_dist = self.max_dist, None
         super().__post_init__()
 
+    def tuning_values(self) -> dict[str, Any]:
+        """Fold a post-construction `max_dist` into `max_cos_dist` (it bypasses `__post_init__`)."""
+        values = super().tuning_values()
+        if self.max_dist is not None:
+            warnings.warn(
+                "StrongSORTConfig(max_dist=...) is deprecated; use max_cos_dist.",
+                DeprecationWarning,
+                stacklevel=3,
+            )
+            if self.max_cos_dist is not None:
+                msg = "StrongSORTConfig: set max_cos_dist or the deprecated max_dist, not both."
+                raise ValueError(msg)
+            values["max_cos_dist"] = self.max_dist
+        return values
+
 
 @dataclass(kw_only=True)
 class DeepOCSORTConfig(MOTBaseConfig):

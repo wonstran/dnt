@@ -126,7 +126,7 @@ def migrate_legacy(data: dict[str, Any], *, source: str) -> dict[str, Any]:
         value = out.pop(key)
         new_key = _RENAMES.get(key, key)
         effective = new_key in EFFECTIVE_PARAMS[model]
-        if value == old_default:
+        if value is None or value == old_default:
             migrated.append(key)
             if effective:
                 out[new_key] = None
@@ -257,7 +257,7 @@ def build_tracker_args(
     """
     from .._device import resolve_device
 
-    extra = dict(extra_kwargs)
+    extra = {k: v for k, v in extra_kwargs.items() if v is not None}  # 0.3.2.4 dropped None values
 
     # 1. target tracker (§2.8.1)
     target = model

@@ -12,6 +12,7 @@ from dnt.track.tracker import (
     ByteTrackConfig,
     DeepOCSORTConfig,
     HybridSORTConfig,
+    MOTBaseConfig,
     OCSORTConfig,
     SFSORTConfig,
     StrongSORTConfig,
@@ -135,3 +136,34 @@ def test_saved_passthrough_files_keep_0324_meaning():
         with pytest.warns(DeprecationWarning):
             plan = _plan_tracker(loaded(), device="cpu")
         assert (plan.tracker_type, plan.evolve_param_dict) == ("ocsort", SNAPSHOT["ocsort"])
+
+
+# ---- MOTBaseConfig.from_dict/from_legacy_dict stash untouched fields as None in extra_kwargs;
+# build_tracker_args must drop them, not pass them through as overrides (0.3.2.4 parity) --------
+@pytest.mark.parametrize("name", sorted(CLASSES))
+def test_motbaseconfig_from_legacy_dict_gives_snapshot_args(name):
+    old = json.loads((LEGACY / "dict" / f"{name}.json").read_text())
+    with pytest.warns(DeprecationWarning, match="0.3.2.x"):
+        cfg = MOTBaseConfig.from_legacy_dict(old)
+    assert _build_tracker_args(cfg, device="cpu") == SNAPSHOT[name]
+
+
+@pytest.mark.parametrize("name", sorted(CLASSES))
+def test_motbaseconfig_from_dict_gives_snapshot_args(name):
+    old = json.loads((LEGACY / "dict" / f"{name}.json").read_text())
+    with pytest.warns(DeprecationWarning, match="0.3.2.x"):
+        cfg = MOTBaseConfig.from_dict(old)
+    assert _build_tracker_args(cfg, device="cpu") == SNAPSHOT[name]
+
+
+def test_motbaseconfig_from_dict_current_format_gives_snapshot_args():
+    cfg = MOTBaseConfig.from_dict(ByteTrackConfig().to_dict())
+    assert _build_tracker_args(cfg, device="cpu") == SNAPSHOT["bytetrack"]
+
+
+# ---- a legacy value of None is unset, not a user setting (spec §2.7) ----------------------------
+def test_legacy_none_value_treated_as_unset():
+    old_sf = json.loads((LEGACY / "dict" / "sfsort.json").read_text())
+    with pytest.warns(DeprecationWarning, match="0.3.2.x"):
+        cfg = SFSORTConfig.from_dict({**old_sf, "det_thresh": None})
+    assert _build_tracker_args(cfg, device="cpu") == SNAPSHOT["sfsort"]

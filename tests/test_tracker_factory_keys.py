@@ -175,3 +175,16 @@ def test_extra_half_precedence():
         _plan_tracker(ByteTrackConfig(extra_kwargs={"half": True}), device="cpu", half=False)
     with pytest.warns(DeprecationWarning, match="half"):
         assert _plan_tracker(ByteTrackConfig(extra_kwargs={"half": True}), device="cpu", half=None).half is True
+
+
+# ---- extra_kwargs None values are dropped, not treated as user overrides (0.3.2.4 parity) -----
+def test_extra_kwargs_none_tuning_value_gives_untuned_snapshot():
+    cfg = ByteTrackConfig(extra_kwargs={"track_thresh": None})
+    plan = _plan_tracker(cfg, device="cpu")
+    assert plan.evolve_param_dict == SNAPSHOT["bytetrack"]
+
+
+def test_extra_kwargs_none_per_class_keeps_default_with_no_warning(recwarn):
+    plan = _plan_tracker(ByteTrackConfig(extra_kwargs={"per_class": None}), device="cpu")
+    assert plan.per_class is False
+    assert not [w for w in recwarn if issubclass(w.category, DeprecationWarning)]

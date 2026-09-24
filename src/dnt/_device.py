@@ -65,15 +65,19 @@ def to_boxmot_device(device: str) -> str:
     Parameters
     ----------
     device : str
-        A resolved device string (e.g., "cuda", "cuda:1", "cpu", "mps").
+        A resolved device string (e.g., "cuda", "cuda:1", "cpu", "mps", "xpu").
 
     Returns
     -------
     str
-        BoxMOT's device format. CUDA devices are mapped to their index
-        (or "0" if no index is given), other devices pass through unchanged.
+        BoxMOT's device format. CUDA devices map to their index (or "0" if no
+        index is given), "mps" passes through unchanged, and every other value
+        (including "cpu" and any "xpu"/"xpu:N") maps to "cpu" since BoxMOT has
+        no XPU support.
 
     """
     if device.startswith("cuda"):
         return device.split(":", maxsplit=1)[1] if ":" in device else "0"
-    return device
+    if device == "mps":
+        return "mps"
+    return "cpu"

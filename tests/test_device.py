@@ -13,6 +13,11 @@ def cpu_only(monkeypatch):
     monkeypatch.setattr(_device, "_available", lambda b: b == "cpu")
 
 
+@pytest.fixture
+def xpu_only(monkeypatch):
+    monkeypatch.setattr(_device, "_available", lambda b: b in ("xpu", "cpu"))
+
+
 def test_auto_prefers_cuda(cuda_only):
     assert _device.resolve_device("auto") == "cuda"
     assert _device.resolve_device(None) == "cuda"
@@ -39,9 +44,20 @@ def test_half_allowed(device, half, expected):
     assert _device.half_allowed(device, half) is expected
 
 
-@pytest.mark.parametrize(("device", "expected"), [("cuda", "0"), ("cuda:1", "1"), ("cpu", "cpu"), ("mps", "mps")])
+@pytest.mark.parametrize(("device", "expected"), [
+    ("cuda", "0"), ("cuda:1", "1"), ("cpu", "cpu"), ("mps", "mps"),
+    ("xpu", "cpu"), ("xpu:1", "cpu"),
+])
 def test_to_boxmot_device_mapping(device, expected):
     assert _device.to_boxmot_device(device) == expected
+
+
+def test_xpu_host_tracks_on_cpu(xpu_only):
+    from dnt.track.tracker import Tracker, _plan_tracker
+
+    plan = _plan_tracker(Tracker().boxmot_config, device="auto")
+    resolved = _device.resolve_device(plan.device)
+    assert _device.to_boxmot_device(resolved) == "cpu"
 
 
 def test_detector_half_on_indexed_cuda(monkeypatch, cuda_only):
