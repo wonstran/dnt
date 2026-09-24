@@ -46,16 +46,22 @@ def test_detection(tmp_path):
 @pytest.mark.parametrize(("case_id", "cls_name", "kwargs"), gc.CASES, ids=[c[0] for c in gc.CASES])
 def test_tracks_byte_identical(case_id, cls_name, kwargs, tmp_path):
     out = tmp_path / f"track_{case_id}.txt"
-    gc.run_track(cls_name, kwargs, GOLD / "dets.txt", CLIP, out)
     status = MANIFEST["cases"][case_id]
     if status["status"] == "known_defect":
         gc.check_manifest_defects(MANIFEST, DEFECTS_PATH)  # no field of any entry changed since generation
         entry = DEFECTS[status["defect_id"]]  # the exemption still exists and its evidence is unchanged
         assert entry["evidence_sha256"] == status["evidence_sha256"]
         assert gc.sha256(GOLD / f"traceback_{case_id}.txt") == status["traceback_sha256"]
-        print(f"EXEMPT {case_id}: reviewed baseline defect {status['defect_id']}")
+        try:
+            gc.run_track(cls_name, kwargs, GOLD / "dets.txt", CLIP, out)
+        except Exception as exc:  # the reviewed upstream defect must reproduce identically
+            assert gc.match_defect(entry, exc), f"{case_id}: failure differs from reviewed defect {entry['id']}: {exc!r}"
+            print(f"EXEMPT {case_id}: reproduces reviewed baseline defect {status['defect_id']}")
+            return
+        print(f"EXEMPT {case_id}: reviewed baseline defect {status['defect_id']} no longer reproduces on 0.3.3")
         assert len(pd.read_csv(out, header=None).columns) == 10
         return
+    gc.run_track(cls_name, kwargs, GOLD / "dets.txt", CLIP, out)
     assert out.read_bytes() == (GOLD / f"track_{case_id}.txt").read_bytes()
 
 
