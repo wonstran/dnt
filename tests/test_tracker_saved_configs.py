@@ -145,7 +145,10 @@ def test_motbaseconfig_from_legacy_dict_gives_snapshot_args(name):
     old = json.loads((LEGACY / "dict" / f"{name}.json").read_text())
     with pytest.warns(DeprecationWarning, match="0.3.2.x"):
         cfg = MOTBaseConfig.from_legacy_dict(old)
-    assert _build_tracker_args(cfg, device="cpu") == SNAPSHOT[name]
+    with warnings.catch_warnings():
+        # MOTBaseConfig has no reid_weights field, so ReID dicts route it via extra_kwargs (deprecated)
+        warnings.simplefilter("ignore", DeprecationWarning)
+        assert _build_tracker_args(cfg, device="cpu") == SNAPSHOT[name]
 
 
 @pytest.mark.parametrize("name", sorted(CLASSES))
@@ -153,7 +156,10 @@ def test_motbaseconfig_from_dict_gives_snapshot_args(name):
     old = json.loads((LEGACY / "dict" / f"{name}.json").read_text())
     with pytest.warns(DeprecationWarning, match="0.3.2.x"):
         cfg = MOTBaseConfig.from_dict(old)
-    assert _build_tracker_args(cfg, device="cpu") == SNAPSHOT[name]
+    with warnings.catch_warnings():
+        # MOTBaseConfig has no reid_weights field, so ReID dicts route it via extra_kwargs (deprecated)
+        warnings.simplefilter("ignore", DeprecationWarning)
+        assert _build_tracker_args(cfg, device="cpu") == SNAPSHOT[name]
 
 
 def test_motbaseconfig_from_dict_current_format_gives_snapshot_args():

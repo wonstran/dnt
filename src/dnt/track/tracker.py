@@ -1041,6 +1041,8 @@ class Tracker:
             raise ImportError(msg) from exc
 
         plan = _plan_tracker(config, device=device, half=half)
+        if plan.tracker_type in bx.UNFREEZE_DEFECT_TRACKERS:
+            warnings.warn(bx.UNFREEZE_DEFECT_NOTE, UserWarning, stacklevel=3)
         resolved = resolve_device(plan.device)
         return create_tracker(
             tracker_type=plan.tracker_type,
@@ -1314,7 +1316,14 @@ class Tracker:
             else:
                 dets = np.empty((0, 6), dtype=float)
 
-            outputs = tracker.update(dets, frame)
+            try:
+                outputs = tracker.update(dets, frame)
+            except TypeError as exc:
+                # Same exception, message and raise site (golden defects still match); explain it.
+                affected = set(type(tracker).__module__.split(".")) & bx.UNFREEZE_DEFECT_TRACKERS
+                if affected and str(exc) == bx.UNFREEZE_DEFECT_MESSAGE:
+                    exc.add_note(bx.UNFREEZE_DEFECT_NOTE)
+                raise
 
             frame_tracks = self._parse_boxmot_outputs(
                 outputs,

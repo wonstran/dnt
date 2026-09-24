@@ -71,6 +71,7 @@
   raise `TypeError: only 0-dimensional arrays can be converted to Python scalars` as soon as a lost track
   is re-detected. This is a BoxMOT 16.0.11 defect in `unfreeze()` under numpy >= 2 and was already present
   in 0.3.2.x. Use ByteTrack, BoT-SORT, StrongSORT, BoostTrack or SF-SORT until the BoxMOT upgrade planned
-  for dnt 0.4.
+  for dnt 0.4. Building one of these trackers now emits a `UserWarning`, and the `TypeError` carries a
+  note explaining the issue; the exception itself (type, message) is unchanged.
 - `extra_kwargs["tracker_type"]` overrides from a non-ReID config (ByteTrack, OC-SORT, SF-SORT) to a ReID
   tracker now raise `ValueError`; in 0.3.2.4 all five such combinations crashed inside BoxMOT.

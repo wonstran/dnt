@@ -74,6 +74,16 @@ SFSORT_RANGES: dict[str, tuple[float | str, float | str]] = {
 # ReID targets that ran with reid_weights=None on 0.3.2.4 (tests/data/tracker_type_reid_none.json).
 REID_NONE_TARGETS_OK: frozenset[str] = frozenset()
 
+# BoxMOT 16.0.11 unfreeze() calls float() on shape-(1,) arrays, which numpy>=2 rejects: these
+# trackers raise TypeError when a lost track is re-detected (golden defects BX16-NP2-*).
+UNFREEZE_DEFECT_TRACKERS = frozenset({"ocsort", "deepocsort", "hybridsort"})
+UNFREEZE_DEFECT_MESSAGE = "only 0-dimensional arrays can be converted to Python scalars"
+UNFREEZE_DEFECT_NOTE = (
+    "Known issue (dnt 0.3.3): BoxMOT 16.0.11's OC-SORT, Deep OC-SORT and HybridSORT raise this "
+    "TypeError under numpy>=2 when a lost track is re-detected. Use ByteTrack, BoT-SORT, "
+    "StrongSORT, BoostTrack or SF-SORT until the BoxMOT upgrade in dnt 0.4. See CHANGELOG.md."
+)
+
 FACTORY_KEYS = (
     "tracker_type", "evolve_param_dict", "tracker_config", "per_class", "reid_weights", "device",
     "half",

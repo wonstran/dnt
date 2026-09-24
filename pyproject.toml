@@ -107,4 +107,8 @@ markers = [
   "golden: needs DNT_REF_CLIP and DNT_GOLDEN_DIR (opt-in)",
   "slow: builds and installs the wheel (CI wheel job)",
 ]
-filterwarnings = ["error::FutureWarning:dnt.*"]
+filterwarnings = [
+  "error::FutureWarning:dnt.*",
+  # asserted explicitly in tests/test_tracker_known_issue.py; silenced elsewhere to keep output clean
+  "ignore:Known issue \\(dnt 0.3.3\\):UserWarning",
+]
