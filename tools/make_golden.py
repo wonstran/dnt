@@ -11,7 +11,7 @@ from pathlib import Path
 import cv2
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-import golden_cases as gc  # noqa: E402
+import golden_cases as gc
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFECTS = ROOT / "tests" / "golden" / "known_baseline_defects.yaml"

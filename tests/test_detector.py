@@ -2,10 +2,10 @@ import inspect
 
 import pandas as pd
 import pytest
+from fake_ultralytics import FakeModel
 
 from dnt.detect.yolo import detector as det_mod
 from dnt.detect.yolo.detector import DetectorModel
-from fake_ultralytics import FakeModel
 
 
 @pytest.fixture

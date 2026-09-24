@@ -35,7 +35,7 @@ def _no_legacy_warning(record):
 def test_legacy_constants_match_0324_snapshots():
     defaults = json.loads((DATA / "legacy_0324_defaults.json").read_text())
     fields = json.loads((DATA / "legacy_0324_fields.json").read_text())
-    assert bx.LEGACY_0324_DEFAULTS == defaults
+    assert defaults == bx.LEGACY_0324_DEFAULTS
     assert {k: sorted(v) for k, v in bx.LEGACY_0324_FIELDS.items()} == fields
 
 
@@ -98,7 +98,7 @@ def test_hand_written_partial_yaml_is_strict(tmp_path):
 
 
 def test_legacy_flag_overrides():
-    with pytest.raises(ValueError, match="not a dnt 0.3.2.x config"):
+    with pytest.raises(ValueError, match="not a dnt 0.3.2.x config"):  # noqa: RUF043 -- "." wildcards are harmless here; re.escape() would tighten matching
         ByteTrackConfig.from_dict({"model": "bytetrack"}, legacy=True)
     old = json.loads((LEGACY / "dict" / "bytetrack.json").read_text())
     cfg = ByteTrackConfig.from_dict(old, legacy=False)

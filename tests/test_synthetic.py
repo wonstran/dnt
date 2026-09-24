@@ -1,6 +1,5 @@
 import cv2
 import pandas as pd
-
 from synthetic import FPS, GAP, N_FRAMES, OBJ3_START, StubDetector
 
 DET_FIELDS = ["frame", "res", "x", "y", "w", "h", "conf", "class"]

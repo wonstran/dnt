@@ -10,7 +10,6 @@ from dataclasses import MISSING, fields
 from enum import Enum
 from pathlib import Path
 
-import boxmot
 import yaml
 from boxmot.trackers.tracker_zoo import TRACKER_MAPPING, get_tracker_config
 

@@ -1,9 +1,9 @@
 import cv2
 import pandas as pd
 import pytest
+from synthetic import StubDetector
 
 from dnt.label import labeler as lab
-from synthetic import StubDetector
 
 
 @pytest.fixture

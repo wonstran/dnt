@@ -12,7 +12,7 @@ from pathlib import Path
 import cv2
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-import golden_cases as gc  # noqa: E402
+import golden_cases as gc
 
 STAGES = ("detect", "track", "post")
 
@@ -42,8 +42,9 @@ def main() -> None:
     except ValueError as exc:
         p.error(str(exc))
 
-    import dnt
     import torch
+
+    import dnt
 
     cap = cv2.VideoCapture(str(a.video))
     frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))

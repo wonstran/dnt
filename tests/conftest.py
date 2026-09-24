@@ -5,7 +5,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent / "support"))
 
-from synthetic import GroundTruth, StubDetector, make_synthetic_video  # noqa: E402
+from synthetic import GroundTruth, StubDetector, make_synthetic_video
 
 
 @pytest.fixture(scope="session")

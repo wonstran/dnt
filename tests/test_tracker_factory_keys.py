@@ -171,7 +171,7 @@ def test_extra_device_conflict_raises(monkeypatch):
 
 
 def test_extra_half_precedence():
-    with pytest.raises(ValueError, match="Tracker\\(.*half"):
+    with pytest.raises(ValueError, match=r"Tracker\(.*half"):
         _plan_tracker(ByteTrackConfig(extra_kwargs={"half": True}), device="cpu", half=False)
     with pytest.warns(DeprecationWarning, match="half"):
         assert _plan_tracker(ByteTrackConfig(extra_kwargs={"half": True}), device="cpu", half=None).half is True

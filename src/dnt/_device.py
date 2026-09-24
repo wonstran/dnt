@@ -12,7 +12,11 @@ def _available(backend: str) -> bool:
     if backend == "cuda":
         return torch.cuda.is_available()
     if backend == "xpu":
-        return hasattr(torch, "xpu") and hasattr(torch.xpu, "is_available") and torch.xpu.is_available()
+        return (
+            hasattr(torch, "xpu")
+            and hasattr(torch.xpu, "is_available")
+            and torch.xpu.is_available()
+        )
     if backend == "mps":
         return hasattr(torch.backends, "mps") and torch.backends.mps.is_available()
     return backend == "cpu"
@@ -41,7 +45,10 @@ def resolve_device(device: str | None = "auto") -> str:
     requested = "auto" if device is None else str(device).lower().strip()
     backend = requested.split(":", maxsplit=1)[0]
     if backend not in _VALID:
-        raise ValueError(f"Invalid device={device!r}. Choose one of {sorted(_VALID)} or backend:index like 'cuda:0'.")
+        raise ValueError(
+            f"Invalid device={device!r}. Choose one of {sorted(_VALID)} "
+            "or backend:index like 'cuda:0'."
+        )
     if backend == "auto":
         return next(b for b in _AUTO_ORDER if _available(b))
     return requested if _available(backend) else "cpu"

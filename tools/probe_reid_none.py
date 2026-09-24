@@ -9,10 +9,10 @@ import traceback
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tests" / "support"))
-from synthetic import StubDetector, make_synthetic_video  # noqa: E402
+from synthetic import StubDetector, make_synthetic_video
 
-import dnt  # noqa: E402
-from dnt.track import ByteTrackConfig, Tracker  # noqa: E402
+import dnt
+from dnt.track import ByteTrackConfig, Tracker
 
 assert dnt.__version__ == "0.3.2.4"
 out = Path(sys.argv[1])

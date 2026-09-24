@@ -1,10 +1,16 @@
 import cv2
 import pandas as pd
 import pytest
+from synthetic import GAP, N_FRAMES
 
 from dnt.label import Labeler
-from dnt.track import ByteTrackConfig, BoTSORTConfig, Tracker, interpolate_tracks_rts, link_tracklets
-from synthetic import GAP, N_FRAMES
+from dnt.track import (
+    BoTSORTConfig,
+    ByteTrackConfig,
+    Tracker,
+    interpolate_tracks_rts,
+    link_tracklets,
+)
 
 
 @pytest.mark.parametrize("cfg", [ByteTrackConfig(), BoTSORTConfig()], ids=["bytetrack", "botsort"])

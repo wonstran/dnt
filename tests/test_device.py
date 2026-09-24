@@ -45,8 +45,9 @@ def test_to_boxmot_device_mapping(device, expected):
 
 
 def test_detector_half_on_indexed_cuda(monkeypatch, cuda_only):
-    from dnt.detect.yolo import detector as det_mod
     from fake_ultralytics import FakeModel
+
+    from dnt.detect.yolo import detector as det_mod
 
     monkeypatch.setattr(det_mod, "YOLO", FakeModel)
     d = det_mod.Detector(model=det_mod.DetectorModel.YOLO26n, device="cuda:0", half=True)
