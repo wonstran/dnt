@@ -4,6 +4,10 @@ repo_url: https://github.com/wonstran/dnt
 repo_name: wonstran/dnt
 docs_dir: docs
 site_dir: site
+exclude_docs: |
+  superpowers/
+  review_*.md
+  response_*.md
 watch:
   - src/dnt
 
@@ -20,6 +24,7 @@ theme:
 nav:
   - Home: index.md
   - Quickstart: quickstart.md
+  - Changelog: changelog.md
   - API Reference:
       - api/index.md
       - Package: api/dnt.md

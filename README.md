@@ -15,7 +15,7 @@ Surrogate safety measures (SSMs) can be generated using the **Traffic Surrogate 
 ## Requirements
 
 - OS: Ubuntu 20.04+ (or compatible Linux).
-- Python: 3.9+.
+- Python: 3.11+.
 - CUDA GPU recommended for detection/tracking speed.
 
 Install dependencies from:
@@ -64,6 +64,10 @@ tracks = tracker.track(
     video_file="/path/to/video.mp4",
 )
 ```
+
+**Tuning trackers.** Every tuning field defaults to `None`, meaning BoxMOT's own default. Set only what you
+want to change, e.g. `ByteTrackConfig(track_thresh=0.5)`. Settings that a tracker ignores raise
+`ValueError`. See BoxMOT's documentation for parameter meanings: https://github.com/mikel-brostrom/boxmot
 
 ### 3) RTS interpolation (post-process)
 
