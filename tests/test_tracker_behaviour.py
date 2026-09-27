@@ -72,6 +72,7 @@ PROBES = [
     ("boosttrack", "det_thresh", 0.95, "plain", "no_tracks"),
     ("sfsort", "high_th", 0.95, "plain", "no_tracks"),
     ("sfsort", "new_track_th", 0.95, "plain", "no_tracks"),
+    ("strongsort", "min_conf", 0.95, "plain", "no_tracks"),
     # low-score band: odd frames at conf 0.3 -> excluding them loses rows
     ("bytetrack", "min_conf", 0.5, "low", "fewer_rows"),
     ("botsort", "track_low_thresh", 0.5, "low", "fewer_rows"),
@@ -189,3 +190,10 @@ def test_track_empty_det_file(tmp_path, synthetic_video):
     df = Tracker(config=ByteTrackConfig(), device="cpu").track(str(empty), str(out), str(video))
     assert list(df.columns) == Tracker.TRACK_FIELDS and df.empty
     assert out.exists() and out.read_text() == ""
+
+
+def test_strongsort_lower_min_conf_keeps_low_score_detections(dets_files):
+    # 'low' variant: odd frames score 0.3, below BoxMOT's YAML default of 0.6
+    default = _run("strongsort", "low", dets_files)
+    lowered = _run("strongsort", "low", dets_files, min_conf=0.2)
+    assert len(lowered) > len(default)

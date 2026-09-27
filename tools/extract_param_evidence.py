@@ -49,6 +49,7 @@ EVIDENCE = [
     ("strongsort", "n_init", "strongsort/sort/tracker.py", 164),
     ("strongsort", "ema_alpha", "strongsort/sort/track.py", 181),
     ("strongsort", "mc_lambda", "strongsort/sort/tracker.py", 119),
+    ("strongsort", "min_conf", "strongsort/strongsort.py", 113),
     ("hybridsort", "det_thresh", "hybridsort/hybridsort.py", 511),
     ("hybridsort", "max_age", "hybridsort/hybridsort.py", 723),
     ("hybridsort", "min_hits", "hybridsort/hybridsort.py", 710),

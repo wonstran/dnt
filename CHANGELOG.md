@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.3.3 — 2026-09-23
+## 0.3.3 — 2026-09-26
 
 ### Important
 - **Tracker settings now take effect.** In 0.3.2.x every tuning field of the tracker configs was silently
@@ -34,6 +34,80 @@
   `"cuda:0"`); `device="cuda"` now works. With `auto`, trackers use CUDA if available, then Apple MPS,
   else CPU (XPU hosts track on CPU, as before) — on Apple Silicon, ReID trackers now run on MPS instead
   of CPU.
+- **`Detector` now defaults to the batched fast path.** It gains `fast` (default `True`)
+  and `batch` (default `8`), read by `detect()` (and, through it, `detect_batch()`) on
+  every call: with `self.fast` True, `detect()` redirects to
+  `detect_fast(..., batch=self.batch)` instead of running its own per-frame pipeline — see
+  `detect_fast()`'s changelog entry below for what that changes numerically (exact at
+  `batch=1`; small, bounded, expected drift at `batch>1` with `half=True`, from FP16
+  batching numerics, not a defect). Existing code that constructs `Detector(...)` without
+  `fast=`/`batch=` is now on this path by default for every `detect()`/`detect_batch()`
+  call. Pass `Detector(fast=False, ...)`, or set `detector.fast = False` after
+  construction, to keep the exact previous per-frame behavior for later calls (required
+  for `show=True`, which `detect_fast()` doesn't support — calling `detect(show=True)`
+  while `self.fast` is True raises `ValueError`). `fast`/`batch` are plain, mutable
+  instance attributes, not `detect()`/`detect_batch()` call arguments — mirroring `conf`,
+  `nms`, `device` and the rest of `Detector`'s existing settings.
+
+### Added
+- `Detector` gains `imgsz`, `classes`, `rect`, `agnostic_nms` and `embed`, forwarded to Ultralytics
+  `model.predict()` in both `detect()` and `detect_frames()`. They default to Ultralytics' own defaults
+  (`640`, `None`, `False`, `False`, `None`), so existing calls are unaffected.
+- `Detector` gains `class_names`, sugar for `classes`: resolves class names (e.g. `["car", "truck"]`)
+  against `dnt.shared.util.load_class_dict()` (COCO names) and merges them into `classes`. Raises
+  `ValueError` for an unknown name.
+- `Tracker.track()`/`track_batch()` gain `verbose` (default `True`), matching `Detector.detect()`.
+  `verbose=False` disables the per-video progress bar.
+- `StrongSORTConfig` gains `min_conf`. BoxMOT's StrongSORT drops every detection scored below it before
+  association, and the value it gets by default (from BoxMOT's YAML) is `0.6`, a hard cut with no
+  low-score second stage. It could not be changed before; e.g. `StrongSORTConfig(min_conf=0.3)` now
+  keeps weaker detections. The default (`None`) keeps `0.6`, so untuned results are unchanged.
+- `Filter.deduplicate_boxes(detections, iou_thresh=0.45, containment_thresh=0.65)`: suppresses
+  duplicate/nested-sub-box detections within each frame (e.g. a torso box nested inside a full-body
+  box), keeping the higher-confidence box of each overlapping pair. Built on `dnt.engine.ious()`;
+  both the IoU and containment checks it uses follow `cython_bbox.bbox_overlaps()`'s pixel-inclusive
+  area convention (`(w+1)*(h+1)`), consistent with the rest of dnt's IoU-based matching.
+- `Labeler.draw_tracks()` gains `message` (default `""`), matching `Detector.detect()`/`Tracker.track()`.
+  It sets the progress-bar text shown after the video/batch position; `None` falls back to
+  `input_video`, same as `Tracker.track()`'s fallback to the video file name. Ignored when
+  `compress_message` is True.
+- `Detector.detect_fast(input_video, ..., batch=None)`: same output as `detect()`, but batches
+  `batch` (or `self.batch` if not given; see `Detector`) frames through the underlying Ultralytics
+  `AutoBackend` in one forward pass instead of calling `model.predict()` once per frame.
+  `detect()`'s per-frame path rebuilds an inference dataset and
+  forces several CUDA synchronizations on every single-frame call, regardless of batch size; measured
+  on an RTX 5070 Ti with RT-DETR-x, this is roughly 3-4x faster. At `batch=1` it reproduces `detect()`
+  exactly (verified frame-for-frame, CPU and CUDA, YOLO and RT-DETR — see `detect_fast()`'s tests and
+  docstring); at `batch>1` on CUDA with `half=True`, FP16's batched cuDNN/cuBLAS kernels can shift a
+  small fraction of results (measured: ~6% of frames, vs ~2.5% for `half=False`), which is inherent to
+  batched half-precision GPU inference and not specific to this method. No `show=` preview (batching
+  trades per-frame latency for throughput); use `detect()` for that.
+- `Detector.detect()` and `detect_fast()` gain `return_df` (default `True`).
+  With `return_df=False`, detections are only written to `iou_file` (then required) and `None` is
+  returned. For a 24-hour video (~13–22 M detections) this avoids holding every row in memory.
+
+### Changed
+- `detect_fast()` (and so `detect()` by default) now writes `iou_file` as it goes: each batch's
+  rows are appended to `<iou_file>.part`, which is renamed to `iou_file` only once the whole range
+  is done, so an existing `iou_file` is always complete. The
+  finished file is byte-for-byte what the previous single write produced. An interrupted run leaves
+  the `.part` file, and the next call with the same `iou_file` resumes from it (dropping and
+  re-detecting its last frame, which may have been cut off); delete the `.part` file to start over.
+  Rows are also kept as NumPy arrays rather than one dict per box (~64 vs ~431 bytes each), so
+  memory stays far lower even with `return_df=True`.
+- `detect_batch()` no longer builds the returned table it discards (it passes `return_df=False`
+  when writing files), and with `is_overwrite=True` it deletes a video's stale `.part` file instead
+  of resuming from it.
+- `Tracker.track()`/`track_batch()` `message` now defaults to `""`, so the progress bar no longer shows
+  the video file name (`Tracking 1 of 3` instead of `Tracking 1 of 3 - <file name>`). Pass
+  `message=None` to get the file name back, or any string to show that instead.
+- `Detector.detect()`/`detect_batch()` no longer print `Wrote detections to <file>` after writing a
+  detection file. `detect_batch()` still returns the written file paths.
+- `Labeler.draw_tracks()`'s progress bar no longer shows `input_video` by default outside of batch
+  mode (`Generating labels` instead of `Generating labels <file>`), matching `Tracker.track()`'s
+  `message=""` default. Pass `message=None` for the previous behavior. Its batch-mode check
+  (`video_index`/`video_tot`) also now uses `is not None`, like `Tracker.track()`, instead of a
+  truthy check, so `video_index=0` is now recognized as being in a batch.
 
 ### Fixed
 - `interpolate_tracks_rts(track_file=...)` no longer drops the first row (B3).
@@ -47,6 +121,15 @@
 - `Labeler` releases video captures; `export_track_frames(bbox=False)` writes frames (B14).
 - `Tracker.track` no longer re-runs `update()` after a `TypeError`; empty detection files produce an empty track file.
 - `track_batch` output names strip only a trailing `_iou`.
+- `Detector` and `Segmentor` no longer pass `half=` to Ultralytics `model.predict()` on Ultralytics
+  versions that deprecated it in favor of `quantize=` — that combination logged a `WARNING` on every
+  single frame. `dnt._device.predict_precision_kwargs()` detects which the installed Ultralytics accepts
+  and passes the matching kwarg; `Detector(half=...)`/`Segmentor(enable_half=...)` themselves are
+  unchanged.
+- `Filter.filter_iou()` and `Filter.deduplicate_boxes()` raised `KeyError` when passed the DataFrame
+  `Detector.detect()` returns directly (named `Detector.DET_FIELDS` columns), since both were written
+  for the positional/headerless layout (`pd.read_csv(file, header=None)`). Both now accept either
+  layout and preserve whichever one the input had.
 
 ### Packaging
 - Requires Python 3.11+ (the code already did).
@@ -75,3 +158,4 @@
   note explaining the issue; the exception itself (type, message) is unchanged.
 - `extra_kwargs["tracker_type"]` overrides from a non-ReID config (ByteTrack, OC-SORT, SF-SORT) to a ReID
   tracker now raise `ValueError`; in 0.3.2.4 all five such combinations crashed inside BoxMOT.
+

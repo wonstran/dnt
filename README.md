@@ -51,6 +51,9 @@ dets = detector.detect(
 )
 ```
 
+For long videos, pass `return_df=False` to only write `iou_file` (rows are streamed to disk
+batch by batch, and an interrupted run resumes from `/path/to/dets.txt.part` on the next call).
+
 ### 2) Tracking
 
 ```python

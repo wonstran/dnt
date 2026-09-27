@@ -552,6 +552,10 @@ class StrongSORTConfig(MOTBaseConfig):
     mc_lambda : float | None
         Motion compensation blending factor (default: None (BoxMOT 16: 0.98)).
         Increasing this gives more weight to motion compensation.
+    min_conf : float | None
+        Minimum detection confidence; lower-scored detections are dropped before
+        association (default: None (BoxMOT 16: 0.6)). StrongSORT has no low-score second
+        stage, so this is a hard cut: lower it to track weaker detections.
 
     """
 
@@ -565,6 +569,7 @@ class StrongSORTConfig(MOTBaseConfig):
     nn_budget: int | None = None
     ema_alpha: float | None = None
     mc_lambda: float | None = None
+    min_conf: float | None = None
 
     def __post_init__(self) -> None:
         """Map the deprecated `max_dist` alias onto `max_cos_dist`."""
@@ -867,7 +872,8 @@ class Tracker:
         show: bool = False,
         video_index: int | None = None,
         video_tot: int | None = None,
-        message: str | None = None,
+        message: str | None = "",
+        verbose: bool = True,
     ) -> pd.DataFrame:
         """Run tracking on a single detection file using BoxMOT.
 
@@ -889,8 +895,10 @@ class Tracker:
         video_tot : int, optional
             Total number of videos in batch (for complete progress context).
         message : str | None, optional
-            Optional progress text shown in the progress bar. If None, the
-            video stem is used (default: None).
+            Progress text shown in the progress bar. Default is "" (no text);
+            pass None to show the video file name.
+        verbose : bool, optional
+            Whether to show a progress bar. Default is True.
 
         Returns
         -------
@@ -934,6 +942,7 @@ class Tracker:
             video_index=video_index,
             video_tot=video_tot,
             message=message,
+            verbose=verbose,
         )
 
     def track_batch(
@@ -943,7 +952,8 @@ class Tracker:
         output_path: str | None = None,
         is_overwrite: bool = False,
         is_report: bool = True,
-        message: str | None = None,
+        message: str | None = "",
+        verbose: bool = True,
     ) -> list[str]:
         """Run tracking on multiple detection files sequentially.
 
@@ -964,8 +974,10 @@ class Tracker:
         is_report : bool, optional
             If True (default), include skipped files in returned list.
         message : str | None, optional
-            Optional progress text shown in each tracking progress bar.
-            If None (default), each video's stem is used.
+            Progress text shown in each tracking progress bar. Default is ""
+            (no text); pass None to show each video's file name.
+        verbose : bool, optional
+            Whether to show a progress bar for each video. Default is True.
 
         Returns
         -------
@@ -1016,6 +1028,7 @@ class Tracker:
                 video_index=idx,
                 video_tot=total_videos,
                 message=message,
+                verbose=verbose,
             )
 
             if track_file:
@@ -1226,7 +1239,8 @@ class Tracker:
         show: bool = False,
         video_index: int | None = None,
         video_tot: int | None = None,
-        message: str | None = None,
+        message: str | None = "",
+        verbose: bool = True,
     ) -> pd.DataFrame:
         """Execute BoxMOT tracking on one video with corresponding detections.
 
@@ -1249,8 +1263,10 @@ class Tracker:
         video_tot : int | None, optional
             Total videos in batch (for UI display).
         message : str | None, optional
-            Optional progress text shown in the progress bar. If None, the
-            video stem is used.
+            Progress text shown in the progress bar. Default is "" (no text);
+            pass None to show the video file name.
+        verbose : bool, optional
+            Whether to show a progress bar. Default is True.
 
         Returns
         -------
@@ -1275,7 +1291,8 @@ class Tracker:
 
         cap = cv2.VideoCapture(video_file)
         if not cap.isOpened():
-            print(f"Couldn't open video {video_file}")
+            if verbose:
+                print(f"Couldn't open video {video_file}")
             return pd.DataFrame(columns=self.TRACK_FIELDS)
 
         tracker = self._build_boxmot_tracker(
@@ -1287,10 +1304,11 @@ class Tracker:
         )
 
         pbar_message = message if message is not None else Path(video_file).stem
-        desc = f"Tracking {pbar_message}"
-        pbar = tqdm(total=total_frames, desc=desc, unit="frames")
-        if video_index is not None and video_tot is not None:
-            pbar.set_description_str(f"Tracking {video_index} of {video_tot} - {pbar_message}")
+        in_batch = video_index is not None and video_tot is not None
+        desc = f"Tracking {video_index} of {video_tot}" if in_batch else "Tracking"
+        if pbar_message:
+            desc += f" - {pbar_message}" if in_batch else f" {pbar_message}"
+        pbar = tqdm(total=total_frames, desc=desc, unit="frames", disable=not verbose)
 
         results: list[list[float | int]] = []
         cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)

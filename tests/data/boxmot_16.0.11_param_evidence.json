@@ -254,6 +254,11 @@
       "file": "strongsort/sort/tracker.py",
       "line": 119
     },
+    "min_conf": {
+      "code": "remain_inds = dets[:, 4] >= self.min_conf",
+      "file": "strongsort/strongsort.py",
+      "line": 113
+    },
     "n_init": {
       "code": "self.n_init,",
       "file": "strongsort/sort/tracker.py",

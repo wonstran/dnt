@@ -1011,6 +1011,7 @@ class Labeler:
         video_index: int | None = None,
         video_tot: int | None = None,
         verbose: bool = True,
+        message: str | None = "",
     ):
         """Draw tracks on video.
 
@@ -1056,6 +1057,9 @@ class Labeler:
             Total video count for batch processing display.
         verbose : bool
             Whether to show progress. Default is True.
+        message : str | None, optional
+            Progress text shown in the progress bar. Default is "" (no text); pass None
+            to show `input_video`. Ignored when `compress_message` is True.
 
         Returns
         -------
@@ -1089,14 +1093,14 @@ class Labeler:
 
         selected_tracks = tracks.loc[(tracks["frame"] >= start_frame) & (tracks["frame"] <= end_frame)].copy()
 
-        pbar_desc = ""
         if self.compress_message:
             pbar_desc = "Generating labels"
         else:
-            if video_index and video_tot:
-                pbar_desc = f"Generating labels {video_index} of {video_tot}"
-            else:
-                pbar_desc = f"Generating labels {input_video} "
+            in_batch = video_index is not None and video_tot is not None
+            pbar_message = message if message is not None else input_video
+            pbar_desc = f"Generating labels {video_index} of {video_tot}" if in_batch else "Generating labels"
+            if pbar_message:
+                pbar_desc += f" - {pbar_message}" if in_batch else f" {pbar_message}"
 
         names = load_classes()
         pbar = tqdm(total=len(selected_tracks), unit=" frames", desc=pbar_desc, disable=not verbose)

@@ -38,9 +38,10 @@ EFFECTIVE_PARAMS: dict[str, frozenset[str]] = {
     "deepocsort": frozenset(
         {"det_thresh", "max_age", "min_hits", "iou_threshold", "asso_func", "delta_t", "inertia"}
     ),
-    "strongsort": frozenset(
-        {"max_cos_dist", "max_iou_dist", "max_age", "n_init", "nn_budget", "ema_alpha", "mc_lambda"}
-    ),
+    "strongsort": frozenset({
+        "max_cos_dist", "max_iou_dist", "max_age", "n_init", "nn_budget", "ema_alpha", "mc_lambda",
+        "min_conf",
+    }),
     "hybridsort": frozenset({"det_thresh", "max_age", "min_hits", "iou_threshold", "asso_func"}),
     "boosttrack": frozenset({"det_thresh", "max_age", "min_hits", "iou_threshold"}),
     "sfsort": frozenset({"high_th", "low_th", "new_track_th", "match_th_first", "match_th_second"}),

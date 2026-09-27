@@ -44,6 +44,70 @@ def test_draw_tracks_releases_capture(synthetic_video, tmp_path, capture_spy):
     assert capture_spy and all(c.released for c in capture_spy)
 
 
+@pytest.fixture
+def pbar_desc_spy(monkeypatch):
+    captured = []
+    real_tqdm = lab.tqdm
+
+    class Spy(real_tqdm):
+        def __init__(self, *args, **kwargs):
+            captured.append(kwargs.get("desc"))
+            super().__init__(*args, **kwargs)
+
+    monkeypatch.setattr(lab, "tqdm", Spy)
+    return captured
+
+
+def _write_one_track(tmp_path):
+    tracks = tmp_path / "t.txt"
+    pd.DataFrame([[0, 1, 10, 10, 20, 20, 0.9, 2, -1, -1]]).to_csv(tracks, index=False, header=False)
+    return tracks
+
+
+def test_draw_tracks_message_default_omits_filename(synthetic_video, tmp_path, pbar_desc_spy):
+    video, _ = synthetic_video
+    tracks = _write_one_track(tmp_path)
+    lab.Labeler().draw_tracks(input_video=str(video), output_video="", track_file=str(tracks), verbose=True)
+    assert pbar_desc_spy == ["Generating labels"]
+
+
+def test_draw_tracks_message_none_shows_input_video(synthetic_video, tmp_path, pbar_desc_spy):
+    video, _ = synthetic_video
+    tracks = _write_one_track(tmp_path)
+    lab.Labeler().draw_tracks(
+        input_video=str(video), output_video="", track_file=str(tracks), verbose=True, message=None
+    )
+    assert pbar_desc_spy == [f"Generating labels {video}"]
+
+
+def test_draw_tracks_message_custom_string(synthetic_video, tmp_path, pbar_desc_spy):
+    video, _ = synthetic_video
+    tracks = _write_one_track(tmp_path)
+    lab.Labeler().draw_tracks(
+        input_video=str(video), output_video="", track_file=str(tracks), verbose=True, message="clip A"
+    )
+    assert pbar_desc_spy == ["Generating labels clip A"]
+
+
+def test_draw_tracks_message_in_batch_uses_dash_separator(synthetic_video, tmp_path, pbar_desc_spy):
+    video, _ = synthetic_video
+    tracks = _write_one_track(tmp_path)
+    lab.Labeler().draw_tracks(
+        input_video=str(video), output_video="", track_file=str(tracks), verbose=True,
+        video_index=1, video_tot=3, message="clip A",
+    )
+    assert pbar_desc_spy == ["Generating labels 1 of 3 - clip A"]
+
+
+def test_draw_tracks_compress_message_ignores_message(synthetic_video, tmp_path, pbar_desc_spy):
+    video, _ = synthetic_video
+    tracks = _write_one_track(tmp_path)
+    lab.Labeler(compress_message=True).draw_tracks(
+        input_video=str(video), output_video="", track_file=str(tracks), verbose=True, message="clip A"
+    )
+    assert pbar_desc_spy == ["Generating labels"]
+
+
 def test_export_track_frames_without_bbox_writes_files(synthetic_video, tmp_path):
     video, _ = synthetic_video
     tracks = pd.DataFrame([[0, 1, 10, 10, 20, 20, 0.9, 2, -1, -1],

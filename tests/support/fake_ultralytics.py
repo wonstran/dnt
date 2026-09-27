@@ -25,8 +25,9 @@ class _Boxes:
 
 
 class _Result:
-    def __init__(self, boxes):
+    def __init__(self, boxes, masks=None):
         self.boxes = boxes
+        self.masks = masks
 
     def plot(self):
         raise NotImplementedError
@@ -41,4 +42,5 @@ class FakeModel:
         self.path = path
 
     def predict(self, source=None, **kwargs):
+        self.last_kwargs = kwargs
         return [_Result(_Boxes([self.BOX], [0.876], [2]))]

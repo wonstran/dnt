@@ -8,11 +8,54 @@ This module provides filtering utilities for detections and tracks based on:
 """
 
 import geopandas as gpd
+import numpy as np
 import pandas as pd
 from shapely import LineString, Point, Polygon, geometry
 from shapely.geometry.base import BaseGeometry
 from shapely.ops import unary_union
 from tqdm import tqdm
+
+from ..engine import ious
+
+# Detector.DET_FIELDS order. Not imported from dnt.detect.yolo.detector to avoid pulling
+# in Ultralytics (and its import-time side effects) just to filter a detections table.
+_DET_FIELD_POSITIONS = {"frame": 0, "res": 1, "x": 2, "y": 3, "w": 4, "h": 5, "conf": 6, "class": 7}
+
+
+def _det_columns(detections: pd.DataFrame) -> dict[str, int | str]:
+    """Map each detection field name to its actual column key in `detections`.
+
+    Accepts either the positional/headerless layout produced by
+    `pd.read_csv(file, header=None)` (columns `0..7`) or the named layout
+    `Detector.detect()` returns in memory (`Detector.DET_FIELDS`).
+
+    Parameters
+    ----------
+    detections : pd.DataFrame
+        Detections in either layout.
+
+    Returns
+    -------
+    dict[str, int | str]
+        Maps `frame, res, x, y, w, h, conf, class` to the column key actually present.
+
+    Raises
+    ------
+    KeyError
+        If `detections` has neither layout.
+
+    """
+    columns = set(detections.columns)
+    if set(_DET_FIELD_POSITIONS) <= columns:
+        return {name: name for name in _DET_FIELD_POSITIONS}
+    if set(_DET_FIELD_POSITIONS.values()) <= columns:
+        return dict(_DET_FIELD_POSITIONS)
+    msg = (
+        f"detections must have Detector.DET_FIELDS columns {list(_DET_FIELD_POSITIONS)} "
+        f"or the equivalent positional columns {list(_DET_FIELD_POSITIONS.values())}; "
+        f"got columns {list(detections.columns)}."
+    )
+    raise KeyError(msg)
 
 
 class Filter:
@@ -28,6 +71,8 @@ class Filter:
     -------
     filter_iou(detections, zones, class_list, score_threshold)
         Filter detections by IoU with zones and class list.
+    deduplicate_boxes(detections, iou_thresh, containment_thresh)
+        Suppress duplicate and nested-sub-box detections within each frame.
     filter_tracks(tracks, include_zones, exclude_zones, video_index, video_tot)
         Filter tracks by inclusion and exclusion zones.
     filter_tracks_by_zones_agg(tracks, zones, method, ref_point, offset, col_names, video_index, video_tot)
@@ -59,7 +104,9 @@ class Filter:
         Parameters
         ----------
         detections : pd.DataFrame
-            DataFrame of detections with columns for x, y, width, height, score, and class.
+            DataFrame of detections with columns for x, y, width, height, score, and class,
+            either the positional/headerless layout (`pd.read_csv(file, header=None)`) or
+            the named layout `Detector.detect()` returns (`Detector.DET_FIELDS`).
         zones : geometry.multipolygon, optional
             MultiPolygon zones to filter detections within. Default is None.
         class_list : list[int], optional
@@ -73,21 +120,114 @@ class Filter:
             Filtered detections within zones and matching class list and score threshold.
 
         """
-        detections = detections.loc[detections[6] >= score_threshold].copy()
+        cols = _det_columns(detections)
+        detections = detections.loc[detections[cols["conf"]] >= score_threshold].copy()
 
         # filter classess
         if class_list:
-            detections = detections.loc[detections[7].isin(class_list)].copy()
+            detections = detections.loc[detections[cols["class"]].isin(class_list)].copy()
 
         if zones is None or (not isinstance(zones, BaseGeometry) and len(zones) == 0):
             return detections
 
         area = zones if isinstance(zones, BaseGeometry) else unary_union(list(zones))
         centers = gpd.GeoSeries(
-            gpd.points_from_xy(detections[2] + detections[4] / 2, detections[3] + detections[5] / 2),
+            gpd.points_from_xy(
+                detections[cols["x"]] + detections[cols["w"]] / 2,
+                detections[cols["y"]] + detections[cols["h"]] / 2,
+            ),
             index=detections.index,
         )
         return detections.loc[centers.within(area).to_numpy()].reset_index(drop=True)
+
+    @staticmethod
+    def deduplicate_boxes(
+        detections: pd.DataFrame,
+        iou_thresh: float = 0.45,
+        containment_thresh: float = 0.65,
+    ) -> pd.DataFrame:
+        """Suppress duplicate and nested-sub-box detections within each frame.
+
+        Within each frame, detections are visited in descending confidence order (as in
+        NMS). A lower-confidence detection is dropped against an already-kept one if
+        either:
+
+        - their IoU exceeds `iou_thresh` (near-duplicate boxes for the same object), or
+        - its containment ratio (intersection area / smaller box's area) exceeds
+          `containment_thresh` (e.g. a torso box nested inside a full-body box).
+
+        Both ratios are derived from a single per-frame `dnt.engine.ious` call: IoU
+        already encodes the intersection area given each box's own area
+        (`inter = iou * (area_a + area_b) / (1 + iou)`), so no separate intersection
+        pass is needed.
+
+        Parameters
+        ----------
+        detections : pd.DataFrame
+            Detections with columns `frame, res, x, y, w, h, conf, class`, either the
+            positional/headerless layout (`pd.read_csv(file, header=None)`) or the named
+            layout `Detector.detect()` returns (`Detector.DET_FIELDS`); the same layouts
+            `filter_iou` accepts.
+        iou_thresh : float, optional
+            IoU above which the lower-confidence box of a pair is suppressed.
+            Default is 0.45.
+        containment_thresh : float, optional
+            Containment ratio above which the lower-confidence box of a pair is
+            suppressed. Default is 0.65.
+
+        Returns
+        -------
+        pd.DataFrame
+            `detections` with suppressed rows removed, in their original row order.
+
+        """
+        if detections.empty:
+            return detections
+
+        cols = _det_columns(detections)
+        frames = detections[cols["frame"]].to_numpy()
+        x = detections[cols["x"]].to_numpy(dtype=np.float64)
+        y = detections[cols["y"]].to_numpy(dtype=np.float64)
+        w = detections[cols["w"]].to_numpy(dtype=np.float64)
+        h = detections[cols["h"]].to_numpy(dtype=np.float64)
+        conf = detections[cols["conf"]].to_numpy(dtype=np.float64)
+        tlbr = np.column_stack([x, y, x + w, y + h])
+        # `ious()` wraps cython_bbox.bbox_overlaps(), which uses the classic Faster-RCNN
+        # pixel-inclusive convention (area = (w+1)*(h+1), not continuous w*h). The
+        # intersection-from-IoU algebra below is only exact if these areas match that
+        # convention exactly.
+        areas = (w + 1) * (h + 1)
+
+        # group row positions by frame without pandas groupby overhead: sort by frame
+        # once, then split at each frame boundary.
+        frame_order = np.argsort(frames, kind="stable")
+        boundaries = np.flatnonzero(np.diff(frames[frame_order])) + 1
+        groups = np.split(frame_order, boundaries)
+
+        keep = np.ones(len(detections), dtype=bool)
+        for idx in groups:
+            if len(idx) < 2:
+                continue
+            # highest confidence first, so earlier boxes suppress later, weaker ones
+            order = idx[np.argsort(-conf[idx], kind="stable")]
+
+            overlap = ious(tlbr[order], tlbr[order])
+            sum_areas = areas[order][:, None] + areas[order][None, :]
+            inter = overlap * sum_areas / (1.0 + overlap)
+            min_area = np.minimum(areas[order][:, None], areas[order][None, :])
+            containment = np.divide(inter, min_area, out=np.zeros_like(inter), where=min_area > 0)
+
+            suppress_by = (overlap > iou_thresh) | (containment > containment_thresh)
+            np.fill_diagonal(suppress_by, False)
+
+            suppressed = np.zeros(len(order), dtype=bool)
+            for i in range(len(order) - 1):
+                if suppressed[i]:
+                    continue
+                suppressed[i + 1 :] |= suppress_by[i, i + 1 :]
+            keep[order[suppressed]] = False
+
+        return detections.loc[keep]
 
     @staticmethod
     def filter_tracks(

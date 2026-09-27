@@ -60,6 +60,26 @@ def test_xpu_host_tracks_on_cpu(xpu_only):
     assert _device.to_boxmot_device(resolved) == "cpu"
 
 
+@pytest.mark.parametrize(("half", "expected"), [(True, {"quantize": 16}), (False, {"quantize": None})])
+def test_predict_precision_kwargs_uses_quantize_when_supported(monkeypatch, half, expected):
+    monkeypatch.setattr(_device, "_quantize_supported", True)
+    assert _device.predict_precision_kwargs(half) == expected
+
+
+@pytest.mark.parametrize("half", [True, False])
+def test_predict_precision_kwargs_falls_back_to_half(monkeypatch, half):
+    monkeypatch.setattr(_device, "_quantize_supported", False)
+    assert _device.predict_precision_kwargs(half) == {"half": half}
+
+
+def test_quantize_field_supported_detects_installed_ultralytics(monkeypatch):
+    monkeypatch.setattr(_device, "_quantize_supported", None)
+    # whatever this installed Ultralytics actually supports, detection must not raise
+    result = _device._quantize_field_supported()
+    assert isinstance(result, bool)
+    assert _device._quantize_supported is result  # cached
+
+
 def test_detector_half_on_indexed_cuda(monkeypatch, cuda_only):
     from fake_ultralytics import FakeModel
 

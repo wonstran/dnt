@@ -13,7 +13,7 @@ import cv2
 from tqdm import tqdm
 from ultralytics import YOLO
 
-from ..._device import half_allowed, resolve_device
+from ..._device import half_allowed, predict_precision_kwargs, resolve_device
 
 
 class SegmentorModel(str, Enum):  # noqa: UP042
@@ -93,6 +93,9 @@ class Segmentor:
 
         self.device = resolve_device(device)
         self.half = half_allowed(self.device, enable_half)
+        # translates to quantize= on Ultralytics versions that deprecated half= (avoids a
+        # per-frame deprecation warning); falls back to half= on older versions
+        self._precision_kwargs = predict_precision_kwargs(self.half)
 
     @staticmethod
     def _resolve_device(device: str) -> str:
@@ -190,7 +193,7 @@ class Segmentor:
                 iou=self.nms,
                 max_det=self.max_det,
                 device=self.device,
-                half=self.half,
+                **self._precision_kwargs,
             )
 
             if len(detects) > 0 and detects[0].masks is not None and detects[0].boxes is not None:
@@ -292,7 +295,7 @@ class Segmentor:
             iou=self.nms,
             max_det=self.max_det,
             device=self.device,
-            half=self.half,
+            **self._precision_kwargs,
         )
         cap.release()
 

@@ -59,6 +59,44 @@ def half_allowed(device: str, half: bool) -> bool:
     return bool(half) and str(device).startswith("cuda")
 
 
+_quantize_supported: bool | None = None
+
+
+def _quantize_field_supported() -> bool:
+    """Return True if the installed Ultralytics `model.predict()` accepts `quantize=`."""
+    global _quantize_supported
+    if _quantize_supported is None:
+        from ultralytics.cfg import DEFAULT_CFG
+
+        _quantize_supported = hasattr(DEFAULT_CFG, "quantize")
+    return _quantize_supported
+
+
+def predict_precision_kwargs(half: bool) -> dict[str, bool | int | None]:
+    """Build the Ultralytics `model.predict()` precision kwarg(s) for a resolved `half` flag.
+
+    Some Ultralytics releases deprecated `half=` in favor of a unified `quantize=` scheme;
+    passing `half=` there logs a warning on every single call (dnt calls `predict()` once per
+    frame), while passing `quantize=` to an Ultralytics that predates that scheme raises. This
+    detects which the installed version accepts and returns the matching kwarg(s).
+
+    Parameters
+    ----------
+    half : bool
+        A resolved half-precision flag (e.g. from `half_allowed()`).
+
+    Returns
+    -------
+    dict
+        Either ``{"quantize": 16 or None}`` or ``{"half": half}``, to be splatted into
+        `model.predict(**predict_precision_kwargs(...))`.
+
+    """
+    if _quantize_field_supported():
+        return {"quantize": 16 if half else None}
+    return {"half": half}
+
+
 def to_boxmot_device(device: str) -> str:
     """Convert a resolved dnt device to BoxMOT's format (``"cuda:1"`` -> ``"1"``).
 
