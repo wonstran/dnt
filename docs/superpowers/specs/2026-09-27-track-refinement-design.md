@@ -1,6 +1,6 @@
 # dnt.post: Track Refinement with Algorithmic Screening and VLM Verification
 
-- **Status:** written spec, awaiting review
+- **Status:** written spec (rev. 2: reuse of existing dnt post-processing; no location-based filtering), awaiting review
 - **Date:** 2026-09-27
 - **Baseline:** dnt 0.3.3 (`a290821`)
 - **Roadmap:** [`design/dnt-0.4-upgrade.md`](../../../design/dnt-0.4-upgrade.md). This work belongs to sub-project F (new capabilities). It adopts the `dnt/post/` location from §3 of the roadmap. It does not depend on sub-projects B–E, because its only inputs are a track file and a video.
@@ -16,7 +16,7 @@ Pedestrian trajectories come from StrongSORT and vehicle trajectories from BoTSO
 
 Constraints agreed during brainstorming:
 
-1. **Independent of tracking.** The procedure is standalone post-processing. It reads a track file and its video. It does not import `dnt.track`, `dnt.detect`, or BoxMOT, and it makes no assumption about which tracker produced the file.
+1. **Independent of tracking.** The procedure is standalone post-processing. It reads a track file and its video, plus two optional files: a context file and a hints file (§2.5). It does not import `dnt.track`, `dnt.detect`, or BoxMOT, and it makes no assumption about which tracker produced the file.
 2. **Algorithms screen, the VLM verifies.** Trajectory algorithms examine every track and flag short suspicious events (seconds to minutes). A VLM reviews only the events whose algorithmic confidence is in an uncertain band.
 3. **Auto-apply if sure.** Confident verdicts, algorithmic or VLM, are applied automatically. Uncertain or failed verdicts go to a human review report. Until a person decides, a pending event leaves the tracks unchanged.
 4. **Pluggable VLM.** One backend interface, with a local implementation (any OpenAI-compatible server, such as vLLM or Ollama) and a cloud implementation (Anthropic).
@@ -26,7 +26,7 @@ Constraints agreed during brainstorming:
 8. **False-track definitions (pedestrian file).**
    - **Drop:** static non-objects (poles, signs, mannequins, posters, reflections, shadows), and people inside vehicles (drivers, passengers, bus riders).
    - **Reclass:** cyclists, motorcycle riders, and scooter riders become class *cyclist*, *motorcycle*, or *scooter*.
-   - People outside the study area are **not** handled here. `dnt.filter.Filter` zones already do that.
+   - People outside the study area are **not** handled here. Location-based filtering (study-area zones, line crossings) is the **next procedure** in the pipeline, and it runs on refinement's output.
 9. **False-track definitions (vehicle file).**
    - **Drop:** non-vehicles (shadows, reflections, structure edges), and duplicate boxes on one vehicle (a trailer, or a bus split in two).
    - Parked vehicles are real and are kept.
@@ -37,24 +37,30 @@ Constraints agreed during brainstorming:
 
 **In scope**
 1. New subpackage `dnt.post`, with the event model, ledger, four stages plus an orphan pass, evidence builder, VLM backends, review and audit reports, `TrackRefiner`, `RefineConfig`, and a `dnt-refine` CLI.
-2. Moving `interpolate_tracks_rts` and `link_tracklets` into `dnt.post`, leaving a re-export shim at `dnt.track.post_process`.
+2. Moving `interpolate_tracks_rts` and `link_tracklets` into `dnt.post`, leaving a re-export shim at `dnt.track.post_process`, and pointing the `Filter.interpolate_tracks_rts` wrapper at the new location.
 3. Two appearance encoders behind optional extras.
 4. Tests, API docs page, and changelog entry.
+5. Reuse of dnt's existing post-processing code (§2.6):
+   - `link_tracklets`'s gates and cost become stage 3's motion part, checked by a parity test.
+   - `interpolate_tracks_rts`'s Kalman model is shared with stage 2.
+   - `ReClass` output is accepted as an optional hints file.
+   - `dnt.engine` supplies the geometry helpers.
 
 **Out of scope**
 - Learned linkers (such as StrongSORT's AFLink) and global graph optimization. The stage 3 scorer sits behind an interface so one can be added later.
-- Detector re-runs during screening (what `ReClass` does). `ReClass` stays where it is, unchanged.
+- Detector re-runs inside `refine`. `ReClass` stays in `dnt.track`, unchanged. Its output file can be passed in as hints (§2.5, §6.1).
 - Camera calibration or world coordinates. All motion is measured in box heights per second.
-- Study-area filtering. That stays in `Filter`.
+- Location-based filtering of any kind: study-area zones, line crossings, and user-drawn polygons. That is the next procedure after refinement. `refine` takes no zone, line, or polygon input.
 - An interactive review server. The review page is static HTML.
 
 **Success criteria**
 1. With `vlm.backend: none` and no video, `refine` runs to completion on a 10-column track file, and every uncertain event ends up `HUMAN_PENDING`.
 2. On synthetic fixtures with injected faults (§11.1), each stage proposes the expected event, and the score lands in the expected band.
 3. Replaying a ledger with a decisions file gives byte-identical output across repeated runs and makes no VLM calls.
-4. `dnt.post` imports nothing from `dnt.track`, `dnt.detect`, or `boxmot`. A test enforces this.
+4. `dnt.post` imports nothing from `dnt.track`, `dnt.detect`, `dnt.label`, `dnt.filter`, or `boxmot`. A test enforces this.
 5. Existing `tests/test_post_process.py` passes unchanged through the shim.
 6. On the user's own clips, the audit (§8.2) reports per-stage precision of applied edits with confidence intervals. The precision targets are set by the user after the first audit, not by this spec.
+7. Stage 3 with `link.mode: legacy` reproduces `link_tracklets`'s track-ID mapping on the same input (§6.3).
 
 ## 2. Architecture
 
@@ -63,9 +69,10 @@ Constraints agreed during brainstorming:
 ```
 src/dnt/post/
   __init__.py          # public API: TrackRefiner, RefineConfig, interpolate_tracks_rts, link_tracklets
-  io.py                # read/write track CSV (dnt 10-col, MOTChallenge adapter); column constants
+  io.py                # read/write track CSV (dnt 10-col, MOTChallenge adapter); read detection CSV (context); column constants
   events.py            # Event, Decision, EventKind; Ledger (JSONL read/write, replay)
-  primitives.py        # scale-free speed, Kalman residual (NIS), occlusion mask, ramp()
+  primitives.py        # scale-free speed, cv_kalman() shared with interpolate.py, NIS, occlusion mask, ramp()
+  hints.py             # optional external cue files (ReClass output)
   features.py          # TrackFeatures: per-track primitives + clean embeddings; .npz cache
   encoders/
     __init__.py        # AppearanceEncoder protocol, make_encoder(cfg)
@@ -95,7 +102,7 @@ Each module has one job. `screen.py`, `switch.py`, and `link.py` only **propose*
 
 ### 2.2 Dependency rule
 
-`dnt.post` may import `dnt.shared` and third-party libraries only. It must not import `dnt.track`, `dnt.detect`, `dnt.label`, `dnt.filter`, or `boxmot`. `tests/test_post_independence.py` enforces this by importing `dnt.post` in a subprocess and checking `sys.modules`.
+`dnt.post` may import `dnt.shared`, `dnt.engine`, and third-party libraries only. `dnt.engine` is pure numeric code. Its one native dependency, `cython_bbox`, is already a required dependency of dnt. It must not import `dnt.track`, `dnt.detect`, `dnt.label`, `dnt.filter`, or `boxmot`. `tests/test_post_independence.py` enforces this by importing `dnt.post` in a subprocess and checking `sys.modules`.
 
 Evidence rendering uses cv2 directly rather than `Labeler`, so the rule holds.
 
@@ -108,7 +115,12 @@ Encoders and VLM backends import their heavy dependencies (`transformers`, `torc
 
 Their signatures and behavior stay the same. `dnt/track/post_process.py` becomes a shim: `from ..post.interpolate import interpolate_tracks_rts` and `from ..post.link import link_tracklets`, with `__all__`. That keeps `from dnt.track import link_tracklets` and existing scripts working. The shim direction (track → post) does not violate §2.2, which only restricts what `dnt.post` imports.
 
-Stage 3 does not call `link_tracklets`. It reuses that function's gating helpers (`_iou_xywh`, `_estimate_velocity`), which move to `primitives.py`, and adds the new scoring described in §6.3.
+Two pieces of existing code are **factored out and shared**, rather than copied:
+
+- **Link gates.** The gate and cost logic inside `link_tracklets` becomes module-level helpers in `link.py`: `_iou_xywh`, `_estimate_velocity`, and a new `_legacy_gate_cost(end, start, …) -> float | None`, which returns the legacy cost or `None` when a gate fails. Both `link_tracklets` and stage 3 call them. `link_tracklets`'s output does not change.
+- **Kalman model.** The Kalman setup inside `interpolate_tracks_rts` becomes `primitives.cv_kalman(process_var, meas_var_pos, meas_var_size)`. Stage 4 (through `interpolate_tracks_rts`) and stage 2's motion test (§5.2) both use it.
+
+`Filter.interpolate_tracks_rts` is a backward-compatible wrapper. It is changed to import from `dnt.post.interpolate`.
 
 ### 2.4 Entry points
 
@@ -119,14 +131,15 @@ cfg = RefineConfig.from_yaml("ped.yaml")
 result = TrackRefiner(cfg).refine(
     "ped_tracks.csv",
     video="cam1.mp4",                 # optional; without it, motion-only mode (§10)
-    context_tracks="veh_tracks.csv",  # optional; enables in-vehicle, rider-overlap, and duplicate cues
+    context="veh_tracks.csv",         # optional; a track file or a detection file (§2.5)
+    hints={"reclass": "reclass.csv"}, # optional; ReClass output (§2.5, §6.1)
     out="ped_clean.csv",
 )
 # result.tracks: DataFrame; result.ledger_path; result.review_path; result.summary
 ```
 
 ```
-dnt-refine run    TRACKS --video V [--context C] --config CFG --out OUT
+dnt-refine run    TRACKS --video V [--context C] [--reclass-hints R] --config CFG --out OUT
 dnt-refine apply  TRACKS --ledger L [--decisions D.json] --out OUT
 dnt-refine audit  --ledger L --video V --n 50 [--seed S]
 dnt-refine audit-score --ledger L --marks M.json
@@ -140,12 +153,35 @@ The CLI is a thin `argparse` wrapper over `TrackRefiner`, registered as `[projec
 - A headerless dnt track CSV with 10 columns: `frame, track, x, y, w, h, score, cls, r3, r4`.
 - Column 8 may already be `interp` from an earlier interpolation. A value of `1` means filled, and `0` or the legacy `-1` means observed. Filled rows are treated as unobserved in every stage.
 - MOTChallenge files (`frame, id, x, y, w, h, conf, x3d, y3d, z3d`) are read with `io.read_tracks(path, fmt="mot")`. That format has no class, so `cls` is set to `RefineConfig.class_ids[0]`.
+- **Context** (optional) is used by the stage 1 cues that need other objects' boxes (in-vehicle, two-wheeler overlap, vehicle duplicate). It is either:
+  - a dnt track file (10 columns), or
+  - a dnt detection file (8 columns: `frame, res, x, y, w, h, conf, class`, as `Detector` writes it).
+
+  The format is detected from the column count, or can be set with `context.format`. Only boxes and classes are used. For the vehicle target, the vehicle file itself is the context for the duplicate cue.
+- **Reclass hints** (optional): the CSV that `ReClass.re_classify(out_file=...)` writes, with header `track, cls, avg_score`.
+  - It is keyed by the input file's raw track IDs. Those IDs are still valid in stage 1, because stage 1 runs first.
+  - Rows with unknown track IDs are ignored, with a warning.
 
 **Output**
 - `OUT`: headerless 10-column CSV in the dnt layout, with column 8 as `interp` (`0` observed, `1` filled). This is the same layout `interpolate_tracks_rts` writes today. Sorted by `frame, track`. Track IDs are renumbered contiguously from 1, and `ledger.id_map` records the renumbering.
 - `OUT.ledger.jsonl`: header line, then one line per event (§4.2).
 - `OUT.review.html` plus `OUT.review/` (images), written only when at least one event is `HUMAN_PENDING`.
 - `OUT.features.npz`: the embedding cache (§5.3). Reused when the track file hash and encoder settings match.
+
+### 2.6 Reuse of existing dnt post-processing
+
+| Existing code | Role in refinement |
+|---|---|
+| `link_tracklets` | Its gates and cost are stage 3's motion part (§6.3). `link.mode: legacy` reproduces it exactly. |
+| `interpolate_tracks_rts` | Stage 4 as-is (§6.4). Its Kalman model is shared with stage 2 (§5.2). |
+| `ReClass.re_classify` | Not imported. Its output file is an optional rider cue and subtype source (§6.1). |
+| `dnt.engine.ious`, `iobs`, `cluster_by_gap` | Geometry and frame-run helpers (§5.6). |
+| `Labeler.draw_track_clips` | Not imported. The review report prints a ready-to-run snippet for each pending event (§8.1). |
+| `Filter.deduplicate_boxes` | Not part of refinement. It is a detection-stage step. The docs recommend it before tracking, because it stops duplicate and nested boxes from becoming tracks at all. |
+
+Not reused:
+- `engine.interpolate_bboxes`: cubic splines overshoot, which creates false speed spikes.
+- `shared/files.read_track`: it forces columns 7–9 to int, which fails on the NaN values in interpolated rows.
 
 ## 3. Processing order
 
@@ -224,7 +260,7 @@ For each stage, `accept_above` and `reject_below`, with `reject_below < accept_a
 
 **Exceptions**
 - **Static screen.** The static-object score is capped at `screen.static_score_cap` (default 0.80). Keep the cap below `screen.accept_above`, so static tracks never auto-drop (§6.1).
-- **Rider subtype.** A `RECLASS` whose rider score is `AUTO_ACCEPT` still needs one VLM call to choose the subtype. That call only picks the subtype and cannot overturn the rider decision. If the VLM answers with a non-rider option (for example `pedestrian`), the algorithm and the VLM disagree, and the event becomes `HUMAN_PENDING`. It also becomes `HUMAN_PENDING` if `params.new_cls` is still `None` after verification.
+- **Rider subtype.** A `RECLASS` whose rider score is `AUTO_ACCEPT` still needs one VLM call to choose the subtype, unless a ReClass hint has already settled it (§6.1). That call only picks the subtype and cannot overturn the rider decision. If the VLM answers with a non-rider option (for example `pedestrian`), the algorithm and the VLM disagree, and the event becomes `HUMAN_PENDING`. It also becomes `HUMAN_PENDING` if `params.new_cls` is still `None` after verification.
 - **Link margin.** For stage 3, the routed value is `algo_score × ramp(margin)` (§6.3), not the raw score.
 
 ## 5. Shared primitives
@@ -238,8 +274,12 @@ For each stage, `accept_above` and `reject_below`, with `reject_below < accept_a
 
 ### 5.2 Kalman residual
 
-- A constant-velocity Kalman filter runs over observed frames, with state `(cx, cy, w, h, vx, vy, vw, vh)` and the same noise parameters as `interpolate_tracks_rts`.
-- Each observed frame gives a normalized innovation squared, `NIS_t = yᵀ S⁻¹ y`, with 4 degrees of freedom.
+- Stage 2 uses the same constant-velocity model as stage 4: `primitives.cv_kalman(...)`, factored out of `interpolate_tracks_rts` (§2.3). As a result, both stages agree on what normal motion is. The model has:
+  - state `[cx, vx, cy, vy, w, vw, h, vh]`, one step per frame;
+  - `Q` from `Q_discrete_white_noise(dim=2, var=process_var)` for each (value, rate) pair;
+  - `R = diag(meas_var_pos, meas_var_pos, meas_var_size, meas_var_size)`;
+  - defaults `process_var = 10.0`, `meas_var_pos = 25.0`, `meas_var_size = 16.0`, set in config as `motion.*`.
+- The forward pass predicts through missed frames and updates on observed ones. Each observed frame gives a normalized innovation squared, `NIS_t = yᵀ S⁻¹ y`, with 4 degrees of freedom.
 - A value above `switch.nis_hi` (default 18.47, the χ²₄ 99.9% quantile) is a motion break.
 
 ### 5.3 Clean embeddings
@@ -259,6 +299,12 @@ For each stage, `accept_above` and `reject_below`, with `reject_below < accept_a
 - **`dino`:** DINOv2 ViT-S/14 via `transformers` (`facebook/dinov2-small` by default, configurable). Uses the CLS token. Crops are resized to 224 on the long side and padded. Extra: `dnt[post-dino] = ["transformers>=4.40"]`.
 - **`reid`:** `torchreid` feature extractor. The default for `person` is `osnet_x1_0` with MSMT17 weights. The `vehicle` target has no default and needs `encoder.weights` (for example, VeRi-776 weights). Extra: `dnt[post-reid] = ["torchreid"]`.
 - `RefineConfig.encoder.kind` selects the encoder. Validation runs when the config loads: a missing extra raises `ImportError` with the install command, and `reid` for a vehicle without `weights` raises `ValueError`.
+
+### 5.6 Geometry
+
+- IoU and IoB come from `dnt.engine.ious` and `dnt.engine.iobs`. `dnt.post` has no second implementation.
+- Runs of consecutive observed frames (gaps) come from `dnt.engine.cluster_by_gap`.
+- `ious` uses cython_bbox's pixel-inclusive convention, where a box's area is `(w+1)(h+1)`. The thresholds in §6 are applied to those values as they are. For boxes wider than about 20 px the difference is negligible.
 
 ## 6. Stage algorithms
 
@@ -288,9 +334,11 @@ S_static = min(static_score_cap, ramp_R · ramp_T · mean(ramp_J, ramp_C, ramp_H
 
 For vehicles, the cap is `vehicle_static_score_cap` (default 0.6), so a static vehicle only becomes `DROP` when the VLM answers "not a vehicle".
 
-**Person in a vehicle → `DROP{reason: "in_vehicle"}`** (target `person`, requires `context_tracks`)
+**Person in a vehicle → `DROP{reason: "in_vehicle"}`** (target `person`, requires `context`)
 
-For each observed frame, `inside_t` is true if some context track whose class is in `context.vehicle_classes` (default `[2, 5, 7]`, COCO car, bus, truck) has `IoB(ped, veh) ≥ 0.8` and `‖v_ped − v_veh‖ < 0.3` h/s.
+For each observed frame, `inside_t` is true if some context box whose class is in `context.vehicle_classes` (default `[2, 5, 7]`, COCO car, bus, truck) has `IoB(ped, veh) ≥ 0.8`, and the two move together. How "move together" is tested depends on the context format:
+- **Track context:** `‖v_ped − v_veh‖ < 0.3` h/s.
+- **Detection context:** detections carry no velocity, so persistence is used instead. The person is moving (`v_t ≥ 0.3` h/s), a vehicle detection contains it at both t and the previous observed frame, and those two vehicle boxes have `IoU ≥ 0.5`.
 
 ```
 S_inveh = ramp(mean_t inside_t; 0.5 → 0.9)
@@ -306,14 +354,22 @@ Cues:
 |---|---|---|
 | `F` | fraction of observed frames with `v_t > 1.8` h/s | 0.3 → 0.7 |
 | `S` | smoothness, `1 − circular variance of heading` over moving frames | 0.5 → 0.9 |
-| `K` | with context: fraction of frames where a context track whose class is in `context.twowheeler_classes` (default `[1, 3]`) has `IoU ≥ 0.3` and moves with the person | 0.2 → 0.6 |
+| `K` | with context: fraction of frames where a context box whose class is in `context.twowheeler_classes` (default `[1, 3]`) has `IoU ≥ 0.3` and moves with the person (same move-together test as the in-vehicle cue, per context format) | 0.2 → 0.6 |
+| `P` | with ReClass hints: the hint's `avg_score` when its `cls` is a key of `hints.reclass_class_map`, otherwise 0 | 0.75 → 0.9 |
 
 ```
-S_rider = ramp_F · ramp_S                  (no context)
-S_rider = max(ramp_F · ramp_S, ramp_K)     (with context)
+S_rider = max(ramp_F · ramp_S, ramp_K, ramp_P)    # ramp_K and ramp_P count as 0 when their input is absent
 ```
 
-`params.new_cls` starts as `None`. The VLM chooses cyclist, motorcycle, or scooter, which map through `reclass_map` (default `{cyclist: 1, motorcycle: 3, scooter: 36}`).
+**Subtype.** `params.new_cls` starts as `None`, and one of two sources settles it:
+1. **Hint.** If `ramp_P ≥ hints.subtype_min` (default 1.0, which means `avg_score ≥ 0.9`), the subtype comes from `hints.reclass_class_map` (default `{1: cyclist, 3: motorcycle, 36: scooter}`). No subtype VLM call is made, and `signals.subtype_source` is `"reclass"`.
+2. **VLM.** Otherwise the VLM chooses cyclist, motorcycle, or scooter.
+
+Either way, the subtype maps to a class ID through `reclass_map` (default `{cyclist: 1, motorcycle: 3, scooter: 36}`).
+
+If the event is in the VLM band anyway and the VLM names a different rider subtype than the hint, the event becomes `HUMAN_PENDING`.
+
+ReClass's default `match_class=[1, 36]` leaves out motorcycles. The docs recommend `match_class=[1, 3, 36]` when producing hints.
 
 **Vehicle duplicate → `DROP{reason: "duplicate", of: <track>}`** (target `vehicle`)
 
@@ -381,33 +437,36 @@ In motion-only mode (no video), `app_t = 0` and `w_mot` is renormalized to 1. Wi
 
 **Candidates** are pairs (i, j) of the same class, where i ends at `t_e`, j starts at `t_s`, and `g = t_s − t_e`.
 
-**Hard gates**
+**Hard gates.** Gates 3–6 are `link_tracklets`'s gates, computed by the shared `_legacy_gate_cost` helper (§2.3).
 1. **Gap:**
    - `1 ≤ g ≤ link.max_gap` (default 1.0 s × fps), or
-   - `g ≤ link.max_gap_static` (default 10 s × fps) when i's speed over its last 0.5 s is below 0.2 h/s and j's start is within `0.5·h̃` of i's end.
+   - **static gate:** `g ≤ link.max_gap_static` (default 10 s × fps) when i's speed over its last 0.5 s is below 0.2 h/s. For static-gated pairs, gates 5 and 6 are replaced by `‖c_j(t_s) − c_i(t_e)‖ ≤ 0.5·h̃_i`. Otherwise the growth term in gate 5 would open a huge gate over a 10 s gap.
 2. **Overlap:** a small negative gap, `−2 ≤ g ≤ 0`, is allowed only if the boxes have `IoU ≥ 0.5` on every overlapping frame. The overlapping rows from j are dropped on merge.
-3. **Size:** `h_j / h_i ∈ [1/size_ratio_max, size_ratio_max]` (default 2.0).
-4. **Position:** the prediction error `d = ‖c_j(t_s) − (c_i(t_e) + v_i·g)‖ / h̃_i` must satisfy `d ≤ dist_mult · (1 + α · g/fps)` (defaults `dist_mult = 2.5`, `α = 0.5`). `v_i` is estimated with a first-order fit on i's last `vel_frames` observed frames, as `link_tracklets` does.
+3. **Class:** i and j have the same `cls`, after stage 1's reclassing.
+4. **Size:** `w_j / w_i` and `h_j / h_i` are each within `[1/size_ratio_max, size_ratio_max]` (default 2.0).
+5. **Position:** `dist = ‖c_j(t_s) − (c_i(t_e) + v_i·g)‖ < dist_mult · √area_i · (1 + dist_growth · g)`, with defaults `dist_mult = 2.5` and `dist_growth = 0.03` per frame. `v_i` is a first-order fit on i's last `vel_frames` observed frames.
+6. **Predicted-box IoU:** `IoU(i's end box shifted by v_i·g, j's start box) ≥ iou_min` (default 0.05).
 
 **Costs** (each in [0, 1])
 
 | Cost | Definition |
 |---|---|
-| `c_mot` | `d / gate_radius` |
+| `c_mot` | `ramp(legacy; 0 → link.legacy_cost_hi)` (default 3.0). `legacy` is `link_tracklets`'s own cost: `w_d·dist/√area_i + w_iou·(1 − IoU_pred) + w_s·(|log w_j/w_i| + |log h_j/h_i|)`, with `link.legacy_weights` defaults `{d: 1.0, iou: 1.0, s: 0.3}`. For static-gated pairs, `c_mot = ‖c_j − c_i‖ / (0.5·h̃_i)` |
 | `c_app` | `(1 − cos(mean of i's last K clean embeddings, mean of j's first K clean embeddings)) / 2`, with `K = 5`. `0.5` when either side has no clean embeddings |
-| `c_size` | `ramp(|log(h_j / h_i)|; 0 → log(size_ratio_max))` |
 | `c_gap` | `g / max_gap`, using `max_gap_static` for static-gated pairs |
 
 **Birth/death prior**
-- `b = 1` if i ends and j starts inside the scene: more than `0.5·h̃` from the image border, and outside any polygon in `link.entry_exit_zones` (optional, same polygon format as `Filter` zones, read with shapely). Otherwise `b = 0`.
+- `b = 1` if i ends and j starts inside the image: more than `0.5·h̃` from the image border. Otherwise `b = 0`.
+- The image size comes from the video, or from `RefineConfig.frame_size` when there is no video. If neither is known, the prior is not applied (`b = 1`).
+- No user-supplied zones are used. Location-based logic is out of scope (§1).
 
 **Score**
 
 ```
-S_link = (1 − (w_mot·c_mot + w_app·c_app + w_size·c_size + w_gap·c_gap)) · (0.8 + 0.2·b)
+S_link = (1 − (w_mot·c_mot + w_app·c_app + w_gap·c_gap)) · (0.8 + 0.2·b)
 ```
 
-Defaults are `w_mot = 0.35, w_app = 0.40, w_size = 0.10, w_gap = 0.15`. In motion-only mode `w_app = 0` and the others are renormalized.
+Defaults are `w_mot = 0.45, w_app = 0.40, w_gap = 0.15`. Size consistency is already part of `c_mot` through the legacy cost. In motion-only mode `w_app = 0` and the others are renormalized.
 
 **Assignment**
 - Build the bipartite graph of gated pairs whose `S_link ≥ reject_below`.
@@ -417,9 +476,20 @@ Defaults are `w_mot = 0.35, w_app = 0.40, w_size = 0.10, w_gap = 0.15`. In motio
 - Each chosen pair becomes one `LINK` event.
 - After verification, union-find merges the accepted links into chains. A chain that would put two boxes of the same object on the same frame is rejected: its lowest-scoring link is set to `applied: false` with `skipped_reason: "overlap"`.
 
+**Legacy mode (`link.mode: legacy`).** In this mode stage 3 behaves exactly like `link_tracklets`:
+- gates 1 (without the static gate) and 3–6 only;
+- Hungarian assignment on the raw legacy cost over the full end × start matrix;
+- every assigned pair recorded as `AUTO_ACCEPT` (`algo_score` = 1, legacy cost in `signals`).
+
+It must produce the same track-ID mapping as `link_tracklets` on the same input (§1, criterion 7). It exists as a regression anchor and for users who want the old behavior with a ledger. The default is `mode: scored`.
+
+Legacy mode also shows the weakness that scored mode fixes: `link_tracklets` merges every pair that passes the gates, however high its cost.
+
 ### 6.4 Stage 4: fill
 
 `interpolate_tracks_rts(fill_gaps_only=True, max_gap=fill.max_gap)` runs on the final tracks. `fill.max_gap` defaults to `link.max_gap`, so a link across a long static gap is joined but not filled. This keeps a waiting pedestrian's invented positions out of conflict and speed analysis, since those analyses already exclude rows with `interp == 1`.
+
+`fill.smooth_existing` (default `false`) passes `smooth_existing=True`. Observed rows are then replaced by their RTS-smoothed boxes, which gives steadier speed estimates. Those rows keep `interp = 0`, and the ledger header records that smoothing was applied, since observed positions were changed.
 
 ## 7. VLM verification
 
@@ -528,7 +598,8 @@ class VLMBackend(Protocol):
 - the kind, reason, tracks, and frames,
 - `algo_score` and the top signals,
 - the VLM's answer and reason, if there was one,
-- accept and reject controls, plus a class picker for `RECLASS` and for screen events that the VLM redirected.
+- accept and reject controls, plus a class picker for `RECLASS` and for screen events that the VLM redirected,
+- a copy-to-clipboard `Labeler.draw_track_clips(...)` snippet covering the event's tracks and frame span ±2 s, for events that need motion to judge. `dnt.post` does not import `Labeler`; it only prints the snippet.
 
 An **Export decisions** button downloads `decisions.json` in the §4.2 format.
 
@@ -566,10 +637,20 @@ target: person               # person | vehicle
 class_ids: [0]               # classes in the file that belong to the target
 fps: null                    # null → from video
 reclass_map: {cyclist: 1, motorcycle: 3, scooter: 36}
+frame_size: null             # [width, height]; null → from video
 context:
+  format: auto               # auto | tracks | dets
   vehicle_classes: [2, 5, 7]
   twowheeler_classes: [1, 3]
-motion: {height_window: 15}
+hints:
+  reclass_class_map: {1: cyclist, 3: motorcycle, 36: scooter}
+  reclass_ramp: [0.75, 0.9]
+  subtype_min: 1.0
+motion:
+  height_window: 15
+  process_var: 10.0          # shared Kalman model (§5.2), same defaults as interpolate_tracks_rts
+  meas_var_pos: 25.0
+  meas_var_size: 16.0
 encoder:
   kind: dino                 # dino | reid
   model: facebook/dinov2-small
@@ -597,16 +678,19 @@ switch:
   motion_only_cap: 0.70
 link:
   enabled: true
+  mode: scored               # scored | legacy (§6.3)
   accept_above: 0.80
   reject_below: 0.40
   max_gap: 1.0               # seconds
   max_gap_static: 10.0       # seconds
-  size_ratio_max: 2.0
+  size_ratio_max: 2.0        # legacy gates (link_tracklets defaults)
   dist_mult: 2.5
-  alpha: 0.5
+  dist_growth: 0.03          # per frame
+  iou_min: 0.05
   vel_frames: 5
-  weights: {mot: 0.35, app: 0.40, size: 0.10, gap: 0.15}
-  entry_exit_zones: null     # optional list of polygons [[x, y], ...]
+  legacy_weights: {d: 1.0, iou: 1.0, s: 0.3}
+  legacy_cost_hi: 3.0
+  weights: {mot: 0.45, app: 0.40, gap: 0.15}
 orphan:
   enabled: true
   min_seconds: 0.5
@@ -615,6 +699,7 @@ orphan:
 fill:
   enabled: true
   max_gap: null              # null → link.max_gap
+  smooth_existing: false
 vlm:
   backend: none              # none | openai_compat | anthropic
   base_url: null
@@ -646,7 +731,9 @@ Durations in config are in seconds and are converted to frames with `fps`.
 | Situation | Behavior |
 |---|---|
 | No `video` | Motion-only mode: no embeddings, and appearance weights set to 0 (§6.2, §6.3). The VLM backend is forced to `none` with a warning. Everything in the uncertain band becomes `HUMAN_PENDING`, and no review images are made (cards show signals only). |
-| No `context_tracks` | In-vehicle, two-wheeler-overlap, and vehicle-duplicate cues are skipped and recorded as `null` in `signals`. |
+| No `context` | In-vehicle and two-wheeler-overlap cues are skipped and recorded as `null` in `signals`. The vehicle-duplicate cue still runs, because it uses the vehicle file itself. |
+| Context file with neither 8 nor 10 columns, when `context.format: auto` | `ValueError` naming the file and the column count. |
+| Hints file missing the `track, cls, avg_score` header | `ValueError`. Rows with unknown track IDs are ignored, with a warning. |
 | Max track frame exceeds the video's frame count | `ValueError` naming both numbers, since the track file does not belong to this video. |
 | Malformed CSV (fewer than 6 columns, non-numeric) | `ValueError` naming the file and first bad line. |
 | Empty track file | Writes an empty output, a ledger with header only, and no review. |
@@ -666,6 +753,9 @@ All tests below run in the default suite (CPU, no network), except where a marke
   - a person boarding a bus (inside for 20% of frames) → no event.
   - a "person" at 3 h/s on a smooth path → `RECLASS`.
   - a walker at 0.8 h/s → no event.
+  - the same in-vehicle case with a **detection** context → `DROP{in_vehicle}`, using the persistence test.
+  - a fast "person" with a ReClass hint `(cls 3, avg_score 0.95)` → `RECLASS` to motorcycle with no subtype VLM call (the fake backend raises if called).
+  - a hint that disagrees with an in-band VLM subtype answer → `HUMAN_PENDING`.
   - two vehicles moving together with IoB 0.9 → `DROP{duplicate}` on the smaller.
   - an orphan of 0.2 s after linking → `DROP{orphan}`.
 - `test_switch.py`, with embeddings injected through a stub encoder:
@@ -674,6 +764,8 @@ All tests below run in the default suite (CPU, no network), except where a marke
   - a position jump after a 5-frame gap → motion-only candidate, capped below accept.
   - a side shorter than 0.5 s → no event.
 - `test_link.py`:
+  - **parity:** `link.mode: legacy` gives the same track-ID mapping as `link_tracklets` on the existing `test_post_process.py` fixtures and on a randomized set of 200 synthetic tracklets (fixed seed).
+  - a pair that `link_tracklets` merges despite a high cost → `scored` mode sends it to `AUTO_REJECT` or the VLM band, not to `AUTO_ACCEPT`.
   - collinear fragments with a 10-frame gap and similar embeddings → `LINK` `AUTO_ACCEPT`.
   - two equally good candidates → low margin, routed to the VLM.
   - a stationary pedestrian with a 6 s gap at the same spot → linked through the static gate. With `max_gap_static` = 5 s → not linked.
@@ -704,7 +796,8 @@ All tests below run in the default suite (CPU, no network), except where a marke
 
 - `test_refiner.py`: end-to-end `refine` on the synthetic video with the stub encoder and the fake VLM; motion-only mode; the empty file; the CLI `run` / `apply` via `subprocess`.
 - `test_post_independence.py`: the §2.2 import rule.
-- The existing `tests/test_post_process.py` passes unchanged through the shim.
+- The existing `tests/test_post_process.py` passes unchanged through the shim. The existing `tests/test_filter.py` passes with the retargeted `Filter.interpolate_tracks_rts` wrapper.
+- `test_primitives.py`: `cv_kalman` gives the same smoothed boxes as the pre-refactor `interpolate_tracks_rts` on the fixtures (the refactor is behavior-preserving), and NIS is χ²₄-distributed on simulated constant-velocity tracks (mean ≈ 4 within tolerance).
 - `test_config.py`: YAML round-trip, unknown keys, every validation rule in §9.
 - `@pytest.mark.model`:
   - `test_encoders_real.py` (DINOv2 and torchreid OSNet on sample crops: output shape and norm).
@@ -718,8 +811,13 @@ All tests below run in the default suite (CPU, no network), except where a marke
   - No new required dependencies.
 - **Docs**
   - `docs/api/post.md`, pointing mkdocstrings at `dnt.post`, `dnt.post.config`, and `dnt.post.vlm`, plus a `mkdocs.yml` `nav` entry.
-  - A "Refining tracks" section in `docs/quickstart.md`, with the pedestrian and vehicle YAML examples and the review/audit loop.
-- **`docs/changelog.md`:** a new-feature entry, and a note that `dnt.track.post_process` is now a shim.
+  - A "Refining tracks" section in `docs/quickstart.md`, covering:
+    - the pedestrian and vehicle YAML examples;
+    - the review/audit loop;
+    - producing ReClass hints with `match_class=[1, 3, 36]`;
+    - the recommendation to run `Filter.deduplicate_boxes` on detections before tracking;
+    - a note that location-based filtering is the next procedure and runs on the refined output.
+- **`docs/changelog.md`:** a new-feature entry, and a note that `dnt.track.post_process` is now a shim and that `Filter.interpolate_tracks_rts` points at `dnt.post`.
 - **Lint:** all new code is ruff-clean under the repo rules and numpy-style docstrings. Nothing is added to the legacy per-file baseline.
 - **Version:** this adds public API, so it ships in a minor release and not in a 0.3.x patch. The version number is picked when the release is cut, following the "bump both files" rule in CLAUDE.md.
 
