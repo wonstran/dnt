@@ -1,6 +1,6 @@
 # dnt.post: Track Refinement with Algorithmic Screening and VLM Verification
 
-- **Status:** written spec (rev. 3: occlusion-witnessed linking, takeover gates, class groups; rev. 2: reuse of existing dnt post-processing, no location-based filtering), awaiting review
+- **Status:** written spec (rev. 4: addresses [review 2026-09-28 09:53](../../review_2026-09-28_09-53-41.md) / [response](../../response_2026-09-28_09-53-41.md); rev. 3: occlusion-witnessed linking, takeover gates, class groups; rev. 2: reuse of existing dnt post-processing, no location-based filtering), awaiting review
 - **Date:** 2026-09-27
 - **Baseline:** dnt 0.3.3 (`a290821`)
 - **Roadmap:** [`design/dnt-0.4-upgrade.md`](../../../design/dnt-0.4-upgrade.md). This work belongs to sub-project F (new capabilities). It adopts the `dnt/post/` location from §3 of the roadmap. It does not depend on sub-projects B–E, because its only inputs are a track file and a video.
@@ -35,11 +35,14 @@ Constraints agreed during brainstorming:
 - **A switch with no ID change.** A car tracked as #12 is covered by a truck that never had a track of its own. From frame 821, #12 follows the truck. Around that frame the car's label flickers 2 → 7 → 5, and the box width jumps from 56 to 103 px while the height barely changes.
 - **A long occluded fragment.** The car comes back 63 frames later (6.3 s) as #81, partway through its turn.
 
-The correct result: split #12 at about frame 821, give the truck part its own ID, link #12's car part to #81, and leave the 63-frame gap unfilled. §6.2 and §6.3 are designed so that this case works. §11 tests it with a synthetic replica and, optionally, on the real file.
+The correct result: split #12 at about frame 821, give the truck part its own ID, link #12's car part to #81, and leave the 63-frame gap unfilled. §6.1 and §6.3 are designed so that this case works. §11 tests it with a synthetic replica and, optionally, on the real file.
 
 ## 1. Goal, scope, and success criteria
 
-**Goal:** given a track file and its video, produce a corrected track file in the same format, a ledger of every edit with its evidence, and a review report of the edits that need a person.
+**Goal:** given a track file and its video, produce three things:
+- a corrected track file in the same format;
+- a ledger of every edit. Identity and class edits (`SPLIT`, `DROP`, `RECLASS`, `LINK`) are verified events with their evidence. Position edits are deterministic records: `FILL` for each filled gap and `SMOOTH` for each smoothed track (§4.1, §6.4);
+- a review report of the edits that need a person.
 
 **In scope**
 1. New subpackage `dnt.post`, with the event model, ledger, four stages plus an orphan pass, evidence builder, VLM backends, review and audit reports, `TrackRefiner`, `RefineConfig`, and a `dnt-refine` CLI.
@@ -48,21 +51,24 @@ The correct result: split #12 at about frame 821, give the truck part its own ID
 4. Tests, API docs page, and changelog entry.
 5. Reuse of dnt's existing post-processing code (§2.6):
    - `link_tracklets`'s gates and cost become stage 3's motion part, checked by a parity test.
-   - `interpolate_tracks_rts`'s Kalman model is shared with stage 2.
+   - `interpolate_tracks_rts`'s Kalman model is shared with stage 1.
    - `ReClass` output is accepted as an optional hints file.
    - `dnt.engine` supplies the geometry helpers.
 
 **Out of scope**
 - Learned linkers (such as StrongSORT's AFLink) and global graph optimization. The stage 3 scorer sits behind an interface so one can be added later.
-- Detector re-runs inside `refine`. `ReClass` stays in `dnt.track`, unchanged. Its output file can be passed in as hints (§2.5, §6.1).
+- Detector re-runs inside `refine`. `ReClass` stays in `dnt.track`, unchanged. Its output file can be passed in as hints (§2.5, §6.2).
 - Camera calibration or world coordinates. All motion is measured in box heights per second.
 - Location-based filtering of any kind: study-area zones, line crossings, and user-drawn polygons. That is the next procedure after refinement. `refine` takes no zone, line, or polygon input.
 - An interactive review server. The review page is static HTML.
 
 **Success criteria**
-1. With `vlm.backend: none` and no video, `refine` runs to completion on a 10-column track file, and every uncertain event ends up `HUMAN_PENDING`.
+1. On an installation with none of the `post-*` extras, `refine` runs to completion on a 10-column track file with `vlm.backend: none` and no video, using the default config, and every uncertain event ends up `HUMAN_PENDING`.
 2. On synthetic fixtures with injected faults (§11.1), each stage proposes the expected event, and the score lands in the expected band.
-3. Replaying a ledger with a decisions file gives byte-identical output across repeated runs and makes no VLM calls.
+3. Replay is deterministic.
+   - Re-applying a ledger with a decisions file that changes no applied edit reproduces the output byte for byte, with no re-proposals and no VLM calls.
+   - When decisions do change what is applied, `apply` re-proposes the downstream stages. Unchanged events keep their earlier decisions (§4.2).
+   - Given the same inputs, ledger, decisions, and VLM cache, the output is byte-identical.
 4. `dnt.post` imports nothing from `dnt.track`, `dnt.detect`, `dnt.label`, `dnt.filter`, or `boxmot`. A test enforces this.
 5. Existing `tests/test_post_process.py` passes unchanged through the shim.
 6. On the user's own clips, the audit (§8.2) reports per-stage precision of applied edits with confidence intervals. The precision targets are set by the user after the first audit, not by this spec.
@@ -84,8 +90,8 @@ src/dnt/post/
     __init__.py        # AppearanceEncoder protocol, make_encoder(cfg)
     dino.py            # DINOv2 encoder (extra: dnt[post-dino])
     reid.py            # torchreid encoder (extra: dnt[post-reid])
-  screen.py            # stage 1: DROP / RECLASS proposals; orphan pass
-  switch.py            # stage 2: SPLIT proposals
+  switch.py            # stage 1: SPLIT proposals
+  screen.py            # stage 2: DROP / RECLASS proposals; orphan pass
   link.py              # stage 3: LINK proposals; contains the moved link_tracklets
   interpolate.py       # stage 4: contains the moved interpolate_tracks_rts
   apply.py             # applies decided events to a track table (pure function)
@@ -119,12 +125,12 @@ Encoders and VLM backends import their heavy dependencies (`transformers`, `torc
 - `interpolate_tracks_rts` moves to `dnt/post/interpolate.py`.
 - `link_tracklets` moves to `dnt/post/link.py`.
 
-Their signatures and behavior stay the same. `dnt/track/post_process.py` becomes a shim: `from ..post.interpolate import interpolate_tracks_rts` and `from ..post.link import link_tracklets`, with `__all__`. That keeps `from dnt.track import link_tracklets` and existing scripts working. The shim direction (track → post) does not violate §2.2, which only restricts what `dnt.post` imports.
+Their signatures stay the same. `interpolate_tracks_rts` gets two backward-compatible changes (§6.4): rows flagged as filled are no longer used as measurements, and a new `protected_gaps` keyword marks gaps that must not be filled. For raw tracker output, which never contains filled rows, the output is unchanged. `dnt/track/post_process.py` becomes a shim: `from ..post.interpolate import interpolate_tracks_rts` and `from ..post.link import link_tracklets`, with `__all__`. That keeps `from dnt.track import link_tracklets` and existing scripts working. The shim direction (track → post) does not violate §2.2, which only restricts what `dnt.post` imports.
 
 Two pieces of existing code are **factored out and shared**, rather than copied:
 
 - **Link gates.** The gate and cost logic inside `link_tracklets` becomes module-level helpers in `link.py`: `_iou_xywh`, `_estimate_velocity`, and a new `_legacy_gate_cost(end, start, …) -> float | None`, which returns the legacy cost or `None` when a gate fails. Both `link_tracklets` and stage 3 call them. `link_tracklets`'s output does not change.
-- **Kalman model.** The Kalman setup inside `interpolate_tracks_rts` becomes `primitives.cv_kalman(process_var, meas_var_pos, meas_var_size)`. Stage 4 (through `interpolate_tracks_rts`) and stage 2's motion test (§5.2) both use it.
+- **Kalman model.** The Kalman setup inside `interpolate_tracks_rts` becomes `primitives.cv_kalman(process_var, meas_var_pos, meas_var_size)`. Stage 4 (through `interpolate_tracks_rts`) and stage 1's motion test (§5.2) both use it.
 
 `Filter.interpolate_tracks_rts` is a backward-compatible wrapper. It is changed to import from `dnt.post.interpolate`.
 
@@ -138,7 +144,7 @@ result = TrackRefiner(cfg).refine(
     "ped_tracks.csv",
     video="cam1.mp4",                 # optional; without it, motion-only mode (§10)
     context="veh_tracks.csv",         # optional; a track file or a detection file (§2.5)
-    hints={"reclass": "reclass.csv"}, # optional; ReClass output (§2.5, §6.1)
+    hints={"reclass": "reclass.csv"}, # optional; ReClass output (§2.5, §6.2)
     out="ped_clean.csv",
 )
 # result.tracks: DataFrame; result.ledger_path; result.review_path; result.summary
@@ -146,7 +152,7 @@ result = TrackRefiner(cfg).refine(
 
 ```
 dnt-refine run    TRACKS --video V [--context C] [--reclass-hints R] --config CFG --out OUT
-dnt-refine apply  TRACKS --ledger L [--decisions D.json] --out OUT
+dnt-refine apply  TRACKS --ledger L [--decisions D.json] [--video V] [--no-vlm] [--no-fill] --out OUT
 dnt-refine audit  --ledger L --video V --n 50 [--seed S]
 dnt-refine audit-score --ledger L --marks M.json
 ```
@@ -157,30 +163,31 @@ The CLI is a thin `argparse` wrapper over `TrackRefiner`, registered as `[projec
 
 **Input**
 - A headerless dnt track CSV with 10 columns: `frame, track, x, y, w, h, score, cls, r3, r4`.
-- Column 8 may already be `interp` from an earlier interpolation. A value of `1` means filled, and `0` or the legacy `-1` means observed. Filled rows are treated as unobserved in every stage.
+- Column 8 may already be `interp` from an earlier interpolation. A value of `1` means filled, and `0` or the legacy `-1` means observed. dnt's tracker always writes `-1` here, so a `1` can only come from an earlier interpolation.
+- **Filled input rows are removed on input** and never reach the output. Every stage works on observed rows only, and stage 4 fills gaps again from observed rows. The old fills were computed for identities that refinement may change, so they cannot be trusted. The ledger header records how many rows were removed.
 - MOTChallenge files (`frame, id, x, y, w, h, conf, x3d, y3d, z3d`) are read with `io.read_tracks(path, fmt="mot")`. That format has no class, so `cls` is set to `RefineConfig.class_ids[0]`.
-- **Context** (optional) is used by the stage 1 cues that need other objects' boxes (in-vehicle, two-wheeler overlap, vehicle duplicate). It is either:
+- **Context** (optional) is used by the stage 2 cues that need other objects' boxes (in-vehicle, two-wheeler overlap, vehicle duplicate). It is either:
   - a dnt track file (10 columns), or
   - a dnt detection file (8 columns: `frame, res, x, y, w, h, conf, class`, as `Detector` writes it).
 
   The format is detected from the column count, or can be set with `context.format`. Only boxes and classes are used. For the vehicle target, the vehicle file itself is the context for the duplicate cue.
 - **Reclass hints** (optional): the CSV that `ReClass.re_classify(out_file=...)` writes, with header `track, cls, avg_score`.
-  - It is keyed by the input file's raw track IDs. Those IDs are still valid in stage 1, because stage 1 runs first.
+  - It is keyed by the input file's raw track IDs. Stage 1 may split a raw track before stage 2 reads the hints, so a hint applies to every segment that descends from its raw ID. Descent is recorded in the ledger lineage (§4.2).
   - Rows with unknown track IDs are ignored, with a warning.
 
 **Output**
 - `OUT`: headerless 10-column CSV in the dnt layout, with column 8 as `interp` (`0` observed, `1` filled). This is the same layout `interpolate_tracks_rts` writes today. Sorted by `frame, track`. Track IDs are renumbered contiguously from 1, and `ledger.id_map` records the renumbering.
 - `OUT.ledger.jsonl`: header line, then one line per event (§4.2).
 - `OUT.review.html` plus `OUT.review/` (images), written only when at least one event is `HUMAN_PENDING`.
-- `OUT.features.npz`: the embedding cache (§5.3). Reused when the track file hash and encoder settings match.
+- `OUT.features.npz`: the embedding cache (§5.3). Reused only when its full key matches.
 
 ### 2.6 Reuse of existing dnt post-processing
 
 | Existing code | Role in refinement |
 |---|---|
 | `link_tracklets` | Its gates and cost are stage 3's motion part (§6.3). `link.mode: legacy` reproduces it exactly. |
-| `interpolate_tracks_rts` | Stage 4 as-is (§6.4). Its Kalman model is shared with stage 2 (§5.2). |
-| `ReClass.re_classify` | Not imported. Its output file is an optional rider cue and subtype source (§6.1). |
+| `interpolate_tracks_rts` | Stage 4, with two backward-compatible changes (§6.4). Its Kalman model is shared with stage 1 (§5.2). |
+| `ReClass.re_classify` | Not imported. Its output file is an optional rider cue and subtype source (§6.2). |
 | `dnt.engine.ious`, `iobs`, `cluster_by_gap` | Geometry and frame-run helpers (§5.6). |
 | `Labeler.draw_track_clips` | Not imported. The review report prints a ready-to-run snippet for each pending event (§8.1). |
 | `Filter.deduplicate_boxes` | Not part of refinement. It is a detection-stage step. The docs recommend it before tracking, because it stops duplicate and nested boxes from becoming tracks at all. |
@@ -192,20 +199,22 @@ Not reused:
 ## 3. Processing order
 
 ```
-raw tracks
-  └─ 1 screen  ── DROP / RECLASS ──┐
-  └─ 2 switch  ── SPLIT ───────────┤  each stage: propose → verify (§7) → apply
+raw tracks (filled rows removed)
+  └─ 1 switch  ── SPLIT ───────────┐
+  └─ 2 screen  ── DROP / RECLASS ──┤  each stage: propose → verify (§7) → apply
   └─ 3 link    ── LINK ────────────┤  before the next stage runs
   └─ orphan    ── DROP ────────────┤
-  └─ 4 fill    ── (deterministic RTS, no events)
+  └─ 4 fill    ── FILL / SMOOTH records (deterministic, never verified)
 clean tracks
 ```
 
 The order stops errors from compounding.
-- **Screen first.** A pole's static track must not be linked to a real pedestrian.
-- **Split before link.** A track containing two identities must be cut before its pieces can be re-paired.
+- **Split first.** A track that follows two objects must be cut before either part is judged. Otherwise a whole-track `DROP` of a false second part (for example, a passenger inside a vehicle) would also remove a real first part. Splits that are still unresolved are handled by segment-aware screening (§6.2).
+- **Screen before link.** A pole's static track must not be linked to a real pedestrian.
 - **Orphans after link.** Short fragments get the chance to be linked before being judged too short.
-- **Fill last.** Interpolation runs over the final identities and never across a rejected link.
+- **Fill last.** Interpolation runs over the final identities, only from observed rows, and never across a rejected link or a protected gap.
+
+When review changes a decision, `apply` re-runs everything from the earliest stage whose applied edits changed (§4.2).
 
 Each stage sees the tracks produced by the previous stage's applied events. VLM calls for one stage finish before the next stage starts.
 
@@ -214,7 +223,7 @@ Each stage sees the tracks produced by the previous stage's applied events. VLM 
 ### 4.1 Event
 
 ```python
-class EventKind(StrEnum): DROP, RECLASS, SPLIT, LINK
+class EventKind(StrEnum): DROP, RECLASS, SPLIT, LINK, FILL, SMOOTH
 
 class Decision(StrEnum):
     AUTO_ACCEPT, AUTO_REJECT,        # decided by algo_score alone
@@ -224,12 +233,17 @@ class Decision(StrEnum):
 
 @dataclass
 class Event:
-    id: str                  # f"{stage}-{seq:06d}", stable across replays
-    stage: str               # "screen" | "switch" | "link" | "orphan"
+    id: str                  # f"{stage}-r{round}-{seq:06d}", unique within the ledger
+    key: str                 # content key, stable across re-proposals (§4.2)
+    round: int               # review round that proposed it (0 = first run)
+    stage: str               # "switch" | "screen" | "link" | "orphan" | "fill"
     kind: EventKind
     tracks: list[int]        # IDs as they were when the stage ran
+    lineage: list[list]      # per track: [[raw_id, f0, f1], ...], the raw rows it is made of
     frames: tuple[int, int]  # the frame span the event concerns
-    params: dict             # DROP: {reason}; RECLASS: {new_cls | None}; SPLIT: {cut_frame}; LINK: {}
+    params: dict             # DROP: {reason, spans | None}; RECLASS: {new_cls | None, spans | None};
+                             # SPLIT: {cut_frame}; LINK: {gate, gap: [t_e, t_s]};
+                             # FILL: {gap: [f_before, f_after], n_rows}; SMOOTH: {n_rows}
     algo_score: float        # [0, 1]
     signals: dict            # every named cue value and ramp output behind algo_score
     decision: Decision
@@ -239,20 +253,35 @@ class Event:
 
 `EventKind` and `Decision` subclass `StrEnum`.
 
+**Position records.** `FILL` and `SMOOTH` are written by stage 4.
+- They are always `AUTO_ACCEPT`, never routed to the VLM, and never sent to the review report.
+- They exist so that the ledger accounts for every position edit, and so the audit can sample them (§8.2).
+- Original positions are not copied into the ledger. They can be reconstructed exactly: `dnt-refine apply --no-fill` replays the ledger without stage 4 and reproduces the table as it was before filling and smoothing.
+
 ### 4.2 Ledger
 
 A JSONL file.
 - **Line 1** is the header: dnt version, config (full YAML as a dict), input file SHA-256, video path and SHA-256 of its first 64 MiB, fps, `id_map`, and the before/after summary (§8.3).
 - **Each later line** is one `Event`, written when its decision is final.
 
-`Ledger.replay(raw_tracks, decisions=None)`:
-1. Re-applies events in ledger order, applying those whose decision is an accept.
-2. Overrides decisions from a `decisions.json` (`{event_id: "accept" | "reject" | {"accept": true, "new_cls": 3}}`).
-3. Re-runs stage 4.
+**Lineage.** Every event records, for each track it involves, the raw rows that track is made of: `[raw_id, f0, f1]` spans. The header's `id_map` and the events' lineage let any output row be traced back to its input row.
 
-It makes no VLM or encoder calls. Replay is how human decisions take effect and how edits are undone.
+**Content key.** `key` is the SHA-256 of `(stage, kind, lineage of the involved tracks, the event's defining params)`, where the defining params are the cut frame, the gap span, the reason, or the spans. A decision about "cut raw track 12 at frame 821", or "link the raw-12 part ending at 820 to raw 81 starting at 883", keeps the same key however the tracks happen to be numbered.
 
-Replay does not re-run proposals, so a human decision cannot create events that were never proposed. This limitation is accepted. If a person rejects a `SPLIT`, the stage 3 events that involved its tail become invalid and are skipped, with `applied: false` and a `skipped_reason`.
+`Ledger.replay(raw_tracks, decisions=None, video=None, vlm=True, fill=True)`:
+1. **Overrides.** Decisions come from `decisions.json` (`{event_id: "accept" | "reject" | {"accept": true, "new_cls": 3}}`).
+2. **Unchanged stages.** For each stage in order: if its input tracks are identical to those recorded, the recorded events are applied as they are, with no proposals and no VLM calls.
+3. **Changed stages.** From the first stage whose input differs, because a changed decision altered what is applied upstream, that stage and every later one **re-propose** on the new tracks.
+   - A re-proposed event whose `key` matches an earlier event takes over that event's decision and VLM answer.
+   - Only events with no match are routed (§4.3). With `vlm=False` (`--no-vlm`), or with no video for evidence, they become `HUMAN_PENDING`.
+   - New events get `round = previous round + 1`, and a new review report is written for any that are pending.
+4. **Fill.** Stage 4 runs last, unless `fill=False` (`--no-fill`).
+
+Re-proposal is how a human decision takes effect downstream. For example, accepting a pending `SPLIT` gives its tail the chance to be linked in stage 3. Rejecting a `LINK` lets its endpoints be re-assigned (§6.3).
+
+Stage 1 has no stage upstream of it, so its proposals never change. Only its decisions can.
+
+Embeddings are read from the cache (§5.3). Its key does not depend on decisions, so re-proposal never re-encodes frames that were already encoded.
 
 ### 4.3 Bands
 
@@ -265,9 +294,10 @@ For each stage, `accept_above` and `reject_below`, with `reject_below < accept_a
 | otherwise | VLM (§7). With `vlm.backend: none`, `HUMAN_PENDING` |
 
 **Exceptions**
-- **Static screen.** The static-object score is capped at `screen.static_score_cap` (default 0.80). Keep the cap below `screen.accept_above`, so static tracks never auto-drop (§6.1).
-- **Rider subtype.** A `RECLASS` whose rider score is `AUTO_ACCEPT` still needs one VLM call to choose the subtype, unless a ReClass hint has already settled it (§6.1). That call only picks the subtype and cannot overturn the rider decision. If the VLM answers with a non-rider option (for example `pedestrian`), the algorithm and the VLM disagree, and the event becomes `HUMAN_PENDING`. It also becomes `HUMAN_PENDING` if `params.new_cls` is still `None` after verification.
-- **Link margin.** For stage 3, the routed value is `algo_score × ramp(margin)` (§6.3), not the raw score.
+- **Static screen.** The static-object score is capped at `screen.static_score_cap` (default 0.80). Keep the cap below `screen.accept_above`, so static tracks never auto-drop (§6.2).
+- **Rider subtype.** A `RECLASS` whose rider score is `AUTO_ACCEPT` still needs one VLM call to choose the subtype, unless a ReClass hint has already settled it (§6.2). That call only picks the subtype and cannot overturn the rider decision. If the VLM answers with a non-rider option (for example `pedestrian`), the algorithm and the VLM disagree, and the event becomes `HUMAN_PENDING`. It also becomes `HUMAN_PENDING` if `params.new_cls` is still `None` after verification.
+- **Link ambiguity.** In stage 3, a pair whose margin over the next-best alternative is below `link.margin_min` (default 0.1) is capped at `link.ambiguous_cap` (default 0.75, below `link.accept_above`). An ambiguous pair is never auto-accepted. Ambiguity alone also never auto-rejects a pair: if its score reaches `reject_below`, it goes to the VLM (§6.3).
+- **Mixed screen.** A partial `DROP` or `RECLASS` (§6.2) is capped at `screen.mixed_score_cap` (default 0.75), so it is never auto-applied.
 - **Occluded link.** A link through the occlusion-witness gate (§6.3) is capped at `link.occluded_score_cap` (default 0.75). Keep the cap below `link.accept_above`, so these links are never auto-accepted. Waiting in a queue also produces occlusion, so a witness makes a link plausible, not certain.
 
 ## 5. Shared primitives
@@ -281,7 +311,7 @@ For each stage, `accept_above` and `reject_below`, with `reject_below < accept_a
 
 ### 5.2 Kalman residual
 
-- Stage 2 uses the same constant-velocity model as stage 4: `primitives.cv_kalman(...)`, factored out of `interpolate_tracks_rts` (§2.3). As a result, both stages agree on what normal motion is. The model has:
+- Stage 1 uses the same constant-velocity model as stage 4: `primitives.cv_kalman(...)`, factored out of `interpolate_tracks_rts` (§2.3). As a result, both stages agree on what normal motion is. The model has:
   - state `[cx, vx, cy, vy, w, vw, h, vh]`, one step per frame;
   - `Q` from `Q_discrete_white_noise(dim=2, var=process_var)` for each (value, rate) pair;
   - `R = diag(meas_var_pos, meas_var_pos, meas_var_size, meas_var_size)`;
@@ -291,10 +321,20 @@ For each stage, `accept_above` and `reject_below`, with `reject_below < accept_a
 
 ### 5.3 Clean embeddings
 
-- The encoder embeds a crop every `encoder.sample_every` observed frames (default 5). Stage 2 finds candidates on these coarse samples, then embeds every observed frame within ±`switch.window` of each candidate and recomputes that candidate's score on the dense samples.
-- A crop is used only if the box's maximum IoU with every other track's box in that frame (in the same file and in the context file) is below `encoder.occlusion_iou` (default 0.3). Crops that fail are marked `occluded` and excluded from appearance statistics.
+- The encoder embeds a crop every `encoder.sample_every` observed frames (default 5). Stage 1 finds candidates on these coarse samples, then embeds every observed frame within ±`switch.window` of each candidate and recomputes that candidate's score on the dense samples.
+- A crop is used only if the box's maximum IoU with every other box in that frame (in the input file and in the context file) is below `encoder.occlusion_iou` (default 0.3). Crops that fail are marked `occluded` and excluded from appearance statistics.
+- The mask is computed from the **raw** input boxes and the context boxes. It does not change when decisions change, so embeddings stay valid across re-proposals.
 - Embeddings are L2-normalized.
-- The cache (`OUT.features.npz`) is keyed by input SHA-256, encoder kind, weights, `sample_every`, and `occlusion_iou`.
+- **Cache.** `OUT.features.npz` stores embeddings per (raw track ID, frame), under a key made of:
+  - the input track file's SHA-256;
+  - the video's identity: SHA-256 of its first 64 MiB, plus file size and frame count;
+  - the context file's SHA-256, or `none`;
+  - encoder kind, model name, and the SHA-256 of the weights file;
+  - `sample_every` and `occlusion_iou`;
+  - crop preprocessing: padding factor, resize target, and normalization;
+  - `FEATURES_VERSION`, a constant bumped whenever the crop or embedding code changes.
+
+  If any part differs, the cache is discarded (logged at INFO) and embeddings are recomputed.
 
 ### 5.4 Ramp
 
@@ -305,7 +345,9 @@ For each stage, `accept_above` and `reject_below`, with `reject_below < accept_a
 - **Protocol:** `AppearanceEncoder.encode(crops: list[np.ndarray]) -> np.ndarray` (N×D, float32, L2-normalized), with `name` and `dim` properties.
 - **`dino`:** DINOv2 ViT-S/14 via `transformers` (`facebook/dinov2-small` by default, configurable). Uses the CLS token. Crops are resized to 224 on the long side and padded. Extra: `dnt[post-dino] = ["transformers>=4.40"]`.
 - **`reid`:** `torchreid` feature extractor. The default for `person` is `osnet_x1_0` with MSMT17 weights. The `vehicle` target has no default and needs `encoder.weights` (for example, VeRi-776 weights). Extra: `dnt[post-reid] = ["torchreid"]`.
-- `RefineConfig.encoder.kind` selects the encoder. Validation runs when the config loads: a missing extra raises `ImportError` with the install command, and `reid` for a vehicle without `weights` raises `ValueError`.
+- **`none`:** no appearance. Stages 1 and 3 run in motion-only mode (§10). The video, if given, is still used for VLM evidence.
+- `RefineConfig.encoder.kind` selects the encoder. A config that is structurally wrong is rejected when it loads: an unknown kind, or `reid` for a vehicle without `weights`, raises `ValueError`.
+- **Dependency checks are deferred.** They run at the start of `refine` and `apply`, before any processing, and only for the components that run will use. The encoder's extra is required only when a video is given and `kind` is not `none`. A missing extra raises `ImportError` with the install command, and suggests `encoder.kind: none` as an alternative.
 
 ### 5.6 Geometry
 
@@ -317,9 +359,70 @@ For each stage, `accept_above` and `reject_below`, with `reject_below < accept_a
 
 All thresholds below are **starting defaults**, drawn from typical walking and cycling speeds and box geometry. They are not fitted values. Each one is a config field. Tuning happens through the audit (§8.2).
 
-### 6.1 Stage 1: screen (per track)
+### 6.1 Stage 1: switch (per track)
+
+Tracks with fewer than 2 × `switch.min_side_seconds` of clean embeddings are skipped. In motion-only mode (§10), observed frames are counted instead of clean embeddings, here and in the per-candidate side rule below.
+
+For each observed frame t, three components are computed.
+
+**Appearance change**
+- `A_t = 1 − cos(mean(e[t−W, t)), mean(e[t, t+W)))` over clean embeddings, where `W = switch.window` (default 1.0 s).
+- The baseline is the median and MAD of `A` over all t in the track. The z-score is `z_A = (A_t − median) / (1.4826·MAD + ε)`, with `ramp(z_A; 2 → 5)`.
+- **Bimodality check:** run 2-means on the track's clean embeddings. If the clusters split in time (at least 90% of cluster-1 samples come before t and at least 90% of cluster-2 samples after, for the t that best separates them) and the silhouette is at least 0.25, then `bimodal_t = 1` at that separating t. Otherwise it is 0.
+- `app_t = max(ramp(z_A), bimodal_t · ramp(silhouette; 0.25 → 0.5))`
+
+**Motion break**
+- `mot_t = max(ramp(NIS_t; nis_hi/2 → nis_hi), ramp(jump_t; 0.15 → 0.4))`
+- `jump_t = max(|log(w_t / w_prev)|, |log(h_t / h_prev)|)`. It uses both dimensions because a takeover can change mostly the width. In the reference case the width goes from 56 to 103 px (jump 0.61), while the height goes from 59 to 68 px (0.14).
+
+**Opportunity gate**
+`gate_t = 1` if any of the following holds within ±δ frames (default `δ = 0.5 s`). Otherwise `gate_t = 0`.
+  1. **Contact:** another track in the same file has `IoU > 0.1` with this one.
+  2. **Gap:** the gap to the previous observed frame is greater than 1 frame.
+  3. **Class change:** the per-row `cls` changes at least once (`switch.class_change_gate`, default on). Class groups (§6.3) don't apply here: a car ↔ truck flicker opens the gate too.
+  4. **Size jump:** `jump_t ≥ log(switch.size_gate)` for some observed frame, with default `size_gate = 1.5`. In the reference case the jump is 1.84× (width), so a 2× gate would miss it.
+
+Conditions 3 and 4 cover an object that takes over a track without ever having had a track of its own, like the truck in the reference case. In that situation, condition 1 never fires.
+
+A gate condition only makes a switch *possible*. The score still needs appearance or motion evidence, so a class flicker alone, with no change in appearance or motion, produces no event. `signals.gate` records which conditions fired.
+
+**Score**
+
+```
+S_switch(t) = gate_t · (w_app · app_t + w_mot · mot_t)   # defaults w_app = 0.65, w_mot = 0.35
+```
+
+- Candidates are local maxima of `S_switch`, with non-maximum suppression at spacing ≥ 1 s.
+- Each side of a candidate needs at least `min_side_seconds` (default 0.5 s) of clean embeddings.
+- One `SPLIT{cut_frame: t}` event is written per surviving candidate that reaches `reject_below`.
+- When applied, frames ≥ t get a new track ID.
+
+**Swap confirmation**
+
+If tracks i and j both have candidates within ±δ of each other, and the IoU gate fired between them, compute:
+
+```
+cross = [cos(before_i, after_j) − cos(before_i, after_i)] + [cos(before_j, after_i) − cos(before_j, after_j)]
+```
+
+If `cross > 0`, both events get `S ← min(1, S + 0.2·ramp(cross; 0 → 0.4))`, and `signals.swap_with` is set. Stage 3 re-pairs the four pieces.
+
+In motion-only mode (no video), `app_t = 0` and `w_mot` is renormalized to 1. With motion alone, no split is ever `AUTO_ACCEPT`, because the score is capped at `switch.motion_only_cap` (default 0.7).
+
+### 6.2 Stage 2: screen (per track)
 
 Each hypothesis is scored separately. If the highest score reaches `reject_below`, it becomes one event. Otherwise no event is written.
+
+**Segment-aware scoring.** Screening runs on the tracks produced by stage 1, but a track can still follow two objects. That happens when a `SPLIT` is `HUMAN_PENDING`, or when a stage 1 candidate scored below `switch.reject_below` but at least `screen.segment_at` (default 0.3). The cut frames of those candidates divide the track into *segments*, and each hypothesis is scored on every segment as well as on the whole track.
+- **Every segment reaches `reject_below` for the hypothesis:** the event covers the whole track as usual.
+- **Only some segments do:** the event is **partial**.
+  - `params.spans` lists the frame spans of the supported segments.
+  - The score is capped at `screen.mixed_score_cap` (§4.3), so a person or the VLM decides.
+  - The evidence image shows crops from the supported and unsupported segments in separate rows.
+  - If accepted, only rows inside `spans` are dropped or reclassed.
+- A whole-track `DROP` or `RECLASS` is therefore never auto-applied to a track whose segments disagree.
+
+In the case that motivated this rule, an ID follows a pedestrian and then a passenger inside a vehicle, with the switch still pending. The in-vehicle cue holds only on the second segment, so the result is a partial `DROP` for review, and the pedestrian's frames are kept.
 
 **Static non-object → `DROP{reason: "static"}`** (both targets)
 
@@ -399,56 +502,6 @@ S_orphan = ramp(observed_seconds; 0.5 → 0.1)
 
 The orphan pass has its own bands, defaulting to accept 0.7 and reject 0.3.
 
-### 6.2 Stage 2: switch (per track)
-
-Tracks with fewer than 2 × `switch.min_side_seconds` of clean embeddings are skipped. In motion-only mode (§10), observed frames are counted instead of clean embeddings, here and in the per-candidate side rule below.
-
-For each observed frame t, three components are computed.
-
-**Appearance change**
-- `A_t = 1 − cos(mean(e[t−W, t)), mean(e[t, t+W)))` over clean embeddings, where `W = switch.window` (default 1.0 s).
-- The baseline is the median and MAD of `A` over all t in the track. The z-score is `z_A = (A_t − median) / (1.4826·MAD + ε)`, with `ramp(z_A; 2 → 5)`.
-- **Bimodality check:** run 2-means on the track's clean embeddings. If the clusters split in time (at least 90% of cluster-1 samples come before t and at least 90% of cluster-2 samples after, for the t that best separates them) and the silhouette is at least 0.25, then `bimodal_t = 1` at that separating t. Otherwise it is 0.
-- `app_t = max(ramp(z_A), bimodal_t · ramp(silhouette; 0.25 → 0.5))`
-
-**Motion break**
-- `mot_t = max(ramp(NIS_t; nis_hi/2 → nis_hi), ramp(jump_t; 0.15 → 0.4))`
-- `jump_t = max(|log(w_t / w_prev)|, |log(h_t / h_prev)|)`. It uses both dimensions because a takeover can change mostly the width. In the reference case the width goes from 56 to 103 px (jump 0.61), while the height goes from 59 to 68 px (0.14).
-
-**Opportunity gate**
-`gate_t = 1` if any of the following holds within ±δ frames (default `δ = 0.5 s`). Otherwise `gate_t = 0`.
-  1. **Contact:** another track in the same file has `IoU > 0.1` with this one.
-  2. **Gap:** the gap to the previous observed frame is greater than 1 frame.
-  3. **Class change:** the per-row `cls` changes at least once (`switch.class_change_gate`, default on). Class groups (§6.3) don't apply here: a car ↔ truck flicker opens the gate too.
-  4. **Size jump:** `jump_t ≥ log(switch.size_gate)` for some observed frame, with default `size_gate = 1.5`. In the reference case the jump is 1.84× (width), so a 2× gate would miss it.
-
-Conditions 3 and 4 cover an object that takes over a track without ever having had a track of its own, like the truck in the reference case. In that situation, condition 1 never fires.
-
-A gate condition only makes a switch *possible*. The score still needs appearance or motion evidence, so a class flicker alone, with no change in appearance or motion, produces no event. `signals.gate` records which conditions fired.
-
-**Score**
-
-```
-S_switch(t) = gate_t · (w_app · app_t + w_mot · mot_t)   # defaults w_app = 0.65, w_mot = 0.35
-```
-
-- Candidates are local maxima of `S_switch`, with non-maximum suppression at spacing ≥ 1 s.
-- Each side of a candidate needs at least `min_side_seconds` (default 0.5 s) of clean embeddings.
-- One `SPLIT{cut_frame: t}` event is written per surviving candidate that reaches `reject_below`.
-- When applied, frames ≥ t get a new track ID.
-
-**Swap confirmation**
-
-If tracks i and j both have candidates within ±δ of each other, and the IoU gate fired between them, compute:
-
-```
-cross = [cos(before_i, after_j) − cos(before_i, after_i)] + [cos(before_j, after_i) − cos(before_j, after_j)]
-```
-
-If `cross > 0`, both events get `S ← min(1, S + 0.2·ramp(cross; 0 → 0.4))`, and `signals.swap_with` is set. Stage 3 re-pairs the four pieces.
-
-In motion-only mode (no video), `app_t = 0` and `w_mot` is renormalized to 1. With motion alone, no split is ever `AUTO_ACCEPT`, because the score is capped at `switch.motion_only_cap` (default 0.7).
-
 ### 6.3 Stage 3: link (pairs of track end → track start)
 
 **Candidates** are pairs (i, j) that pass the class gate (gate 3), where i ends at `t_e`, j starts at `t_s`, and `g = t_s − t_e`.
@@ -461,7 +514,7 @@ In motion-only mode (no video), `app_t = 0` and `w_mot` is renormalized to 1. Wi
    - **static gate:** `g ≤ link.max_gap_static` (default 10 s × fps) when i's speed over its last 0.5 s is below 0.2 h/s. For static-gated pairs, gates 5 and 6 are replaced by `‖c_j(t_s) − c_i(t_e)‖ ≤ 0.5·h̃_i`. Otherwise the growth term in gate 5 would open a huge gate over a 10 s gap.
    - **occlusion-witness gate:** `link.max_gap < g ≤ link.max_gap_occluded` (default 8 s × fps), for pairs that are not static-gated. Gates 5 and 6 are replaced by gates 7–9. Straight-line prediction over several seconds fails for turning objects, so these gates check feasibility instead.
 2. **Overlap:** a small negative gap, `−2 ≤ g ≤ 0`, is allowed only if the boxes have `IoU ≥ 0.5` on every overlapping frame. The overlapping rows from j are dropped on merge.
-3. **Class:** i's and j's majority classes, taken after stage 1's reclassing, are equal or share a group in `link.class_groups`. The default is `[]` for `person` and `[[2, 7]]` (car, truck) for `vehicle`, because detectors often label pickups and SUVs as trucks. Bus (5) stays in its own group.
+3. **Class:** i's and j's majority classes, taken after stage 2's reclassing, are equal or share a group in `link.class_groups`. The default is `[]` for `person` and `[[2, 7]]` (car, truck) for `vehicle`, because detectors often label pickups and SUVs as trucks. Bus (5) stays in its own group.
 4. **Size:** `w_j / w_i` and `h_j / h_i` are each within `[1/size_ratio_max, size_ratio_max]` (default 2.0). For occlusion-witnessed pairs, the check compares i's last and j's first *unoccluded* boxes (§5.3), falling back to the raw end and start boxes. Boxes at the edge of an occlusion are often partial.
 5. **Position:** `dist = ‖c_j(t_s) − (c_i(t_e) + v_i·g)‖ < dist_mult · √area_i · (1 + dist_growth · g)`, with defaults `dist_mult = 2.5` and `dist_growth = 0.03` per frame. `v_i` is a first-order fit on i's last `vel_frames` observed frames.
 6. **Predicted-box IoU:** `IoU(i's end box shifted by v_i·g, j's start box) ≥ iou_min` (default 0.05).
@@ -503,8 +556,12 @@ Defaults are `w_mot = 0.45, w_app = 0.40, w_gap = 0.15` (`weights_occluded` for 
 - Build the bipartite graph of gated pairs whose `S_link ≥ reject_below`.
 - Split it into connected components and run `scipy.optimize.linear_sum_assignment` on each component to maximize the total `S_link`.
 - **Margin:** for each chosen pair, `margin = S_link − max(second-best S for i, second-best S for j)`, or `S_link` when there is no alternative.
-- The **routed score** is `S_link · ramp(margin; 0 → 0.2)`, and bands apply to it. The raw `S_link` and the margin are stored in `signals`.
-- Each chosen pair becomes one `LINK` event.
+- The **routed score** is `S_link` when `margin ≥ link.margin_min`, and `min(S_link, link.ambiguous_cap)` otherwise (§4.3). Bands apply to the routed score. `S_link` and the margin are stored in `signals`.
+- Each chosen pair becomes one `LINK` event. It records its next-best alternatives, up to two, in `signals.alternatives`, and the review card shows them.
+- **Re-assignment after rejection.** Once a round's events are decided, rejected edges (`AUTO_REJECT`, `VLM_REJECT`, `HUMAN_REJECT`) are removed from the graph. Assignment then re-runs on the affected components, with margins recomputed.
+  - Each newly chosen pair becomes a new `LINK` event with `signals.replaces` set to the rejected event.
+  - This repeats up to `link.max_rounds` times (default 3).
+  - The endpoints of `HUMAN_PENDING` edges stay reserved, so a reviewer never sees two competing links for one track end. If the reviewer rejects a pending edge, re-proposal (§4.2) re-runs the assignment without it.
 - After verification, union-find merges the accepted links into chains. A chain that would put two boxes of the same object on the same frame is rejected: its lowest-scoring link is set to `applied: false` with `skipped_reason: "overlap"`.
 
 **Legacy mode (`link.mode: legacy`).** In this mode stage 3 behaves exactly like `link_tracklets`:
@@ -518,9 +575,26 @@ Legacy mode also shows the weakness that scored mode fixes: `link_tracklets` mer
 
 ### 6.4 Stage 4: fill
 
-`interpolate_tracks_rts(fill_gaps_only=True, max_gap=fill.max_gap)` runs on the final tracks. `fill.max_gap` defaults to `link.max_gap`, so a link across a long static gap is joined but not filled. This keeps a waiting pedestrian's invented positions out of conflict and speed analysis, since those analyses already exclude rows with `interp == 1`.
+`interpolate_tracks_rts(fill_gaps_only=True, max_gap=fill.max_gap, protected_gaps=…)` runs on the final tracks, which contain observed rows only (§2.5). `fill.max_gap` defaults to `link.max_gap`, so a link across a long static gap is joined but not filled. This keeps a waiting pedestrian's invented positions out of conflict and speed analysis, since those analyses already exclude rows with `interp == 1`.
 
-**Gaps bridged by an occlusion-witnessed link are never filled, whatever `fill.max_gap` is.** Over a long occlusion, often during a turn, constant-velocity motion would draw a straight chord through the occluder and create false conflicts. Stage 4 reads these gap spans from the ledger's applied `LINK` events (`signals.gate == "occluded"`), so replay gives the same result.
+**Gaps bridged by an occlusion-witnessed link are never filled, whatever `fill.max_gap` is.** Over a long occlusion, often during a turn, constant-velocity motion would draw a straight chord through the occluder and create false conflicts. **How protected gaps reach the function.** Stage 4 builds `protected_gaps` from the applied `LINK` events whose `params.gate == "occluded"`:
+- Each event contributes its `params.gap` (`[t_e, t_s]`), under the final ID of the chain it belongs to.
+- A chain with several such links contributes several gaps.
+- Replay rebuilds the map from the same events, so it gives the same result.
+
+**Changes to `interpolate_tracks_rts`.** Both are backward-compatible.
+1. **Filled rows are not measurements.** Rows whose flag column (`interp`, or `r3` in the positional layout) equals 1 are excluded from the Kalman updates. They are estimated again like any other missing frame: filled, with flag 1, where the gap rule allows, and dropped otherwise.
+   - Raw tracker output never contains a 1 (§2.5), so its output is unchanged, and the existing tests still pass.
+   - Refinement removes filled rows before stage 4 anyway. This change fixes the public function for callers who use it on their own.
+2. **New keyword `protected_gaps: Mapping[int, Iterable[tuple[int, int]]] | None = None`.**
+   - For each track ID, it lists gaps as `(last observed frame before, first observed frame after)`.
+   - The track is cut into independent filter-and-smoother segments at each protected gap, so neither filling nor `smooth_existing` crosses one.
+   - `None` keeps the current behavior.
+
+**Position records.**
+- **`FILL`:** one record per filled gap, with `params.gap`, `n_rows`, and `signals` = `{gap_seconds, chord_h, max_fill_speed_h_s}`.
+- **`SMOOTH`:** when `smooth_existing` is on, one record per smoothed track, with `n_rows` and `signals` = `{mean_shift_px, max_shift_px, max_shift_frame}`.
+- **Protected gaps:** no `FILL`. The applied occluded `LINK` already records the gap.
 
 `fill.smooth_existing` (default `false`) passes `smooth_existing=True`. Observed rows are then replaced by their RTS-smoothed boxes, which gives steadier speed estimates. Those rows keep `interp = 0`, and the ledger header records that smoothing was applied, since observed positions were changed.
 
@@ -539,6 +613,9 @@ Each routed event gets **one composite JPEG**, built by `evidence.py`:
 | DROP / RECLASS | 6 crops spread evenly across the track's observed frames, plus 1 context frame at mid-life |
 | SPLIT at t | Row A: 3 clean crops before t. Row B: 3 clean crops after t. Plus the context frame at t, with nearby tracks drawn |
 | LINK i→j | Row A: i's last 3 clean crops. Row B: j's first 3 clean crops. Plus context frames at `t_e` and `t_s`. For occlusion-witnessed links, also a context frame at the middle of the gap, with the hidden box `B_t` drawn dashed and the occluder labeled |
+
+| FILL (audit only, never sent to a VLM) | The last observed crop before the gap and the first after it, plus the context frame at mid-gap with the filled box drawn |
+| SMOOTH (audit only) | The context frame at `max_shift_frame`, with the original box and the smoothed box drawn |
 
 If `vlm.send_context_frames: false`, context frames are left out.
 
@@ -631,6 +708,8 @@ class VLMBackend(Protocol):
 - the kind, reason, tracks, and frames,
 - `algo_score` and the top signals,
 - the VLM's answer and reason, if there was one,
+- for `LINK` events, the recorded next-best alternatives,
+- for partial screen events, the supported and unsupported segments,
 - accept and reject controls, plus a class picker for `RECLASS` and for screen events that the VLM redirected,
 - a copy-to-clipboard `Labeler.draw_track_clips(...)` snippet covering the event's tracks and frame span ±2 s, for events that need motion to judge. `dnt.post` does not import `Labeler`; it only prints the snippet.
 
@@ -643,7 +722,7 @@ Cards can be filtered by stage and sorted by score.
 ### 8.2 Audit
 
 `dnt-refine audit`:
-1. Samples `n` events whose decision is final: `AUTO_*`, `VLM_*`, or `HUMAN_*`.
+1. Samples `n` events whose decision is final: `AUTO_*`, `VLM_*`, or `HUMAN_*`. This includes `FILL` and `SMOOTH` records, so the precision of interpolation and smoothing is measured too (`--kinds` restricts the sample).
 2. Stratifies the sample by (stage, decision), sampling each stratum in proportion to its size but with at least 3 per non-empty stratum, using a fixed `--seed`.
 3. Builds evidence images for them, reusing `evidence.py`.
 4. Writes `audit.html`, which has the same card layout with **correct** and **incorrect** controls, and exports `marks.json`.
@@ -685,7 +764,7 @@ motion:
   meas_var_pos: 25.0
   meas_var_size: 16.0
 encoder:
-  kind: dino                 # dino | reid
+  kind: dino                 # dino | reid | none
   model: facebook/dinov2-small
   weights: null
   device: auto               # cuda → xpu → mps → cpu, same order as Detector
@@ -698,7 +777,9 @@ screen:
   reject_below: 0.40
   static_score_cap: 0.80
   vehicle_static_score_cap: 0.60
-  # ramp ranges for R, J, C, T, H, inside, F, S, K, D as in §6.1
+  mixed_score_cap: 0.75
+  segment_at: 0.30
+  # ramp ranges for R, J, C, T, H, inside, F, S, K, D as in §6.2
 switch:
   enabled: true
   accept_above: 0.90
@@ -725,6 +806,9 @@ link:
   speed_factor: 1.5
   min_feasible_speed: 0.5    # h/s
   occluded_score_cap: 0.75
+  margin_min: 0.10
+  ambiguous_cap: 0.75
+  max_rounds: 3
   weights_occluded: {mot: 0.25, app: 0.60, gap: 0.15}
   class_groups: []           # vehicle default: [[2, 7]]
   size_ratio_max: 2.0        # legacy gates (link_tracklets defaults)
@@ -762,14 +846,16 @@ vlm:
 
 **Validation, run when the config loads**
 - `0 ≤ reject_below < accept_above ≤ 1` for every stage.
-- `static_score_cap < screen.accept_above`, so static tracks can never auto-drop (§6.1).
+- `static_score_cap < screen.accept_above`, so static tracks can never auto-drop (§6.2).
 - `link.weights` and `link.weights_occluded` each sum to 1.
 - `link.occluded_score_cap < link.accept_above`, so occluded links can never auto-accept.
 - `link.max_gap < link.max_gap_occluded`.
 - No class appears in more than one `link.class_groups` group.
-- The chosen encoder's extra is installed.
+- `screen.mixed_score_cap < screen.accept_above`, `link.ambiguous_cap < link.accept_above`, and `screen.segment_at < switch.reject_below`.
 - `reid` with the `vehicle` target has `weights` set.
-- A non-`none` VLM backend has `model` set (except `anthropic`, which has a default), and its extra is installed.
+- A non-`none` VLM backend has `model` set (except `anthropic`, which has a default).
+
+**Deferred until `refine` or `apply` starts, and only for components the run will use** (§5.5): the encoder's extra (needed only with a video and `encoder.kind` other than `none`) and the VLM backend's extra (needed only with a non-`none` backend and a video).
 
 Durations in config are in seconds and are converted to frames with `fps`.
 
@@ -777,14 +863,17 @@ Durations in config are in seconds and are converted to frames with `fps`.
 
 | Situation | Behavior |
 |---|---|
-| No `video` | Motion-only mode: no embeddings, and appearance weights set to 0 (§6.2, §6.3). The VLM backend is forced to `none` with a warning. Everything in the uncertain band becomes `HUMAN_PENDING`, and no review images are made (cards show signals only). |
+| No `video` | Motion-only mode: no embeddings, and appearance weights set to 0 (§6.1, §6.3). The VLM backend is forced to `none` with a warning. Everything in the uncertain band becomes `HUMAN_PENDING`, and no review images are made (cards show signals only). No encoder or VLM extra is needed. |
+| `encoder.kind: none` with a video | Motion-only scoring, as above, but the VLM and the evidence images are still available. |
 | No `context` | In-vehicle and two-wheeler-overlap cues are skipped and recorded as `null` in `signals`. The vehicle-duplicate cue still runs, because it uses the vehicle file itself. |
 | Context file with neither 8 nor 10 columns, when `context.format: auto` | `ValueError` naming the file and the column count. |
 | Hints file missing the `track, cls, avg_score` header | `ValueError`. Rows with unknown track IDs are ignored, with a warning. |
 | Max track frame exceeds the video's frame count | `ValueError` naming both numbers, since the track file does not belong to this video. |
 | Malformed CSV (fewer than 6 columns, non-numeric) | `ValueError` naming the file and first bad line. |
 | Empty track file | Writes an empty output, a ledger with header only, and no review. |
-| Encoder or VLM extra missing, or invalid config | Fails at config load, before any processing (§9). |
+| Invalid config | Fails at config load (§9). |
+| Encoder or VLM extra missing for a component the run will use | Fails at the start of `refine` or `apply`, before any processing (§5.5). |
+| Input contains filled rows (`interp == 1`) | They are removed on input and counted in the ledger header (§2.5). |
 | VLM errors | §7.4: `HUMAN_PENDING`, never an abort. |
 | Decisions file references an unknown event ID | `ValueError` listing the unknown IDs. Nothing is applied. |
 
@@ -805,6 +894,10 @@ All tests below run in the default suite (CPU, no network), except where a marke
   - a hint that disagrees with an in-band VLM subtype answer → `HUMAN_PENDING`.
   - two vehicles moving together with IoB 0.9 → `DROP{duplicate}` on the smaller.
   - an orphan of 0.2 s after linking → `DROP{orphan}`.
+  - **mixed track:** a pedestrian segment followed by an in-vehicle segment.
+    - With the `SPLIT` applied → only the second track is dropped.
+    - With the `SPLIT` pending → a partial `DROP` with `spans` covering only the second segment, capped and routed, never `AUTO_ACCEPT`. Accepting it keeps the pedestrian rows.
+    - With a stage 1 candidate at S = 0.35, below `switch.reject_below` → segmentation still applies, and there is no whole-track auto-drop.
 - `test_switch.py`, with embeddings injected through a stub encoder:
   - swapped embedding sequences at t with IoU contact → `SPLIT` at t (±1 sample), and swap confirmation raises the score.
   - an appearance drift with no gate → no event.
@@ -816,7 +909,9 @@ All tests below run in the default suite (CPU, no network), except where a marke
   - **parity:** `link.mode: legacy` gives the same track-ID mapping as `link_tracklets` on the existing `test_post_process.py` fixtures and on a randomized set of 200 synthetic tracklets (fixed seed).
   - a pair that `link_tracklets` merges despite a high cost → `scored` mode sends it to `AUTO_REJECT` or the VLM band, not to `AUTO_ACCEPT`.
   - collinear fragments with a 10-frame gap and similar embeddings → `LINK` `AUTO_ACCEPT`.
-  - two equally good candidates → low margin, routed to the VLM.
+  - two equally good candidates → margin below `margin_min`, capped at `ambiguous_cap`, routed to the VLM (neither auto-accepted nor auto-rejected), with `signals.alternatives` filled in.
+  - **re-assignment:** three tracklets where i→j scores highest but the fake VLM rejects it, and i→k is correct → round 2 proposes i→k with `signals.replaces` set. It is accepted, and i and k share an ID.
+  - a pending edge keeps its endpoints reserved: no competing event in later rounds.
   - a stationary pedestrian with a 6 s gap at the same spot → linked through the static gate. With `max_gap_static` = 5 s → not linked.
   - a start near the border → prior lowers the score.
   - a chain producing overlap → lowest link skipped with `skipped_reason: "overlap"`.
@@ -836,8 +931,14 @@ All tests below run in the default suite (CPU, no network), except where a marke
   - repeated invalid output → pending.
   - an exception → pending.
   - a cache hit makes no backend call.
-- `test_apply.py`: each event kind on a small table; renumbering and `id_map`; the SPLIT-rejected-then-LINK-skipped case.
-- `test_replay.py`: `apply` with a decisions file gives byte-identical output across two runs and makes zero backend calls (the fake backend raises if called). Unknown event IDs → `ValueError`.
+- `test_apply.py`: each event kind on a small table, including partial `DROP`/`RECLASS` with `spans`; renumbering, `id_map`, and lineage; content keys stay the same when track IDs are renumbered.
+- `test_replay.py`:
+  - A decisions file that changes nothing → byte-identical output, zero re-proposals, and zero backend calls (the fake backend raises if called).
+  - **Accepting a pending `SPLIT` →** `apply` re-proposes stages 2–4. The tail gets a `LINK` event (round 1), which is routed and applied. Every other event keeps its decision through key matching, so the fake backend sees only the new event.
+  - Rejecting a pending `LINK` → re-assignment offers the recorded alternative.
+  - The same `apply` run twice → byte-identical output.
+  - `--no-fill` reproduces the table as it was before filling, including the original observed positions of smoothed rows.
+  - Unknown event IDs → `ValueError`.
 
 ### 11.3 Evidence and reports
 
@@ -854,6 +955,16 @@ All tests below run in the default suite (CPU, no network), except where a marke
 - `@pytest.mark.realdata` (new marker, excluded by default): the same checks on the real Miami track file and video, found through `DNT_REFINE_CASE_DIR`. That directory holds `tracks.txt`, `video.mp4`, and an `expected.yaml` listing the expected `SPLIT` and `LINK` events, with frame tolerance ±3.
 - `test_post_independence.py`: the §2.2 import rule.
 - The existing `tests/test_post_process.py` passes unchanged through the shim. The existing `tests/test_filter.py` passes with the retargeted `Filter.interpolate_tracks_rts` wrapper.
+- `test_interpolate.py`:
+  - An input with `interp == 1` rows → those rows are not used as measurements, and are either filled again with flag 1 or dropped. A raw tracker file → output identical to the pre-change function.
+  - `protected_gaps`: a 63-frame gap stays empty with `max_gap=100`. Two protected gaps in one chain both stay empty. With `smooth_existing=True`, smoothing does not cross a protected gap (the observed rows on each side match smoothing each segment alone).
+- `test_refiner.py` (additions): an input that already has `interp == 1` rows → they are removed, the count is in the header, and the output fills come only from stage 4. One `FILL` record per filled gap, and one `SMOOTH` record per smoothed track.
+- `test_features_cache.py`: the cache is reused when nothing changes, and invalidated when any of these change: the video (same track file), the context file, the encoder weights, a crop preprocessing setting, or `FEATURES_VERSION`.
+- `test_minimal_install.py`: with `transformers`, `torchreid`, `openai`, and `anthropic` imports made to fail (via monkeypatching `sys.modules`):
+  - the default config loads;
+  - `refine` without a video succeeds;
+  - `refine` with a video and `encoder.kind: dino` raises `ImportError` before any processing, naming the extra;
+  - `refine` with a video and `encoder.kind: none` succeeds.
 - `test_primitives.py`: `cv_kalman` gives the same smoothed boxes as the pre-refactor `interpolate_tracks_rts` on the fixtures (the refactor is behavior-preserving), and NIS is χ²₄-distributed on simulated constant-velocity tracks (mean ≈ 4 within tolerance).
 - `test_config.py`: YAML round-trip, unknown keys, every validation rule in §9.
 - `@pytest.mark.model`:
