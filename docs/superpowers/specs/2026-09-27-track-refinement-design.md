@@ -1,6 +1,6 @@
 # dnt.post: Track Refinement with Algorithmic Screening and VLM Verification
 
-- **Status:** written spec (rev. 6: addresses [review 2026-09-28 11:05](../../review_2026-09-28_11-05-56.md) / [response](../../response_2026-09-28_11-05-56.md); rev. 5: addresses [review 2026-09-28 10:31](../../review_2026-09-28_10-31-56.md) / [response](../../response_2026-09-28_10-31-56.md); rev. 4: addresses [review 2026-09-28 09:53](../../review_2026-09-28_09-53-41.md) / [response](../../response_2026-09-28_09-53-41.md); rev. 3: occlusion-witnessed linking, takeover gates, class groups; rev. 2: reuse of existing dnt post-processing, no location-based filtering), awaiting review
+- **Status:** written spec (rev. 7: addresses [review 2026-09-28 11:24](../../review_2026-09-28_11-24-44.md) / [response](../../response_2026-09-28_11-24-44.md); rev. 6: addresses [review 2026-09-28 11:05](../../review_2026-09-28_11-05-56.md) / [response](../../response_2026-09-28_11-05-56.md); rev. 5: addresses [review 2026-09-28 10:31](../../review_2026-09-28_10-31-56.md) / [response](../../response_2026-09-28_10-31-56.md); rev. 4: addresses [review 2026-09-28 09:53](../../review_2026-09-28_09-53-41.md) / [response](../../response_2026-09-28_09-53-41.md); rev. 3: occlusion-witnessed linking, takeover gates, class groups; rev. 2: reuse of existing dnt post-processing, no location-based filtering), awaiting review
 - **Date:** 2026-09-27
 - **Baseline:** dnt 0.3.3 (`a290821`)
 - **Roadmap:** [`design/dnt-0.4-upgrade.md`](../../../design/dnt-0.4-upgrade.md). This work belongs to sub-project F (new capabilities). It adopts the `dnt/post/` location from §3 of the roadmap. It does not depend on sub-projects B–E, because its only inputs are a track file and a video.
@@ -303,13 +303,26 @@ A JSONL file.
 
 **Inputs for replay.** `TrackRefiner.apply(ledger, decisions=None, *, tracks=None, video=None, context=None, hints=None, features=None, vlm=True, fill=True, out)` takes its inputs from the ledger header. Each keyword overrides only the *location* of a recorded input, for example after files have moved. It never changes which input is used. Before any processing:
 - **Resolution.** Each recorded input is taken from its override if one is given, otherwise from its recorded path.
-- **Verification.** Its SHA-256 (the fingerprint, for the video) must equal the recorded value. A mismatch raises `ValueError`, naming the input and both hashes. The fix is to run `dnt-refine run` again: `apply` never re-proposes with different inputs.
+- **Verification of defining inputs.** The **defining inputs** are `tracks`, `video`, `context`, and `hints`, because they determine the proposals. Each one's SHA-256 (the fingerprint, for the video) must equal the recorded value. A mismatch raises `ValueError`, naming the input and both hashes. The fix is to run `dnt-refine run` again: `apply` never re-proposes with different inputs.
+- **The feature cache is a derived input.** It is computed entirely from the defining inputs and the encoder settings, so it does not follow the rule above. A bad cache is a *cache miss*, never a different input. The rule for it is below.
 - **Missing files.** A recorded `tracks`, `context`, or `hints` file that cannot be found raises `ValueError`.
-- **Appearance for re-proposal.** Stages 1 and 3 use embeddings, so they need appearance if they will re-run and `encoder.kind` is not `none`. (Which stages re-run is known before processing, from the overrides.) The embeddings come from one of two sources:
-  1. **The recorded feature cache**, if it is present, its SHA-256 matches `inputs.features.sha256`, and its key matches `cache_key`. A cache written by `refine` is **complete for any replay**: the set of embedded samples depends only on the raw inputs and on stage 1's proposals, and stage 1's proposals never change (§5.3).
-  2. **The video**, if the cache is missing or invalid but the verified video is available. Embeddings are recomputed from it.
+- **Appearance for re-proposal.** Stages 1 and 3 use embeddings, so they need appearance if they will re-run and `encoder.kind` is not `none`. Which stages re-run is known before processing, from the overrides. The cache is read and checked only in that case; otherwise it is not touched. When it is needed, it is in one of three states:
+  - **valid:** the file exists, its SHA-256 matches `inputs.features.sha256`, and its stored key matches `cache_key`. A cache written by `refine` is **complete for any replay**: the set of embedded samples depends only on the raw inputs and on stage 1's proposals, and stage 1's proposals never change (§5.3);
+  - **missing:** the file is not found at its override or recorded path;
+  - **invalid:** the file exists, but its SHA-256 or key differs, or it cannot be read.
 
-  If neither is available, `apply` raises `ValueError` before any processing. The message names the recorded video path and the cache path, and says to restore either one or pass `--video` / `--features`.
+  | Cache | Verified video available | Behavior |
+  |---|---|---|
+  | valid | either way | Use the cache. |
+  | missing | yes | Cache miss (logged at INFO): recompute from the video. |
+  | invalid | yes | Cache miss (logged at **WARNING**, naming the recorded and found hashes): recompute from the video. The invalid file is left untouched. |
+  | missing | no | `ValueError` before processing: "feature cache not found at <path>; restore it or the video at <path>, or pass `--features` / `--video`". |
+  | invalid | no | `ValueError` before processing: "feature cache at <path> does not match the ledger (recorded <sha>, found <sha>); restore the original cache or the video at <path>". |
+
+  After a recomputation:
+  - `apply` writes the new cache next to its output (`OUT.features.npz`), never over the file it rejected.
+  - The new ledger's header records the new cache in `inputs.features`, together with `features_recomputed: true`.
+  - With `encoder.device: cpu`, recomputation reproduces the original embeddings, and so the original output. On a GPU, floating-point nondeterminism can shift embeddings slightly, and a score that sits right on a threshold can then fall on the other side. That is why the header flag is recorded.
 - **Missing video with a valid cache.** Allowed, with a warning. New events that need evidence images become `HUMAN_PENDING` without images.
 - **No new inputs.** An input that the original run did not have (for example `context` when the header says `null`) is rejected, because it would change the proposals.
 - **Settings.** `fps` and `frame_size` come from the header.
@@ -388,7 +401,7 @@ For each stage, `accept_above` and `reject_below`, with `reject_below < accept_a
   - crop preprocessing: padding factor, resize target, and normalization;
   - `FEATURES_VERSION`, a constant bumped whenever the crop or embedding code changes.
 
-  If any part differs, the cache is discarded (logged at INFO) and embeddings are recomputed.
+  In `refine`, if any part of the key differs, the cache is discarded (logged at INFO) and embeddings are recomputed. In `apply`, the cache is a derived replay input, handled as a cache miss when the video is available and as an error otherwise (§4.2).
 - **Fingerprint.** It is computed once per run and shared by the cache key, the ledger header, and `apply`'s input check. Hashing the whole file costs about 1 s per 1–2 GB, which is small next to decoding. A partial hash, or a hash of size and modification time, is not used, because frames changed later in the file would go undetected.
 
 ### 5.4 Ramp
@@ -949,7 +962,8 @@ Durations in config are in seconds and are converted to frames with `fps`.
 | `apply`: a recorded input's hash or fingerprint differs, or a recorded `tracks`/`context`/`hints` file is missing | `ValueError` before any processing, naming the input (§4.2). |
 | `apply`: an input the original run did not have | `ValueError`: re-run `dnt-refine run` instead (§4.2). |
 | `apply`: the recorded video is missing, and the feature cache is valid | Warning. New events that need evidence images become `HUMAN_PENDING` without images (§4.2). |
-| `apply`: stage 1 or 3 will re-run with appearance, and both the video and a valid feature cache are unavailable | `ValueError` before any processing, naming both paths and how to supply either (§4.2). |
+| `apply`: stage 1 or 3 will re-run with appearance, and the feature cache is missing or invalid while the verified video is available | Cache miss: recompute from the video. INFO for missing, WARNING with both hashes for invalid. The new cache is written as `OUT.features.npz` (§4.2). |
+| `apply`: stage 1 or 3 will re-run with appearance, and neither the video nor a valid feature cache is available | `ValueError` before any processing. The message says whether the cache is missing or mismatched, names both paths, and says how to supply either (§4.2). |
 
 ## 11. Testing
 
@@ -1027,8 +1041,11 @@ All tests below run in the default suite (CPU, no network), except where a marke
   - **Missing video and cache:**
     - With the recorded video and the feature cache both removed, `apply` accepting a pending `SPLIT` (so stages 2–4 re-run, and stage 3 needs appearance) → `ValueError` before processing, naming both paths.
     - With only the video removed → `apply` succeeds, using the cache.
-    - With the video removed and the cache modified → a hash mismatch `ValueError`.
-    - With the cache removed and the video present → embeddings are recomputed, and the output equals the run that used the cache.
+    - With the video removed and the cache modified → `ValueError` whose message says "does not match" and gives both hashes.
+    - With the video removed and the cache removed → `ValueError` whose message says "not found".
+    - With the cache removed and the video present (CPU) → embeddings are recomputed (logged at INFO). The output equals the run that used the cache, and the new header has `features_recomputed: true`.
+    - **With the cache modified and the verified video present (CPU)** → no error: a WARNING naming both hashes, then recomputation. The output equals the run that used the original cache. The modified file is unchanged on disk, and the new `OUT.features.npz` has the header's new `sha256`.
+    - With the cache modified but neither stage 1 nor stage 3 re-running (the only change overrides an orphan-pass decision, so only the orphan pass and stage 4 re-run) → the cache is not read, and there is no warning or error.
   - **Redirected screen event survives re-proposal:**
     1. `refine` with the fake VLM redirecting a proposed `DROP{static}` to a cyclist `RECLASS`.
     2. `apply` with a decision change on an unrelated stage 1 split, which forces stage 2 to re-run.
