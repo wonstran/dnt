@@ -1,6 +1,6 @@
 # dnt.post: Track Refinement with Algorithmic Screening and VLM Verification
 
-- **Status:** written spec (rev. 5: addresses [review 2026-09-28 10:31](../../review_2026-09-28_10-31-56.md) / [response](../../response_2026-09-28_10-31-56.md); rev. 4: addresses [review 2026-09-28 09:53](../../review_2026-09-28_09-53-41.md) / [response](../../response_2026-09-28_09-53-41.md); rev. 3: occlusion-witnessed linking, takeover gates, class groups; rev. 2: reuse of existing dnt post-processing, no location-based filtering), awaiting review
+- **Status:** written spec (rev. 6: addresses [review 2026-09-28 11:05](../../review_2026-09-28_11-05-56.md) / [response](../../response_2026-09-28_11-05-56.md); rev. 5: addresses [review 2026-09-28 10:31](../../review_2026-09-28_10-31-56.md) / [response](../../response_2026-09-28_10-31-56.md); rev. 4: addresses [review 2026-09-28 09:53](../../review_2026-09-28_09-53-41.md) / [response](../../response_2026-09-28_09-53-41.md); rev. 3: occlusion-witnessed linking, takeover gates, class groups; rev. 2: reuse of existing dnt post-processing, no location-based filtering), awaiting review
 - **Date:** 2026-09-27
 - **Baseline:** dnt 0.3.3 (`a290821`)
 - **Roadmap:** [`design/dnt-0.4-upgrade.md`](../../../design/dnt-0.4-upgrade.md). This work belongs to sub-project F (new capabilities). It adopts the `dnt/post/` location from §3 of the roadmap. It does not depend on sub-projects B–E, because its only inputs are a track file and a video.
@@ -148,7 +148,7 @@ result = TrackRefiner(cfg).refine(
     fps=None,                         # required when there is no video (§5.1)
     out="ped_clean.csv",
 )
-result = TrackRefiner.apply(          # replay after review (§4.2); inputs come from the ledger header
+result = TrackRefiner.apply(          # replay after review (§4.2); inputs, including the feature cache, come from the ledger header
     "ped_clean.ledger.jsonl", decisions="decisions.json", out="ped_clean_v2.csv",
 )
 # result.tracks: DataFrame; result.ledger_path; result.review_path; result.summary
@@ -156,7 +156,7 @@ result = TrackRefiner.apply(          # replay after review (§4.2); inputs come
 
 ```
 dnt-refine run    TRACKS [--video V] [--fps F] [--context C] [--reclass-hints R] --config CFG --out OUT
-dnt-refine apply  --ledger L [--decisions D.json] [--tracks T] [--video V] [--context C] [--reclass-hints R] [--no-vlm] [--no-fill] --out OUT
+dnt-refine apply  --ledger L [--decisions D.json] [--tracks T] [--video V] [--context C] [--reclass-hints R] [--features F] [--no-vlm] [--no-fill] --out OUT
 dnt-refine audit  --ledger L [--video V] --n 50 [--seed S]
 dnt-refine audit-score --ledger L --marks M.json
 ```
@@ -239,7 +239,7 @@ class Decision(StrEnum):
 
 @dataclass
 class Event:
-    id: str                  # f"{stage}-r{round}-{seq:06d}", unique within the ledger
+    id: str                  # f"{stage}-r{round}-{seq:06d}"; kept by matched events in later rounds
     proposal_key: str        # immutable key of the proposal, fixed before verification (§4.2)
     round: int               # review round that proposed it (0 = first run)
     stage: str               # "switch" | "screen" | "link" | "orphan" | "fill"
@@ -254,7 +254,8 @@ class Event:
     edit: dict | None        # the final edit {kind, params} when accepted; None otherwise
     algo_score: float        # [0, 1]
     signals: dict            # every named cue value and ramp output behind algo_score
-    decision: Decision
+    decision: Decision       # current decision; HUMAN_PENDING events are written too
+    decision_history: list[dict]  # [{decision, round, source: auto | vlm | human}, ...]
     vlm: dict | None         # {backend, model, answer, confidence, votes, reason, evidence, cached}
     applied: bool
 ```
@@ -283,10 +284,15 @@ A JSONL file.
   - `tracks`: `{path, sha256, format}`;
   - `video`: `{path, fingerprint, frame_count}` or `null` (§5.3 defines the fingerprint);
   - `context`: `{path, sha256, format}` or `null`;
-  - `hints`: `{reclass: {path, sha256}}` or `null`.
+  - `hints`: `{reclass: {path, sha256}}` or `null`;
+  - `features`: `{path, sha256, cache_key}` or `null`, the embedding cache the run wrote (§5.3).
 
   Paths are stored as given and also resolved to absolute paths.
-- **Each later line** is one `Event`, written when its decision is final.
+- **Each later line** is one `Event`. **Every proposed event is written, including `HUMAN_PENDING` ones**, with its current decision. The review page and `apply` refer to pending events by their ledger `id`. A stage writes its events once its verification is done (so after its last pass, in stage 3).
+- **Ledgers are never edited in place.** `apply` writes a new ledger for its output (`OUT.ledger.jsonl`) that contains the complete, current state:
+  - Its header records `parent: {path, sha256}` (the ledger it replayed) and `round` (the parent's round + 1).
+  - Every event keeps its `id` across rounds when it is matched by `proposal_key`, so a reviewer's IDs stay valid. Only new events get new IDs, with the new round in them.
+  - Each event carries `decision` (current) and `decision_history`, a list of `{decision, round, source}`, where `source` is `auto`, `vlm`, or `human`.
 
 **Lineage.** Every event records, for each track it involves, the raw rows that track is made of: `[raw_id, f0, f1]` spans. The header's `id_map` and the events' lineage let any output row be traced back to its input row.
 
@@ -295,10 +301,16 @@ A JSONL file.
 - A VLM redirection, or a person's class choice, changes `edit` but not the key. On re-proposal, the same proposal gets the same key and takes over the recorded `edit`.
 - A decision about "cut raw track 12 at frame 821", or "link the raw-12 part ending at 820 to raw 81 starting at 883", keeps the same key however the tracks happen to be numbered.
 
-**Inputs for replay.** `TrackRefiner.apply(ledger, decisions=None, *, tracks=None, video=None, context=None, hints=None, vlm=True, fill=True, out)` takes its inputs from the ledger header. Each keyword overrides only the *location* of a recorded input, for example after files have moved. It never changes which input is used. Before any processing:
+**Inputs for replay.** `TrackRefiner.apply(ledger, decisions=None, *, tracks=None, video=None, context=None, hints=None, features=None, vlm=True, fill=True, out)` takes its inputs from the ledger header. Each keyword overrides only the *location* of a recorded input, for example after files have moved. It never changes which input is used. Before any processing:
 - **Resolution.** Each recorded input is taken from its override if one is given, otherwise from its recorded path.
 - **Verification.** Its SHA-256 (the fingerprint, for the video) must equal the recorded value. A mismatch raises `ValueError`, naming the input and both hashes. The fix is to run `dnt-refine run` again: `apply` never re-proposes with different inputs.
-- **Missing files.** A recorded `tracks`, `context`, or `hints` file that cannot be found raises `ValueError`. A missing video is allowed, with a warning. Embeddings come from the cache, but new events that need evidence images become `HUMAN_PENDING` without images.
+- **Missing files.** A recorded `tracks`, `context`, or `hints` file that cannot be found raises `ValueError`.
+- **Appearance for re-proposal.** Stages 1 and 3 use embeddings, so they need appearance if they will re-run and `encoder.kind` is not `none`. (Which stages re-run is known before processing, from the overrides.) The embeddings come from one of two sources:
+  1. **The recorded feature cache**, if it is present, its SHA-256 matches `inputs.features.sha256`, and its key matches `cache_key`. A cache written by `refine` is **complete for any replay**: the set of embedded samples depends only on the raw inputs and on stage 1's proposals, and stage 1's proposals never change (§5.3).
+  2. **The video**, if the cache is missing or invalid but the verified video is available. Embeddings are recomputed from it.
+
+  If neither is available, `apply` raises `ValueError` before any processing. The message names the recorded video path and the cache path, and says to restore either one or pass `--video` / `--features`.
+- **Missing video with a valid cache.** Allowed, with a warning. New events that need evidence images become `HUMAN_PENDING` without images.
 - **No new inputs.** An input that the original run did not have (for example `context` when the header says `null`) is rejected, because it would change the proposals.
 - **Settings.** `fps` and `frame_size` come from the header.
 
@@ -319,7 +331,7 @@ Stage 1 has no stage upstream of it, so its proposals never change. Only its dec
 
 **Equivalence.** Accepting a pending decision through `apply` gives the same output tracks as a fresh `refine` in which that decision was made during the run.
 
-Embeddings are read from the cache (§5.3). Its key does not depend on decisions, so re-proposal never re-encodes frames that were already encoded.
+Embeddings are read from the verified cache (§5.3). Its key does not depend on decisions, so re-proposal never re-encodes frames that were already encoded.
 
 ### 4.3 Bands
 
@@ -366,6 +378,7 @@ For each stage, `accept_above` and `reject_below`, with `reject_below < accept_a
 - A crop is used only if the box's maximum IoU with every other box in that frame (in the input file and in the context file) is below `encoder.occlusion_iou` (default 0.3). Crops that fail are marked `occluded` and excluded from appearance statistics.
 - The mask is computed from the **raw** input boxes and the context boxes. It does not change when decisions change, so embeddings stay valid across re-proposals.
 - Embeddings are L2-normalized.
+- **The embedded samples do not depend on decisions.** They are the coarse samples, which depend only on the raw tracks and `sample_every`, plus the dense samples around every stage 1 candidate, whatever its decision. Stage 1's proposals are deterministic and never change on replay. So the cache that `refine` writes covers every embedding any replay can request, including the first and last clean samples of tails created by splits that are accepted later.
 - **Cache.** `OUT.features.npz` stores embeddings per (raw track ID, frame), under a key made of:
   - the input track file's SHA-256;
   - the video's **fingerprint**: the SHA-256 of the **entire file**, read in 8 MiB chunks, plus the file size and frame count;
@@ -538,7 +551,15 @@ The smaller track (by median area) is the one proposed for dropping.
 
 **Orphan pass → `DROP{reason: "orphan"}`** (after stage 3)
 
-A track with no accepted link and fewer than `orphan.min_seconds` (default 0.5 s) of observed frames:
+A track with no accepted link and fewer than `orphan.min_seconds` (default 0.5 s) of observed frames is scored as below.
+
+**Pending links defer the orphan decision.** A track that is an endpoint of a `HUMAN_PENDING` `LINK` is **skipped**, not scored. The ledger header's summary lists it under `orphan_deferred`. When the reviewer decides the link, stage 3 re-runs because it owns a changed event (§4.2), and the orphan pass re-runs after it:
+- a rejected link makes the fragment an orphan candidate again;
+- an accepted link makes it part of a longer track.
+
+So a fragment is never deleted while the decision about linking it is still open.
+
+Score:
 
 ```
 S_orphan = ramp(observed_seconds; 0.5 → 0.1)
@@ -602,10 +623,14 @@ Defaults are `w_mot = 0.45, w_app = 0.40, w_gap = 0.15` (`weights_occluded` for 
 - **Margin:** for each chosen pair, `margin = S_link − max(second-best S for i, second-best S for j)`, or `S_link` when there is no alternative.
 - The **routed score** is `S_link` when `margin ≥ link.margin_min`, and `min(S_link, link.ambiguous_cap)` otherwise (§4.3). Bands apply to the routed score. `S_link` and the margin are stored in `signals`.
 - Each chosen pair becomes one `LINK` event. It records its next-best alternatives, up to two, in `signals.alternatives`, and the review card shows them.
-- **Re-assignment after rejection.** Once a round's events are decided, rejected edges (`AUTO_REJECT`, `VLM_REJECT`, `HUMAN_REJECT`) are removed from the graph. Assignment then re-runs on the affected components, with margins recomputed.
-  - Each newly chosen pair becomes a new `LINK` event with `signals.replaces` set to the rejected event.
-  - This repeats up to `link.max_rounds` times (default 3).
-  - The endpoints of `HUMAN_PENDING` edges stay reserved, so a reviewer never sees two competing links for one track end. If the reviewer rejects a pending edge, re-proposal (§4.2) re-runs the assignment without it.
+- **Re-assignment after rejection.** Assignment runs in **passes**. Pass 1 is the assignment above. Once a pass's events are decided, the next pass re-runs assignment on the affected components, with margins recomputed, over a reduced graph:
+  - **Rejected edges** (`AUTO_REJECT`, `VLM_REJECT`, `HUMAN_REJECT`) are removed.
+  - **Accepted pairs are frozen.** An accepted pair (`AUTO_ACCEPT`, `VLM_ACCEPT`, `HUMAN_ACCEPT`) is kept as it is, and both of its endpoints are removed from the graph. A later pass can never re-assign a verified link's endpoint to a different partner, so the ledger cannot hold two accepted links that conflict.
+  - **Pending endpoints are reserved.** The endpoints of `HUMAN_PENDING` edges are removed too, so a reviewer never sees two competing links for one track end.
+
+  Each newly chosen pair becomes a new `LINK` event, with `signals.pass` and with `signals.replaces` set to the rejected event. Passes repeat up to `link.max_passes` times (default 3). The pass number is not part of the `proposal_key`, so a pair has the same key in whichever pass it is proposed.
+
+  **On replay.** When stage 3 re-runs (§4.2), it follows the same rules. Recorded decisions are applied by key, pass by pass: accepted pairs stay frozen, and endpoints freed by a newly rejected edge become available for the next pass. A person who rejects a previously *accepted* link frees its endpoints in the same way.
 - After verification, union-find merges the accepted links into chains. A chain that would put two boxes of the same object on the same frame is rejected: its lowest-scoring link is set to `applied: false` with `skipped_reason: "overlap"`.
 
 **Legacy mode (`link.mode: legacy`).** In this mode stage 3 behaves exactly like `link_tracklets`:
@@ -852,7 +877,7 @@ link:
   occluded_score_cap: 0.75
   margin_min: 0.10
   ambiguous_cap: 0.75
-  max_rounds: 3
+  max_passes: 3
   weights_occluded: {mot: 0.25, app: 0.60, gap: 0.15}
   class_groups: []           # vehicle default: [[2, 7]]
   size_ratio_max: 2.0        # legacy gates (link_tracklets defaults)
@@ -923,7 +948,8 @@ Durations in config are in seconds and are converted to frames with `fps`.
 | No video and no `fps` (argument or config) | `ValueError` before any processing, asking for `fps=` (§5.1). |
 | `apply`: a recorded input's hash or fingerprint differs, or a recorded `tracks`/`context`/`hints` file is missing | `ValueError` before any processing, naming the input (§4.2). |
 | `apply`: an input the original run did not have | `ValueError`: re-run `dnt-refine run` instead (§4.2). |
-| `apply`: the recorded video is missing | Warning. New events that need evidence images become `HUMAN_PENDING` without images (§4.2). |
+| `apply`: the recorded video is missing, and the feature cache is valid | Warning. New events that need evidence images become `HUMAN_PENDING` without images (§4.2). |
+| `apply`: stage 1 or 3 will re-run with appearance, and both the video and a valid feature cache are unavailable | `ValueError` before any processing, naming both paths and how to supply either (§4.2). |
 
 ## 11. Testing
 
@@ -946,6 +972,7 @@ All tests below run in the default suite (CPU, no network), except where a marke
     - An unsplit fast track with the same hint still gets its subtype from the hint (regression).
   - two vehicles moving together with IoB 0.9 → `DROP{duplicate}` on the smaller.
   - an orphan of 0.2 s after linking → `DROP{orphan}`.
+  - a 0.1 s fragment that is an endpoint of a `HUMAN_PENDING` `LINK` → no orphan event, listed in `orphan_deferred`, and present in the output (end-to-end in `test_replay.py`).
   - **mixed track:** a pedestrian segment followed by an in-vehicle segment.
     - With the `SPLIT` applied → only the second track is dropped.
     - With the `SPLIT` pending → a partial `DROP` with `spans` covering only the second segment, capped and routed, never `AUTO_ACCEPT`. Accepting it keeps the pedestrian rows.
@@ -962,8 +989,9 @@ All tests below run in the default suite (CPU, no network), except where a marke
   - a pair that `link_tracklets` merges despite a high cost → `scored` mode sends it to `AUTO_REJECT` or the VLM band, not to `AUTO_ACCEPT`.
   - collinear fragments with a 10-frame gap and similar embeddings → `LINK` `AUTO_ACCEPT`.
   - two equally good candidates → margin below `margin_min`, capped at `ambiguous_cap`, routed to the VLM (neither auto-accepted nor auto-rejected), with `signals.alternatives` filled in.
-  - **re-assignment:** three tracklets where i→j scores highest but the fake VLM rejects it, and i→k is correct → round 2 proposes i→k with `signals.replaces` set. It is accepted, and i and k share an ID.
-  - a pending edge keeps its endpoints reserved: no competing event in later rounds.
+  - **re-assignment:** three tracklets where i→j scores highest but the fake VLM rejects it, and i→k is correct → pass 2 proposes i→k with `signals.replaces` set. It is accepted, and i and k share an ID.
+  - a pending edge keeps its endpoints reserved: no competing event in later passes.
+  - **frozen accepted pairs:** a component where a→x is accepted in pass 1 and b→y is rejected. Without x, the unconstrained optimum for pass 2 would be b→x plus a→z. Instead a→x stays applied, x is not offered to b, and pass 2 proposes b's best partner other than x (or nothing). No two accepted links share an endpoint. The same holds on replay when b→y is rejected through `apply --decisions`.
   - a stationary pedestrian with a 6 s gap at the same spot → linked through the static gate. With `max_gap_static` = 5 s → not linked.
   - a start near the border → prior lowers the score.
   - a chain producing overlap → lowest link skipped with `skipped_reason: "overlap"`.
@@ -988,6 +1016,19 @@ All tests below run in the default suite (CPU, no network), except where a marke
   - A decisions file that changes nothing → byte-identical output, zero re-proposals, and zero backend calls (the fake backend raises if called).
   - **Accepting a pending `SPLIT` →** `apply` re-proposes stages 2–4. The tail gets a `LINK` event (round 1), which is routed and applied. Every other event keeps its decision through key matching, so the fake backend sees only the new event.
   - **Rejecting a pending `LINK` via `apply --decisions`** (the stage 3 input table is unchanged) → stage 3 re-runs because it owns a changed event, and re-assignment proposes the alternative as a new event.
+  - **Pending event round trip:**
+    1. `refine` leaves a `LINK` pending.
+    2. The ledger contains it with `decision: HUMAN_PENDING` and an `id`, and it deserializes to an equal `Event`.
+    3. A `decisions.json` exported for that `id` is passed to `apply`.
+    4. The new ledger keeps the same `id`, has `decision: HUMAN_ACCEPT`, and its `decision_history` has two entries. Its header names the parent ledger and `round: 1`. The parent ledger file is unchanged, byte for byte.
+  - **Orphan with a pending link, end to end:** a 0.1 s fragment whose link is pending stays in the output.
+    - When `apply` rejects the link → the orphan pass proposes `DROP{orphan}`, which is auto-accepted.
+    - When `apply` accepts the link → the fragment is linked, and no orphan event is proposed.
+  - **Missing video and cache:**
+    - With the recorded video and the feature cache both removed, `apply` accepting a pending `SPLIT` (so stages 2–4 re-run, and stage 3 needs appearance) → `ValueError` before processing, naming both paths.
+    - With only the video removed → `apply` succeeds, using the cache.
+    - With the video removed and the cache modified → a hash mismatch `ValueError`.
+    - With the cache removed and the video present → embeddings are recomputed, and the output equals the run that used the cache.
   - **Redirected screen event survives re-proposal:**
     1. `refine` with the fake VLM redirecting a proposed `DROP{static}` to a cyclist `RECLASS`.
     2. `apply` with a decision change on an unrelated stage 1 split, which forces stage 2 to re-run.
