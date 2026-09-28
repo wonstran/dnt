@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -13,7 +14,7 @@ from tqdm import tqdm
 
 from .apply import lineage_of_rows
 from .config import RefineConfig, to_frames
-from .events import Event, EventKind
+from .events import ACCEPTED, REJECTED, Decision, Event, EventKind
 from .features import Appearance, track_embeddings
 from .primitives import box_centers, iou_matrix, majority_class, ramp, span_speed
 
@@ -825,3 +826,171 @@ def legacy_link_events(work, cfg: RefineConfig, fps: float) -> list[Event]:
             signals={"legacy_cost": cost, "pass": 1},
         ))
     return events
+
+
+@dataclass
+class LinkStageResult:
+    """Stage 3 output."""
+
+    events: list[Event]
+    accepted: list[tuple[int, int]]
+    pending_endpoints: set[int]
+    skipped: list[Event]
+
+
+def _components(edges: list[tuple[int, int]]) -> list[list[tuple[int, int]]]:
+    parent: dict = {}
+
+    def find(x):
+        parent.setdefault(x, x)
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    for i, j in edges:
+        parent[find(("e", i))] = find(("s", j))
+    groups: dict = {}
+    for e in edges:
+        groups.setdefault(find(("e", e[0])), []).append(e)
+    return sorted((sorted(v) for v in groups.values()), key=lambda v: v[0])
+
+
+def _hungarian(comp: list[tuple[int, int]], avail: dict) -> list[tuple[int, int]]:
+    from scipy.optimize import linear_sum_assignment
+
+    ends = sorted({e[0] for e in comp})
+    starts = sorted({e[1] for e in comp})
+    m = np.full((len(ends), len(starts)), -1.0)
+    for i, j in comp:
+        m[ends.index(i), starts.index(j)] = avail[(i, j)].score
+    rows, cols = linear_sum_assignment(np.where(m >= 0, -m, 1e6))
+    return [(ends[a], starts[b]) for a, b in zip(rows, cols, strict=True) if m[a, b] >= 0]
+
+
+def assign_in_passes(
+    cands: list[Candidate], cfg: RefineConfig, *,
+    make_event: Callable[[Candidate, float, dict], Event],
+    route: Callable[[list[Event]], None],
+) -> list[Event]:
+    """Assign pairs pass by pass; rejected edges free their endpoints (spec 6.3)."""
+    lc = cfg.link
+    edges = {(c.i, c.j): c for c in cands if c.score >= lc.reject_below}
+    by_edge: dict[tuple[int, int], Event] = {}
+    rejected_key: dict[int, str] = {}
+    events: list[Event] = []
+    for p in range(1, lc.max_passes + 1):
+        live = [e for e, ev in by_edge.items() if ev.decision not in REJECTED]
+        busy_end = {e[0] for e in live}
+        busy_start = {e[1] for e in live}
+        avail = {e: c for e, c in edges.items()
+                 if e not in by_edge and e[0] not in busy_end and e[1] not in busy_start}
+        if not avail:
+            break
+        chosen = [pair for comp in _components(sorted(avail)) for pair in _hungarian(comp, avail)]
+        if not chosen:
+            break
+        new: list[Event] = []
+        for i, j in chosen:
+            c = avail[(i, j)]
+            alts = sorted((a for e, a in avail.items() if e != (i, j) and (e[0] == i or e[1] == j)),
+                          key=lambda a: (-a.score, a.i, a.j))
+            margin = c.score - alts[0].score if alts else c.score
+            routed = c.score if margin >= lc.margin_min else min(c.score, lc.ambiguous_cap)
+            extra = {"S_link": c.score, "margin": margin, "pass": p,
+                     "alternatives": [{"i": a.i, "j": a.j, "score": a.score}
+                                      for a in alts[: lc.n_alternatives]]}
+            replaced = rejected_key.get(i) or rejected_key.get(j)
+            if replaced:
+                extra["replaces"] = replaced
+            ev = make_event(c, routed, extra)
+            by_edge[(i, j)] = ev
+            new.append(ev)
+        route(new)
+        events.extend(new)
+        freed = [ev for ev in new if ev.decision in REJECTED]
+        for ev in freed:
+            for t in ev.tracks:
+                rejected_key[int(t)] = ev.proposal_key
+        if not freed:
+            break
+    return events
+
+
+def _first_conflict(active: list[Event], descs: dict[int, TrackDesc], overlap_frames: int):
+    parent: dict[int, int] = {}
+
+    def find(x):
+        parent.setdefault(x, x)
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    for e in active:
+        parent[find(e.tracks[1])] = find(e.tracks[0])
+    chains: dict[int, list[Event]] = {}
+    for e in active:
+        chains.setdefault(find(e.tracks[0]), []).append(e)
+    for evs in chains.values():
+        members = sorted({t for e in evs for t in e.tracks}, key=lambda t: (descs[t].t_s, t))
+        linked = {tuple(e.tracks) for e in evs}
+        for a in range(len(members)):
+            for b in range(a + 1, len(members)):
+                x, y = members[a], members[b]
+                shared = np.intersect1d(descs[x].frames, descs[y].frames)
+                if not len(shared):
+                    continue
+                if (x, y) in linked and len(shared) <= overlap_frames + 1:
+                    continue
+                return min(evs, key=lambda e: (e.algo_score, e.proposal_key))
+    return None
+
+
+def resolve_chains(
+    accepted: list[Event], descs: dict[int, TrackDesc], overlap_frames: int
+) -> tuple[list[tuple[int, int]], list[Event]]:
+    """Drop the weakest link of any chain that would repeat a frame (spec 6.3)."""
+    active = list(accepted)
+    skipped: list[Event] = []
+    while True:
+        bad = _first_conflict(active, descs, overlap_frames)
+        if bad is None:
+            return [(int(e.tracks[0]), int(e.tracks[1])) for e in active], skipped
+        bad.applied = False
+        bad.signals["skipped_reason"] = "overlap"
+        active = [e for e in active if e is not bad]
+        skipped.append(bad)
+
+
+def run_link_stage(
+    work, cfg: RefineConfig, fps: float, *, appearance: Appearance | None, context, frame_size,
+    occluded, route: Callable[[list[Event]], None],
+) -> LinkStageResult:
+    """Propose, route, and resolve LINK events for the current work table."""
+    if cfg.link.mode == "legacy":
+        evs = legacy_link_events(work, cfg, fps)
+        route(evs)
+        acc = [e for e in evs if e.decision in ACCEPTED]
+        for e in acc:
+            e.applied = True
+        return LinkStageResult(evs, [(e.tracks[0], e.tracks[1]) for e in acc], set(), [])
+    cands, descs = score_candidates(work, cfg, fps, appearance=appearance, context=context,
+                                    frame_size=frame_size, occluded=occluded)
+
+    def make_event(c: Candidate, routed: float, extra: dict) -> Event:
+        di, dj = descs[c.i], descs[c.j]
+        return Event.propose(
+            stage=STAGE, kind=EventKind.LINK, tracks=[c.i, c.j], lineage=[di.lineage, dj.lineage],
+            frames=(di.t_e, dj.t_s), params={"gate": c.gate, "gap": [di.t_e, dj.t_s]},
+            algo_score=routed, signals={**c.signals, **extra},
+        )
+
+    events = assign_in_passes(cands, cfg, make_event=make_event, route=route)
+    acc = [e for e in events if e.decision in ACCEPTED]
+    pairs, skipped = resolve_chains(acc, descs, cfg.link.overlap_frames)
+    skipped_ids = {id(e) for e in skipped}
+    for e in acc:
+        e.applied = id(e) not in skipped_ids
+    pending = {t for e in events if e.decision is Decision.HUMAN_PENDING for t in e.tracks}
+    return LinkStageResult(events, pairs, pending, skipped)
