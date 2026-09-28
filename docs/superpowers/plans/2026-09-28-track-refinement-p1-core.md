@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Build the `dnt.refine` subpackage's core, so that `dnt-refine run` / `TrackRefiner.refine` split ID switches, screen false tracks, link fragments, drop orphans, and fill gaps. Every edit is recorded in a JSONL ledger. This plan scores with motion only, and routes uncertain events to `HUMAN_PENDING`.
+**Goal:** Build the `dnt.refine` subpackage's core, so that `dnt-refine run` / `TrackRefiner.refine` propose every kind of edit (ID-switch splits, false-track drops and reclasses, fragment links, orphan drops) and fill gaps, recording every proposal in a JSONL ledger. This plan scores with motion only and has no VLM, and no way to apply human decisions. So it **applies only confident edits** automatically: screen drops and reclasses, normal and static-wait links, orphan drops, and fills. It records the rest as `HUMAN_PENDING` without applying them. That includes every motion-only switch split (capped at 0.70, below the 0.90 accept threshold) and every occlusion-witnessed link (capped at 0.75, below 0.80). Plan 3 (VLM verification) and Plan 4 (applying review decisions) are what let those take effect.
 
 **Architecture:**
 - **Stages propose; they never edit.** Each stage (`switch.py`, `screen.py`, `link.py`) is a pure function of a *work table* that returns proposed `Event`s.
@@ -64,7 +64,7 @@ These are the five inputs most likely to hurt a real user that the spec implies 
 These are reported at handoff.
 
 - **Dry run (2026-09-28).** The code blocks in this plan were assembled into a scratch copy of the repository and executed. The baselines were generated first, then every task was applied in order.
-  - The full default suite passes, including every new test: 422 passed, 12 xfailed (pre-existing). This was re-run after the `dnt.refine` rename and the Tracker-style API.
+  - The full default suite passes, including every new test: 431 passed, 12 xfailed (pre-existing). This was re-run after the `dnt.refine` rename, the Tracker-style API, and the fixes for review 2026-09-28 14:02.
   - `ruff check src tests` is clean.
   - `ruff format` reformats 13 of the new files. That is layout only, and Task 17 Step 5 runs it.
   - The two "verbatim" moves (Task 3's docstring, Task 5's nested helpers) were filled from the original source during the dry run.
@@ -1515,6 +1515,29 @@ def test_read_tracks_errors(tmp_path):
         io.read_tracks(tmp_path / "bad.txt")
 
 
+@pytest.mark.parametrize(("col", "bad"), [(6, "high"), (7, "car"), (8, "yes"), (9, "")])
+def test_read_tracks_rejects_nonnumeric_score_cls_flag_and_r4(tmp_path, col, bad):
+    fields = ["2", "1", "1", "1", "1", "1", "0.9", "0", "-1", "-1"]
+    fields[col] = bad
+    rows = ["0,1,1,1,1,1,0.9,0,-1,-1", "1,1,1,1,1,1,0.9,0,1,-1", ",".join(fields)]
+    (tmp_path / "t.txt").write_text("\n".join(rows) + "\n")
+    with pytest.raises(ValueError, match="line 3"):
+        io.read_tracks(tmp_path / "t.txt")
+
+
+def test_valid_filled_flag_is_still_removed(tmp_path):
+    rows = ["0,1,1,1,1,1,0.9,0,-1,-1", "1,1,1,1,1,1,0.9,0,1,-1", "2,1,1,1,1,1,0.9,0,0,-1"]
+    (tmp_path / "t.txt").write_text("\n".join(rows) + "\n")
+    tin = io.read_tracks(tmp_path / "t.txt")
+    assert tin.n_filled_removed == 1 and tin.work["frame"].tolist() == [0, 2]
+
+
+def test_read_context_rejects_nonnumeric_class(tmp_path):
+    (tmp_path / "d.txt").write_text("0,-1,1,2,3,4,0.9,car\n")
+    with pytest.raises(ValueError, match="line 1"):
+        io.read_context(tmp_path / "d.txt")
+
+
 def test_read_tracks_empty_file(tmp_path):
     (tmp_path / "e.txt").write_text("")
     tin = io.read_tracks(tmp_path / "e.txt")
@@ -1606,7 +1629,7 @@ def empty_work() -> pd.DataFrame:
     return pd.DataFrame({c: pd.Series(dtype=float if c in floats else int) for c in WORK_COLUMNS})
 
 
-def _read_numeric_csv(path, min_cols: int) -> pd.DataFrame:
+def _read_numeric_csv(path, min_cols: int, check_cols: int | None = None) -> pd.DataFrame:
     path = Path(path)
     try:
         raw = pd.read_csv(path, header=None, dtype=str, skip_blank_lines=True)
@@ -1615,7 +1638,8 @@ def _read_numeric_csv(path, min_cols: int) -> pd.DataFrame:
     if raw.shape[1] < min_cols:
         raise ValueError(f"{path}: expected at least {min_cols} columns, found {raw.shape[1]}")
     num = raw.apply(pd.to_numeric, errors="coerce")
-    bad = num.iloc[:, :min_cols].isna().any(axis=1).to_numpy()
+    n_check = min(raw.shape[1], check_cols or min_cols)
+    bad = num.iloc[:, :n_check].isna().any(axis=1).to_numpy()
     if bad.any():
         i = int(np.flatnonzero(bad)[0])
         text = ",".join(raw.iloc[i].fillna("").tolist())
@@ -1658,8 +1682,12 @@ def to_work(df: pd.DataFrame, *, source: str = "tracks") -> TrackInput:
 
 
 def read_tracks(path, *, fmt: str = "dnt", class_id: int = 0) -> TrackInput:
-    """Read a dnt (10-column) or MOTChallenge track file into a work table (spec 2.5)."""
-    raw = _read_numeric_csv(path, min_cols=6)
+    """Read a dnt (10-column) or MOTChallenge track file into a work table (spec 2.5).
+
+    Every column the format uses must be numeric: all ten for dnt (so a bad score, class, or
+    filled-row flag is an error, not a silent -1), the first seven for MOT.
+    """
+    raw = _read_numeric_csv(path, min_cols=6, check_cols=10 if fmt == "dnt" else 7)
     if raw.empty:
         return TrackInput(work=empty_work(), n_filled_removed=0, n_duplicates_removed=0)
     if fmt == "dnt":
@@ -1676,7 +1704,7 @@ def read_tracks(path, *, fmt: str = "dnt", class_id: int = 0) -> TrackInput:
 
 def read_context(path, fmt: str = "auto") -> tuple[pd.DataFrame, str]:
     """Read a context file (dnt tracks or detections) as boxes with classes (spec 2.5)."""
-    raw = _read_numeric_csv(path, min_cols=6)
+    raw = _read_numeric_csv(path, min_cols=6, check_cols=8)
     if raw.empty:
         return pd.DataFrame(columns=CONTEXT_COLUMNS), ("tracks" if fmt == "auto" else fmt)
     ncol = raw.shape[1]
@@ -2602,6 +2630,14 @@ def test_merge_chains_keeps_earliest_id_and_drops_overlap_rows():
     assert not m.duplicated(["track", "frame"]).any()
 
 
+def test_merge_keeps_unique_rows_inside_a_sparse_overlap():
+    a = box_rows(1, [*range(0, 9), 11], 0.0, 0.0)  # A: frames 0-8 and 11
+    b = box_rows(2, range(9, 13), 0.0, 0.0)  # B: frames 9-12; only frame 11 is shared
+    m, _ = A.merge_chains(_work(a, b), [(1, 2)])
+    assert m["frame"].tolist() == list(range(0, 13))
+    assert m.loc[m["frame"] == 11, "raw_id"].tolist() == [1]  # the duplicate came from B
+
+
 def test_renumber_is_contiguous_by_first_frame():
     w = _work(box_rows(50, range(5, 9), 0.0, 0.0), box_rows(7, range(0, 3), 0.0, 0.0))
     r, id_map = A.renumber(w)
@@ -2695,8 +2731,8 @@ def merge_chains(
 ) -> tuple[pd.DataFrame, dict[int, int]]:
     """Merge linked tracks into chains that keep the earliest member's ID.
 
-    Rows of a later member at or before the previous member's last frame (the small overlap
-    that stage 3's gate 2 allows) are dropped.
+    A later member's rows on frames the chain already has (the small overlap that stage 3's
+    gate 2 allows) are dropped; its other rows are kept, even inside the overlap span.
     """
     if not pairs:
         return work, {}
@@ -2715,16 +2751,15 @@ def merge_chains(
     for t in {int(t) for p in pairs for t in p}:
         groups.setdefault(find(t), []).append(t)
     first = work.groupby("track")["frame"].min()
-    last = work.groupby("track")["frame"].max()
     rep_of: dict[int, int] = {}
     drop_idx: list = []
     for members in groups.values():
         members.sort(key=lambda t: (int(first[t]), t))
-        prev_last = int(last[members[0]])
+        seen = set(work.loc[work["track"] == members[0], "frame"].tolist())
         for t in members[1:]:
-            overlap = work.index[(work["track"] == t) & (work["frame"] <= prev_last)]
-            drop_idx.extend(overlap.tolist())
-            prev_last = max(prev_last, int(last[t]))
+            frames = work.loc[work["track"] == t, "frame"]
+            drop_idx.extend(frames.index[frames.isin(seen)].tolist())
+            seen |= set(frames.tolist())
         for t in members:
             rep_of[t] = members[0]
     out = work.drop(index=drop_idx).copy()
@@ -3600,6 +3635,16 @@ def test_applied_split_drops_only_the_passenger_track():
     assert evs[2].params["spans"] is None
 
 
+def test_every_segment_static_gives_a_whole_track_event():
+    rows = (box_rows(1, range(0, 120), 300.0, 200.0, score=0.35)
+            + box_rows(1, range(120, 240), 900.0, 500.0, score=0.35))
+    ev = _screen(_work(rows), cuts={1: [120]})[1]  # whole-track static score alone would be 0
+    assert ev.params["reason"] == "static" and ev.params["spans"] is None
+    assert ev.signals["all_segments"] is True
+    # per segment: ramp_R = ramp_T = 1; mean(ramp_J = 1, ramp_H = 0, ramp_C = 0.25 / 0.3)
+    assert ev.algo_score == pytest.approx((1 + 0 + 0.25 / 0.3) / 3, abs=1e-3)
+
+
 def test_context_with_no_overlapping_frames_is_harmless():
     w = _work(_ped(1, range(50)))
     assert _screen(w, ctx=_ctx_tracks(_car(9, range(500, 550)))) == {}
@@ -3949,22 +3994,28 @@ def propose_screen(
         seg_h = [hyps(su) for su in seg_units]
         best = None
         for name, fn in whole_h.items():
-            w = fn()
             cand = None
             if not seg_units:
+                w = fn()
                 cand = None if w is None else (w[0], w[1], w[2], None)
             else:
                 scores = [h[name]() for h in seg_h]
                 sup = [(su, s) for su, s in zip(seg_units, scores, strict=True)
                        if s is not None and s[0] >= sc.reject_below]
+                segments = [[int(su.frames[0]), int(su.frames[-1]),
+                             None if s is None else float(s[0])]
+                            for su, s in zip(seg_units, scores, strict=True)]
                 if sup and len(sup) == len(seg_units):
-                    cand = None if w is None else (w[0], w[1], w[2], None)
+                    # Every segment supports the hypothesis: the event covers the whole track,
+                    # scored by its weakest segment (spec 6.2). The whole-track score is not
+                    # used, because mixing segments can hide what each shows (e.g. two static
+                    # spots far apart).
+                    _, low = min(sup, key=lambda p: p[1][0])
+                    signals = {**low[1], "all_segments": True, "segments": segments}
+                    cand = (low[0], signals, low[2], None)
                 elif sup:
                     _, top = max(sup, key=lambda p: p[1][0])
                     spans = [[int(su.frames[0]), int(su.frames[-1])] for su, _ in sup]
-                    segments = [[int(su.frames[0]), int(su.frames[-1]),
-                                 None if s is None else float(s[0])]
-                                for su, s in zip(seg_units, scores, strict=True)]
                     signals = {**top[1], "partial": True, "segments": segments}
                     cand = (min(top[0], sc.mixed_score_cap), signals, top[2], spans)
             if cand is not None and (best is None or cand[0] > best[1][0]):
@@ -4644,6 +4695,7 @@ import numpy as np
 import pytest
 
 from dnt.refine import io
+from dnt.refine.apply import merge_chains
 from dnt.refine.config import RefineConfig
 from dnt.refine.events import Decision, Event, EventKind
 from dnt.refine.link import (
@@ -4742,6 +4794,19 @@ def test_small_allowed_overlap_is_kept():
     descs = _descs(box_rows(1, range(0, 11), 0.0, 0.0), box_rows(2, range(9, 21), 30.0, 0.0))
     pairs, skipped = resolve_chains([_acc(1, 2, 0.9)], descs, overlap_frames=2)
     assert pairs == [(1, 2)] and skipped == []
+
+
+def test_sparse_overlap_link_keeps_unique_observed_rows():
+    a = box_rows(1, [*range(0, 9), 11], 100.0, 100.0, vx=2.0)
+    b = box_rows(2, range(9, 13), 118.0, 100.0, vx=2.0)  # same box as A at frame 11 (g = -2)
+    w = io.to_work(table(a, b)).work
+    cfg = RefineConfig.defaults()
+    res = run_link_stage(w, cfg, 10.0, appearance=None, context=None, frame_size=None,
+                         occluded=occlusion_flags(w, None, 0.3),
+                         route=lambda e: route_without_vlm(e, Band.of(cfg.link)))
+    assert res.accepted == [(1, 2)] and res.events[0].params["gate"] == "overlap"
+    merged, _ = merge_chains(w, res.accepted)
+    assert merged["frame"].tolist() == list(range(0, 13))  # B's frames 9 and 10 survive
 
 
 def test_run_link_stage_links_collinear_fragments():
@@ -5829,6 +5894,15 @@ refiner.refine_batch(track_files, video_files=video_files, output_path="refined/
 
 Command line: `dnt-refine run TRACKS --fps 10 --config refine.yaml --out clean.csv`.
 
+!!! note "Current limitations"
+    This release scores with motion only, and cannot yet apply decisions made in review.
+    Edits it is sure of are applied: false-track drops and reclasses, links across short gaps
+    and static waits, orphan drops, and gap filling. Two kinds of edit are proposed but never
+    applied yet, because their scores are capped below auto-accept: ID-switch splits found
+    from motion alone, and links across occlusions. Both appear in the ledger as
+    `HUMAN_PENDING` and leave the tracks unchanged. VLM verification and applying review
+    decisions follow in later releases.
+
 ::: dnt.refine
 ````
 
@@ -5874,11 +5948,14 @@ At the top of `docs/changelog.md`, below `# Changelog`, add:
 
 ### New
 - `dnt.refine` track refinement: `TrackRefiner` (`refine`, `refine_batch`, used like `Tracker`)
-  and `dnt-refine run` split ID switches, screen
-  false tracks, link fragments (including static waits and occlusion-witnessed gaps), drop
-  orphans, and fill gaps. Every edit is recorded in a JSONL ledger next to the output. This
-  release scores with motion only; appearance encoders, VLM verification, review pages, and
-  replay follow.
+  and `dnt-refine run`. They propose ID-switch splits, false-track drops and reclasses, and
+  fragment links, drop orphans, and fill gaps. Every proposal is recorded in a JSONL ledger
+  next to the output.
+- This release scores with motion only and applies only the edits it is sure of: false-track
+  drops and reclasses, links across short gaps and static waits, orphan drops, and filling.
+  ID-switch splits found from motion alone and links across occlusions are capped below
+  auto-accept. They are recorded as `HUMAN_PENDING` and not applied yet. Appearance encoders,
+  VLM verification, review pages, and applying review decisions follow in later releases.
 
 ### Changed
 - `interpolate_tracks_rts` and `link_tracklets` moved to `dnt.refine`. `dnt.track.post_process`
