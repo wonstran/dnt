@@ -63,3 +63,45 @@ def test_from_yaml_rejects_non_mapping(tmp_path):
     (tmp_path / "l.yaml").write_text(yaml.safe_dump([1, 2]))
     with pytest.raises(ValueError, match="mapping"):
         RefineConfig.from_yaml(tmp_path / "l.yaml")
+
+
+@pytest.mark.parametrize("data, match", [
+    ({"fps": "ten"}, "fps"),
+    ({"link": {"max_gap": None}}, "link.max_gap"),
+    ({"switch": {"accept_above": None}}, "switch.accept_above"),
+    ({"screen": {"ramps": {"R": 5}}}, "screen.ramps.R"),
+    ({"screen": {"ramps": {"R": [1, 2, 3]}}}, "screen.ramps.R"),
+    ({"frame_size": 5}, "frame_size"),
+    ({"link": {"class_groups": [2, 7]}}, r"link\.class_groups\[0\]"),
+    ({"link": {"weights": {"mot": "a"}}}, "link.weights.mot"),
+    ({"encoder": {"sample_every": "five"}}, "encoder.sample_every"),
+    ({"switch": {"nis_hi": "abc"}}, "switch.nis_hi"),
+    ({"class_ids": 5}, "class_ids"),
+    ({"link": {"max_gap": True}}, "link.max_gap"),
+])
+def test_wrong_type_rejected_with_path(data, match):
+    with pytest.raises(ValueError, match=match):
+        RefineConfig.from_dict(data)
+
+
+def test_valid_nulls_and_strings():
+    cfg1 = RefineConfig.from_dict({"fps": None})
+    assert cfg1.fps is None
+    cfg2 = RefineConfig.from_dict({"frame_size": [640, 480]})
+    assert cfg2.frame_size == [640, 480]
+    cfg3 = RefineConfig.from_dict({"fill": {"max_gap": None}})
+    assert cfg3.fill.max_gap is None
+    cfg4 = RefineConfig.from_dict({"fps": 10})
+    assert cfg4.fps == 10
+    cfg5 = RefineConfig.from_dict({"hints": {"reclass_class_map": {"36": "scooter"}}})
+    assert 36 in cfg5.hints.reclass_class_map
+
+
+def test_mutation_independence():
+    shared_dict = {"class_ids": [1, 2], "link": {"class_groups": [[2, 7]]}}
+    cfg1 = RefineConfig.from_dict(shared_dict)
+    cfg2 = RefineConfig.from_dict(shared_dict)
+    cfg1.class_ids.append(3)
+    cfg1.link.class_groups[0].append(5)
+    assert cfg2.class_ids == [1, 2]
+    assert cfg2.link.class_groups == [[2, 7]]

@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import copy
+import math
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass, field, fields, is_dataclass
 from pathlib import Path
+from typing import get_args, get_origin, get_type_hints
 
 import yaml
 
@@ -12,6 +15,7 @@ TARGETS = ("person", "vehicle")
 ENCODERS = ("dino", "reid", "none")
 BACKENDS = ("none", "openai_compat", "anthropic")
 _FIXED_KEY_DICTS = {"ramps", "weights", "weights_occluded", "legacy_weights", "reclass_map"}
+_RAMP_DICTS = {"ramps", "ramp", "reclass_ramp"}
 
 
 def to_frames(seconds: float, fps: float) -> int:
@@ -243,7 +247,7 @@ class RefineConfig:
     @classmethod
     def from_dict(cls, data: Mapping | None) -> RefineConfig:
         """Overlay ``data`` on the target's defaults; unknown keys raise ValueError."""
-        data = dict(data or {})
+        data = dict(copy.deepcopy(data) or {})
         cfg = cls.defaults(data.get("target", "person"))
         _overlay(cfg, data, "")
         cfg.hints.reclass_class_map = {int(k): str(v)
@@ -330,23 +334,121 @@ class RefineConfig:
             raise ValueError("invalid refine config: " + "; ".join(p))
 
 
+def _check_type(path: str, value, hint) -> None:
+    """Check value against type hint; raise ValueError if mismatch."""
+    if hint is type(None):
+        if value is not None:
+            raise ValueError(f"config key '{path}' must be null, not {type(value).__name__}")
+        return
+
+    origin = get_origin(hint)
+    args = get_args(hint)
+
+    if origin is None:
+        if hint is int:
+            if not isinstance(value, int) or isinstance(value, bool):
+                raise ValueError(f"config key '{path}' must be an int, not {type(value).__name__}")
+        elif hint is float:
+            if isinstance(value, bool) or (not isinstance(value, (int, float))):
+                msg = f"config key '{path}' must be a number, not {type(value).__name__}"
+                raise ValueError(msg)
+            if not math.isfinite(value):
+                raise ValueError(f"config key '{path}' must be finite")
+        elif hint is bool:
+            if not isinstance(value, bool):
+                raise ValueError(f"config key '{path}' must be a bool, not {type(value).__name__}")
+        elif hint is str and not isinstance(value, str):
+            raise ValueError(f"config key '{path}' must be a string, not {type(value).__name__}")
+        return
+
+    if origin is type(None) or (hasattr(hint, '__origin__') and hint.__origin__ is type(None)):
+        return
+
+    if origin is list:
+        if not isinstance(value, list):
+            raise ValueError(f"config key '{path}' must be a list, not {type(value).__name__}")
+        if args:
+            for i, item in enumerate(value):
+                _check_type(f"{path}[{i}]", item, args[0])
+        return
+
+    if origin is dict:
+        if not isinstance(value, Mapping):
+            raise ValueError(f"config key '{path}' must be a mapping, not {type(value).__name__}")
+        if args and len(args) >= 2:
+            for k, v in value.items():
+                _check_type(f"{path}.{k}", v, args[1])
+        return
+
+    if hasattr(hint, '__args__'):
+        hint_args = hint.__args__
+        if type(None) in hint_args:
+            if value is None:
+                return
+            non_none_types = [t for t in hint_args if t is not type(None)]
+            if len(non_none_types) == 1:
+                _check_type(path, value, non_none_types[0])
+                return
+    raise ValueError(f"config key '{path}' has unknown type hint {hint}")
+
+
 def _overlay(obj, data: Mapping, path: str) -> None:
     names = {f.name for f in fields(obj)}
+    hints = get_type_hints(type(obj))
+
     for key, value in data.items():
         if key not in names:
             raise ValueError(f"unknown config key '{path}{key}'")
         current = getattr(obj, key)
+        full_path = f"{path}{key}"
+
         if is_dataclass(current):
             if not isinstance(value, Mapping):
-                raise ValueError(f"config key '{path}{key}' must be a mapping")
-            _overlay(current, value, f"{path}{key}.")
+                raise ValueError(f"config key '{full_path}' must be a mapping")
+            _overlay(current, value, f"{full_path}.")
         elif key in _FIXED_KEY_DICTS and isinstance(current, dict):
             if not isinstance(value, Mapping):
-                raise ValueError(f"config key '{path}{key}' must be a mapping")
+                raise ValueError(f"config key '{full_path}' must be a mapping")
             for sub in value:
                 if sub not in current:
-                    raise ValueError(f"unknown config key '{path}{key}.{sub}'")
-            setattr(obj, key, {**current, **{k: (list(v) if isinstance(v, list | tuple) else v)
-                                             for k, v in value.items()}})
+                    raise ValueError(f"unknown config key '{full_path}.{sub}'")
+
+            if key in _RAMP_DICTS:
+                processed = {}
+                for k, v in value.items():
+                    if isinstance(v, (list, tuple)):
+                        if len(v) != 2:
+                            msg = f"config key '{full_path}.{k}' must be a list of "
+                            raise ValueError(msg + "exactly 2 numbers")
+                        ok = all(isinstance(x, (int, float)) and not isinstance(x, bool)
+                                 for x in v)
+                        if not ok:
+                            msg = f"config key '{full_path}.{k}' must be a list of "
+                            raise ValueError(msg + "exactly 2 numbers")
+                        processed[k] = list(v)
+                    else:
+                        msg = f"config key '{full_path}.{k}' must be a list of exactly "
+                        raise ValueError(msg + "2 numbers")
+                setattr(obj, key, {**current, **processed})
+            else:
+                processed = {}
+                if key in hints:
+                    dict_hint = hints[key]
+                    dict_args = get_args(dict_hint)
+                    value_hint = dict_args[1] if len(dict_args) >= 2 else None
+                else:
+                    value_hint = None
+
+                for k, v in value.items():
+                    if value_hint:
+                        _check_type(f"{full_path}.{k}", v, value_hint)
+                    if isinstance(v, (list, tuple)):
+                        processed[k] = list(v)
+                    else:
+                        processed[k] = v
+                setattr(obj, key, {**current, **processed})
         else:
+            if key in hints:
+                hint = hints[key]
+                _check_type(full_path, value, hint)
             setattr(obj, key, value)
