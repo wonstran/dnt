@@ -25,6 +25,10 @@ class ArrayAppearance:
         for raw, (frames, emb) in table.items():
             f = np.asarray(list(frames), dtype=int)
             e = np.asarray(emb, dtype=float)
+            if len(f) != len(e):
+                raise ValueError(f"raw_id {raw}: frames and embeddings have different lengths")
+            if e.ndim != 2 or e.shape[0] == 0:
+                raise ValueError(f"raw_id {raw}: embeddings must be 2-D with at least one row")
             order = np.argsort(f, kind="stable")
             f, e = f[order], e[order]
             e = e / np.maximum(np.linalg.norm(e, axis=1, keepdims=True), 1e-12)
