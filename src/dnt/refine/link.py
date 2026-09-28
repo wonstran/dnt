@@ -857,15 +857,22 @@ def _components(edges: list[tuple[int, int]]) -> list[list[tuple[int, int]]]:
 
 
 def _hungarian(comp: list[tuple[int, int]], avail: dict) -> list[tuple[int, int]]:
+    """Maximum-total-score matching of one component; unmatched ends/starts are allowed.
+
+    A missing pair weighs 0.0 and every real candidate scores at least ``link.reject_below``
+    (> 0), so a zero-weight assignment is never a candidate and is dropped from the result.
+    """
     from scipy.optimize import linear_sum_assignment
 
     ends = sorted({e[0] for e in comp})
     starts = sorted({e[1] for e in comp})
-    m = np.full((len(ends), len(starts)), -1.0)
+    w = np.zeros((len(ends), len(starts)))
+    real = np.zeros(w.shape, dtype=bool)
     for i, j in comp:
-        m[ends.index(i), starts.index(j)] = avail[(i, j)].score
-    rows, cols = linear_sum_assignment(np.where(m >= 0, -m, 1e6))
-    return [(ends[a], starts[b]) for a, b in zip(rows, cols, strict=True) if m[a, b] >= 0]
+        w[ends.index(i), starts.index(j)] = avail[(i, j)].score
+        real[ends.index(i), starts.index(j)] = True
+    rows, cols = linear_sum_assignment(w, maximize=True)
+    return [(ends[a], starts[b]) for a, b in zip(rows, cols, strict=True) if real[a, b]]
 
 
 def assign_in_passes(

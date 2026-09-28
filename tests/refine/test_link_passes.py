@@ -277,7 +277,7 @@ def test_alternatives_are_sorted_and_limited_to_n_alternatives():
 
 
 def test_alternatives_include_start_side_competitors():
-    # Hungarian prefers two links over one strong one: the winners are (3,2) and (1,4)
+    # the two links (0.6 + 0.7) outweigh the single strong one (0.9): winners are (3,2), (1,4)
     by = {tuple(e.tracks): e for e in _assign([_c(1, 2, 0.9), _c(3, 2, 0.6), _c(1, 4, 0.7)])}
     assert set(by) == {(3, 2), (1, 4)}
     assert by[(1, 4)].signals["alternatives"] == [{"i": 1, "j": 2, "score": 0.9}]
@@ -311,6 +311,60 @@ def test_assignment_is_deterministic_and_independent_of_input_order():
         assert [e.proposal_key for e in a] == [e.proposal_key for e in other]
         assert [e.algo_score for e in a] == [e.algo_score for e in other]
         assert [e.signals for e in a] == [e.signals for e in other]
+
+
+# ---- assignment maximises the total score, unmatched allowed (spec 6.3) -------------------
+
+
+def _pairs(evs):
+    return [tuple(e.tracks) for e in evs]
+
+
+def test_strong_single_link_beats_two_marginal_links():
+    # (a,x)=0.95 alone (0.95) outweighs (a,y)+(b,x) (0.84); a count-first solver drops 0.95
+    evs = _assign([_c(1, 10, 0.95), _c(1, 11, 0.42), _c(2, 10, 0.42)])
+    assert _pairs(evs) == [(1, 10)]
+    assert evs[0].signals["S_link"] == pytest.approx(0.95)
+    assert evs[0].decision is Decision.AUTO_ACCEPT
+
+
+def test_two_links_are_chosen_when_they_outweigh_the_single_best():
+    evs = _assign([_c(1, 10, 0.95), _c(1, 11, 0.60), _c(2, 10, 0.60)])  # 1.2 > 0.95
+    assert sorted(_pairs(evs)) == [(1, 11), (2, 10)]
+
+
+def test_competition_chain_keeps_the_strong_links_and_leaves_weak_ones_unmatched():
+    # path e1-s1 .42, e2-s1 .95, e2-s2 .42, e3-s2 .42, e3-s3 .95: the perfect matching is
+    # 1.79, the two strong links 1.90 (count-first would take the perfect matching)
+    cands = [_c(1, 10, 0.42), _c(2, 10, 0.95), _c(2, 11, 0.42), _c(3, 11, 0.42),
+             _c(3, 12, 0.95)]
+    assert _pairs(_assign(cands)) == [(2, 10), (3, 12)]
+
+
+def test_strong_diagonal_wins_over_weak_off_diagonals():
+    cands = [_c(i, 10 + j, 0.9 if i == j else 0.45) for i in (1, 2, 3) for j in (1, 2, 3)]
+    assert _pairs(_assign(cands)) == [(1, 11), (2, 12), (3, 13)]
+
+
+def test_exact_ties_are_deterministic():
+    cands = [_c(1, 10, 0.8), _c(1, 11, 0.8), _c(2, 10, 0.8), _c(2, 11, 0.8)]
+    first = _pairs(_assign(cands))
+    assert len(first) == 2
+    assert _pairs(_assign(cands)) == first
+    assert _pairs(_assign(list(reversed(cands)))) == first
+
+
+def test_component_where_count_and_total_agree_still_works():
+    cands = [_c(1, 10, 0.9), _c(2, 11, 0.8), _c(2, 10, 0.5)]
+    assert _pairs(_assign(cands)) == [(1, 10), (2, 11)]
+
+
+def test_rejected_strong_first_choice_frees_endpoints_for_weaker_pass_two_edges():
+    cands = [_c(1, 10, 0.95), _c(1, 11, 0.42), _c(2, 10, 0.42)]
+    evs = _assign(cands, {(1, 10): Decision.VLM_REJECT})
+    assert _pairs(evs) == [(1, 10), (1, 11), (2, 10)]
+    assert [e.signals["pass"] for e in evs] == [1, 2, 2]
+    assert all(e.signals["replaces"] == evs[0].proposal_key for e in evs[1:])
 
 
 # ---- resolve_chains -----------------------------------------------------------------------
