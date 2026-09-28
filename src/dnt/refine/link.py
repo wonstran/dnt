@@ -5,9 +5,17 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass, field
+
 import numpy as np
 import pandas as pd
 from tqdm import tqdm
+
+from .apply import lineage_of_rows
+from .config import RefineConfig, to_frames
+from .events import Event, EventKind
+from .features import Appearance, track_embeddings
+from .primitives import box_centers, iou_matrix, majority_class, ramp, span_speed
 
 LEGACY_COL_NAMES = ["frame", "track", "x", "y", "w", "h", "score", "cls", "interp", "r4"]
 
@@ -466,3 +474,345 @@ def link_tracklets(
     if output_file:
         out.to_csv(output_file, index=False, header=False)
     return out
+
+
+STAGE = "link"
+
+
+@dataclass
+class TrackDesc:
+    """What stage 3 needs to know about one track (spec 6.3)."""
+
+    track: int
+    frames: np.ndarray
+    boxes: np.ndarray
+    cls_major: int
+    cls_last: int
+    h_end: float
+    h_start: float
+    vel: np.ndarray
+    speed_static: float
+    speed_end: float
+    speed_start: float
+    end_clean: np.ndarray
+    start_clean: np.ndarray
+    lineage: list
+
+    @property
+    def t_s(self) -> int:
+        """First observed frame."""
+        return int(self.frames[0])
+
+    @property
+    def t_e(self) -> int:
+        """Last observed frame."""
+        return int(self.frames[-1])
+
+    @property
+    def start_box(self) -> np.ndarray:
+        """First box."""
+        return self.boxes[0]
+
+    @property
+    def end_box(self) -> np.ndarray:
+        """Last box."""
+        return self.boxes[-1]
+
+    @property
+    def start_c(self) -> np.ndarray:
+        """Center of the first box."""
+        return box_centers(self.boxes[0])[0]
+
+    @property
+    def end_c(self) -> np.ndarray:
+        """Center of the last box."""
+        return box_centers(self.boxes[-1])[0]
+
+    def legacy(self) -> dict:
+        """Return the descriptor dict ``_legacy_gate_cost`` expects."""
+        return {
+            "track": self.track, "cls": self.cls_last, "t_start": self.t_s, "t_end": self.t_e,
+            "start_c": tuple(map(float, self.start_c)), "end_c": tuple(map(float, self.end_c)),
+            "start_box": tuple(map(float, self.start_box)),
+            "end_box": tuple(map(float, self.end_box)),
+            "area_end": max(float(self.end_box[2] * self.end_box[3]), 1.0),
+            "vx": float(self.vel[0]), "vy": float(self.vel[1]),
+        }
+
+
+def describe_tracks(work, cfg: RefineConfig, fps: float, occluded) -> dict[int, TrackDesc]:
+    """Build a ``TrackDesc`` per track; ``occluded`` is the row-aligned occlusion mask."""
+    lc, hw = cfg.link, cfg.motion.height_window
+    out: dict[int, TrackDesc] = {}
+    for t, g in work.groupby("track", sort=True):
+        g = g.sort_values("frame")
+        frames = g["frame"].to_numpy(int)
+        boxes = g[["x", "y", "w", "h"]].to_numpy(float)
+        c = box_centers(boxes)
+        vx, vy = _estimate_velocity(frames, c[:, 0], c[:, 1], lc.vel_frames)
+        occ = occluded.reindex(g.index, fill_value=False).to_numpy(bool)
+        clean = np.flatnonzero(~occ)
+        out[int(t)] = TrackDesc(
+            track=int(t), frames=frames, boxes=boxes, cls_major=majority_class(g["cls"]),
+            cls_last=int(g["cls"].iloc[-1]),
+            h_end=max(float(np.median(boxes[-hw:, 3])), 1.0),
+            h_start=max(float(np.median(boxes[:hw, 3])), 1.0),
+            vel=np.array([vx, vy], dtype=float),
+            speed_static=span_speed(frames, boxes, fps, lc.static_seconds, at="end"),
+            speed_end=span_speed(frames, boxes, fps, lc.speed_seconds, at="end"),
+            speed_start=span_speed(frames, boxes, fps, lc.speed_seconds, at="start"),
+            end_clean=boxes[clean[-1]] if len(clean) else boxes[-1],
+            start_clean=boxes[clean[0]] if len(clean) else boxes[0],
+            lineage=lineage_of_rows(g),
+        )
+    return out
+
+
+class _Occluders:
+    """Boxes from the work table (owner = track) and the context (owner = -1), sorted by frame."""
+
+    def __init__(self, work, context):
+        """Index boxes by frame."""
+        parts = [work[["frame", "x", "y", "w", "h"]].assign(owner=work["track"].astype(int))]
+        if context is not None and len(context):
+            parts.append(context[["frame", "x", "y", "w", "h"]].assign(owner=-1))
+        allb = pd.concat(parts, ignore_index=True).sort_values("frame", kind="stable")
+        self.frames = allb["frame"].to_numpy(int)
+        self.boxes = allb[["x", "y", "w", "h"]].to_numpy(float)
+        self.owners = allb["owner"].to_numpy(int)
+
+    def witness(self, di: TrackDesc, dj: TrackDesc, iob_thr: float) -> tuple[float, list[int]]:
+        """Return the fraction of gap frames whose hidden box is covered, and the occluders.
+
+        The hidden box of each gap frame is interpolated between ``di``'s last box and ``dj``'s
+        first box; a frame is covered when another box has ``IoB >= iob_thr`` with it (the
+        intersection over the hidden box's area). All gap frames are scanned in one vectorized
+        pass because ``dnt.engine.iobs`` loops in Python over every pair.
+        """
+        n = dj.t_s - di.t_e - 1
+        if n <= 0:
+            return 0.0, []
+        lo = int(np.searchsorted(self.frames, di.t_e + 1, side="left"))
+        hi = int(np.searchsorted(self.frames, dj.t_s, side="left"))
+        owners = self.owners[lo:hi]
+        keep = (owners != di.track) & (owners != dj.track)
+        if not keep.any():
+            return 0.0, []
+        boxes = self.boxes[lo:hi][keep]
+        owners = owners[keep]
+        step = self.frames[lo:hi][keep] - di.t_e  # 1..n
+        a = (step / (dj.t_s - di.t_e))[:, None]
+        hidden = (1.0 - a) * di.end_box + a * dj.start_box
+        hit = _iob_rows(hidden, boxes) >= iob_thr
+        return len(np.unique(step[hit])) / n, sorted(int(o) for o in np.unique(owners[hit]))
+
+
+def _iob_rows(hidden: np.ndarray, boxes: np.ndarray) -> np.ndarray:
+    """Return ``iob_matrix(hidden[k], boxes[k])`` for every row ``k`` (both ``(N, 4)`` xywh)."""
+    iw = np.minimum(hidden[:, 0] + hidden[:, 2], boxes[:, 0] + boxes[:, 2]) - np.maximum(
+        hidden[:, 0], boxes[:, 0])
+    ih = np.minimum(hidden[:, 1] + hidden[:, 3], boxes[:, 1] + boxes[:, 3]) - np.maximum(
+        hidden[:, 1], boxes[:, 1])
+    inter = np.maximum(0.0, iw) * np.maximum(0.0, ih)
+    area = hidden[:, 2] * hidden[:, 3]
+    return np.divide(inter, area, out=np.zeros_like(inter), where=area != 0)
+
+
+@dataclass
+class Candidate:
+    """A gated end->start pair and its score (spec 6.3)."""
+
+    i: int
+    j: int
+    gate: str
+    g: int
+    score: float
+    signals: dict = field(default_factory=dict)
+
+
+def _class_ok(a: int, b: int, groups) -> bool:
+    return a == b or any(a in grp and b in grp for grp in groups)
+
+
+def _size_ok(a, b, r: float) -> bool:
+    wr = max(float(b[2]), 1.0) / max(float(a[2]), 1.0)
+    hr = max(float(b[3]), 1.0) / max(float(a[3]), 1.0)
+    return 1.0 / r <= wr <= r and 1.0 / r <= hr <= r
+
+
+def _unit(v: np.ndarray) -> np.ndarray:
+    n = float(np.linalg.norm(v))
+    return v / n if n > 0 else v
+
+
+def _c_app(di: TrackDesc, dj: TrackDesc, appearance: Appearance, k: int, cache: dict) -> float:
+    def emb(d):
+        if d.track not in cache:
+            cache[d.track] = track_embeddings(appearance, d.lineage)
+        return cache[d.track]
+
+    fi, ei = emb(di)
+    fj, ej = emb(dj)
+    if not len(fi) or not len(fj):
+        return 0.5
+    ei_k = ei[fi <= di.t_e][-k:]
+    ej_k = ej[fj >= dj.t_s][:k]
+    if not len(ei_k) or not len(ej_k):
+        return 0.5
+    return float((1.0 - _unit(ei_k.mean(axis=0)) @ _unit(ej_k.mean(axis=0))) / 2.0)
+
+
+def _prior(di: TrackDesc, dj: TrackDesc, frame_size, margin: float) -> int:
+    if frame_size is None:
+        return 1
+    width, height = frame_size
+
+    def inside(box, m):
+        x, y, w, h = box
+        return x >= m and y >= m and x + w <= width - m and y + h <= height - m
+
+    return int(inside(di.end_box, margin * di.h_end) and inside(dj.start_box, margin * dj.h_start))
+
+
+def _overlap_gate(di: TrackDesc, dj: TrackDesc, lc):
+    shared = np.intersect1d(di.frames, dj.frames)
+    if not len(shared) or not _size_ok(di.end_box, dj.start_box, lc.size_ratio_max):
+        return None
+    bi = di.boxes[np.searchsorted(di.frames, shared)]
+    bj = dj.boxes[np.searchsorted(dj.frames, shared)]
+    vals = np.array([iou_matrix(bi[k : k + 1], bj[k : k + 1])[0, 0] for k in range(len(shared))])
+    if (vals < lc.overlap_iou).any():
+        return None
+    return "overlap", float(1.0 - vals.mean()), {"overlap_iou": float(vals.mean())}
+
+
+def _gate(di: TrackDesc, dj: TrackDesc, g: int, cfg: RefineConfig, fps: float, gaps, occl):
+    lc = cfg.link
+    mg, mgs, mgo = gaps
+    if -lc.overlap_frames <= g <= 0:
+        return _overlap_gate(di, dj, lc)
+    if g < 1:
+        return None
+    if g <= mg:
+        res = _legacy_gate_cost(
+            di.legacy(), dj.legacy(), max_gap=mg, size_ratio_max=lc.size_ratio_max,
+            dist_mult=lc.dist_mult, iou_min=lc.iou_min, w_d=lc.legacy_weights["d"],
+            w_iou=lc.legacy_weights["iou"], w_s=lc.legacy_weights["s"],
+            dist_growth=lc.dist_growth, check_class=False, detail=True,
+        )
+        if res is None:
+            return None
+        cost, terms = res
+        return "normal", float(ramp(cost, 0.0, lc.legacy_cost_hi)), {"legacy_cost": cost, **terms}
+    if di.speed_static < lc.static_speed and g <= mgs:
+        if not _size_ok(di.end_box, dj.start_box, lc.size_ratio_max):
+            return None
+        dist = float(np.linalg.norm(dj.start_c - di.end_c))
+        radius = lc.static_radius * di.h_end
+        if dist > radius:
+            return None
+        return "static", dist / radius, {"static_dist": dist}
+    if g <= mgo:
+        if not _size_ok(di.end_clean, dj.start_clean, lc.size_ratio_max):
+            return None
+        chord = dj.start_c - di.end_c
+        clen = float(np.linalg.norm(chord))
+        speed_i = float(np.linalg.norm(di.vel)) * fps / di.h_end
+        heading = None
+        if speed_i >= lc.heading_min_speed and clen > 0:
+            cosang = float(di.vel @ chord / (np.linalg.norm(di.vel) * clen))
+            heading = float(np.degrees(np.arccos(np.clip(cosang, -1.0, 1.0))))
+            if heading > lc.max_heading_change:
+                return None
+        v_need = clen / (di.h_end * g / fps)
+        v_ref = max(di.speed_end, dj.speed_start, lc.min_feasible_speed)
+        if v_need > lc.speed_factor * v_ref:
+            return None
+        # the witness scan is the costliest gate, so it runs after the cheap ones
+        witness, ids = occl.witness(di, dj, lc.witness_iob)
+        if witness < lc.witness_min:
+            return None
+        c_mot = (0.5 * v_need / (lc.speed_factor * v_ref)
+                 + 0.5 * ((heading or 0.0) / lc.max_heading_change))
+        return "occluded", float(c_mot), {"witness": witness, "occluders": ids,
+                                          "v_need": v_need, "v_ref": v_ref, "heading": heading}
+    return None
+
+
+def score_candidates(
+    work, cfg: RefineConfig, fps: float, *, appearance: Appearance | None, context,
+    frame_size, occluded,
+) -> tuple[list[Candidate], dict[int, TrackDesc]]:
+    """Gate and score every end->start pair (spec 6.3)."""
+    lc = cfg.link
+    descs = describe_tracks(work, cfg, fps, occluded)
+    if len(descs) < 2:
+        return [], descs
+    occl = _Occluders(work, context)
+    gaps = (to_frames(lc.max_gap, fps), to_frames(lc.max_gap_static, fps),
+            to_frames(lc.max_gap_occluded, fps))
+    order = sorted(descs.values(), key=lambda d: (d.t_s, d.track))
+    starts = np.array([d.t_s for d in order])
+    motion_only = appearance is None
+    cache: dict = {}
+    cands: list[Candidate] = []
+    for di in sorted(descs.values(), key=lambda d: d.track):
+        lo = int(np.searchsorted(starts, di.t_e - lc.overlap_frames, side="left"))
+        hi = int(np.searchsorted(starts, di.t_e + gaps[2], side="right"))
+        for dj in order[lo:hi]:
+            if dj.track == di.track or not _class_ok(di.cls_major, dj.cls_major, lc.class_groups):
+                continue
+            g = dj.t_s - di.t_e
+            res = _gate(di, dj, g, cfg, fps, gaps, occl)
+            if res is None:
+                continue
+            gate, c_mot, sig = res
+            w = dict(lc.weights_occluded if gate == "occluded" else lc.weights)
+            c_app = None
+            if motion_only:
+                total = w["mot"] + w["gap"]
+                w = {"mot": w["mot"] / total, "gap": w["gap"] / total, "app": 0.0}
+            else:
+                c_app = _c_app(di, dj, appearance, lc.k_embed, cache)
+            limit = {"normal": gaps[0], "overlap": gaps[0], "static": gaps[1],
+                     "occluded": gaps[2]}[gate]
+            c_gap = max(g, 0) / limit
+            b = _prior(di, dj, frame_size, lc.border_margin)
+            cost = w["mot"] * c_mot + w["gap"] * c_gap + w["app"] * (c_app or 0.0)
+            s = float(np.clip((1.0 - cost) * (0.8 + 0.2 * b), 0.0, 1.0))
+            if gate == "occluded":
+                s = min(s, lc.occluded_score_cap)
+            cands.append(Candidate(di.track, dj.track, gate, int(g), s, {
+                **sig, "gate": gate, "g": int(g), "c_mot": c_mot, "c_app": c_app,
+                "c_gap": c_gap, "b": b, "motion_only": motion_only,
+            }))
+    return cands, descs
+
+
+def legacy_link_events(work, cfg: RefineConfig, fps: float) -> list[Event]:
+    """Return ``link_tracklets``'s matches as LINK proposals (``link.mode: legacy``)."""
+    lc = cfg.link
+    if work.empty:
+        return []
+    df = _prepare_legacy(work[LEGACY_COL_NAMES], LEGACY_COL_NAMES)
+    stitchable = [d for d in _legacy_descriptors(df, lc.vel_frames).values()
+                  if d.get("stitchable")]
+    if len(stitchable) <= 1:
+        return []
+    matches = _legacy_matches(
+        stitchable, max_gap=to_frames(lc.max_gap, fps), size_ratio_max=lc.size_ratio_max,
+        dist_mult=lc.dist_mult, iou_min=lc.iou_min, w_d=lc.legacy_weights["d"],
+        w_iou=lc.legacy_weights["iou"], w_s=lc.legacy_weights["s"], dist_growth=lc.dist_growth,
+    )
+    by = {d["track"]: d for d in stitchable}
+    events = []
+    for a, b, cost in matches:
+        t_e, t_s = by[a]["t_end"], by[b]["t_start"]
+        events.append(Event.propose(
+            stage=STAGE, kind=EventKind.LINK, tracks=[a, b],
+            lineage=[lineage_of_rows(work[work["track"] == a]),
+                     lineage_of_rows(work[work["track"] == b])],
+            frames=(t_e, t_s), params={"gate": "legacy", "gap": [t_e, t_s]}, algo_score=1.0,
+            signals={"legacy_cost": cost, "pass": 1},
+        ))
+    return events
