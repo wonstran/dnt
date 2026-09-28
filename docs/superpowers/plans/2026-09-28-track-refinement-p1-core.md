@@ -1,13 +1,13 @@
-# dnt.post Track Refinement — Plan 1 of 4: Core Pipeline (motion-only) Implementation Plan
+# dnt.refine Track Refinement — Plan 1 of 4: Core Pipeline (motion-only) Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Build the `dnt.post` subpackage's core, so that `dnt-refine run` / `TrackRefiner.refine` split ID switches, screen false tracks, link fragments, drop orphans, and fill gaps. Every edit is recorded in a JSONL ledger. This plan scores with motion only, and routes uncertain events to `HUMAN_PENDING`.
+**Goal:** Build the `dnt.refine` subpackage's core, so that `dnt-refine run` / `TrackRefiner.refine` split ID switches, screen false tracks, link fragments, drop orphans, and fill gaps. Every edit is recorded in a JSONL ledger. This plan scores with motion only, and routes uncertain events to `HUMAN_PENDING`.
 
 **Architecture:**
 - **Stages propose; they never edit.** Each stage (`switch.py`, `screen.py`, `link.py`) is a pure function of a *work table* that returns proposed `Event`s.
 - **Routing and applying are separate.** `verify.py` routes events by confidence band; `apply.py` is the only code that changes the table; `refiner.py` runs the stages in the spec's order (switch → screen → link → orphan → fill) and writes the outputs.
-- **Existing code moves in, with shims.** `interpolate_tracks_rts` and `link_tracklets` move into `dnt.post`, and `dnt.track.post_process` keeps re-exporting them. Characterization baselines captured before the move pin their behaviour.
+- **Existing code moves in, with shims.** `interpolate_tracks_rts` and `link_tracklets` move into `dnt.refine`, and `dnt.track.post_process` keeps re-exporting them. Characterization baselines captured before the move pin their behaviour.
 - **Appearance is an injected `Appearance` protocol.** This plan implements all appearance math and tests it with in-memory embeddings. Plan 2 supplies the real video-backed provider.
 
 **Tech Stack:** Python ≥3.11, numpy, pandas, scipy (`linear_sum_assignment`), filterpy (Kalman/RTS), OpenCV (video metadata), PyYAML, pytest, ruff.
@@ -28,7 +28,7 @@ The spec is delivered in four plans. Each one leaves `main`-mergeable, tested so
 ## Global Constraints
 
 - **Python and dependencies.** `requires-python = ">=3.11"`. **No new required dependencies.** Heavy optional libraries (`transformers`, `torchreid`, `openai`, `anthropic`) are never imported by P1 code.
-- **Dependency rule (§2.2).** `dnt.post` imports only `dnt.shared`, `dnt.engine`, `dnt` (for `__version__`), and third-party libraries. It must never import `dnt.track`, `dnt.detect`, `dnt.label`, `dnt.filter`, or `boxmot`. `tests/test_post_independence.py` enforces this.
+- **Dependency rule (§2.2).** `dnt.refine` imports only `dnt.shared`, `dnt.engine`, `dnt` (for `__version__`), and third-party libraries. It must never import `dnt.track`, `dnt.detect`, `dnt.label`, `dnt.filter`, or `boxmot`. `tests/test_refine_independence.py` enforces this.
 - **Track file (§2.5).** Headerless 10 columns `frame, track, x, y, w, h, score, cls, r3, r4`.
   - Output column 8 is `interp` (`0` observed, `1` filled).
   - Integer columns are written as ints. Output is sorted by `frame, track`, and track IDs are renumbered contiguously from 1.
@@ -40,7 +40,7 @@ The spec is delivered in four plans. Each one leaves `main`-mergeable, tested so
   - Use ASCII only in code, comments and docstrings (`>=`, `x`, `->`), because ruff's `RUF001-003` flags confusable Unicode.
   - `zip(...)` always gets `strict=True`.
   - **Never add entries to the legacy per-file baseline.** Task 5 removes the `src/dnt/track/post_process.py` entry.
-- **Tests.** The default suite is CPU-only and needs no network: `.venv/bin/python -m pytest`. New tests live in `tests/post/` (a package), except `tests/test_post_independence.py`.
+- **Tests.** The default suite is CPU-only and needs no network: `.venv/bin/python -m pytest`. New tests live in `tests/refine/` (a package), except `tests/test_refine_independence.py`.
 - **Existing tests must keep passing unchanged:**
   - `tests/test_post_process.py`
   - `tests/test_filter.py::test_filter_interpolate_uses_package_module`
@@ -64,7 +64,7 @@ These are the five inputs most likely to hurt a real user that the spec implies 
 These are reported at handoff.
 
 - **Dry run (2026-09-28).** The code blocks in this plan were assembled into a scratch copy of the repository and executed. The baselines were generated first, then every task was applied in order.
-  - The full default suite passes, including every new test: 420 passed, 12 xfailed (pre-existing).
+  - The full default suite passes, including every new test: 422 passed, 12 xfailed (pre-existing). This was re-run after the `dnt.refine` rename and the Tracker-style API.
   - `ruff check src tests` is clean.
   - `ruff format` reformats 13 of the new files. That is layout only, and Task 17 Step 5 runs it.
   - The two "verbatim" moves (Task 3's docstring, Task 5's nested helpers) were filled from the original source during the dry run.
@@ -77,6 +77,7 @@ These are reported at handoff.
 - **`signals.replaces` holds the rejected event's `proposal_key`**, not its `id`. IDs are assigned by the runner, and the key is stable across rounds. That is what P4 needs.
 - **Parity (criterion 7) compares groupings, not literal IDs.** `link_tracklets` keeps the earliest tracklet's ID, while `refine` renumbers. The parity test therefore compares *which input tracklets end up together*.
 - **Rider subtype in P1.** With no VLM, an auto-accepted `RECLASS` whose `new_cls` is `None` becomes `HUMAN_PENDING` (§4.3, rider-subtype rule). A localized ReClass hint can still settle it.
+- **Module shape (maintainer decision, 2026-09-28).** The package is `dnt.refine` rather than the roadmap's `dnt.post`, next to `dnt.detect` and `dnt.track`. `TrackRefiner` is used like `Tracker`: `config` or `config_yaml`, `device`, `refine(track_file, out_file, video_file=...)` returning a DataFrame (the full result is on `last_result`), and `refine_batch(...)`. The spec's section 2.4 was updated to match.
 - **Appearance before Plan 2.** When a video is given but no `appearance_factory` is injected, P1 logs a WARNING and runs motion-only. Plan 2 replaces this fallback.
 
 ---
@@ -85,27 +86,27 @@ These are reported at handoff.
 
 | Path | Status | Responsibility |
 |---|---|---|
-| `src/dnt/post/__init__.py` | create | Public API: `TrackRefiner`, `RefineConfig`, `RefineResult`, `interpolate_tracks_rts`, `link_tracklets` |
-| `src/dnt/post/io.py` | create | Column constants, `read_tracks` (dnt/MOT), `to_work`, `read_context`, `write_tracks`, `sha256_file`, `video_info`, `video_fingerprint` |
-| `src/dnt/post/config.py` | create | `RefineConfig` dataclass tree, per-target defaults, strict YAML round trip, validation, `to_frames` |
-| `src/dnt/post/primitives.py` | create | `ramp`, `cv_kalman`, `kalman_nis`, speeds, heading smoothness, majority class, IoU/IoB wrappers over `dnt.engine`, `frame_runs`, `occlusion_flags` |
-| `src/dnt/post/interpolate.py` | create (moved) | `interpolate_tracks_rts`, plus observed-only measurements and `protected_gaps` |
-| `src/dnt/post/link.py` | create (moved + new) | Legacy helpers and `link_tracklets`; stage 3 descriptors, gates, scoring, passes, chains, legacy mode |
-| `src/dnt/post/events.py` | create | `EventKind`, `Decision`, `Event`, `proposal_key`, `Ledger` read/write |
-| `src/dnt/post/apply.py` | create | Lineage, split, drop, reclass, chain merge, renumber, `apply_edit` |
-| `src/dnt/post/verify.py` | create | `Band`, `band_route`, `decide`, `route_without_vlm` |
-| `src/dnt/post/features.py` | create | `Appearance` protocol, `ArrayAppearance`, `track_embeddings` |
-| `src/dnt/post/hints.py` | create | `ReclassHint`, `read_reclass_hints` |
-| `src/dnt/post/switch.py` | create | Stage 1 proposals |
-| `src/dnt/post/screen.py` | create | Stage 2 proposals and the orphan pass |
-| `src/dnt/post/refiner.py` | create | `TrackRefiner`, `RefineResult`, `resolve_fps`, `fill_stage` |
-| `src/dnt/post/cli.py` | create | `dnt-refine run` |
+| `src/dnt/refine/__init__.py` | create | Public API: `TrackRefiner`, `RefineConfig`, `RefineResult`, `interpolate_tracks_rts`, `link_tracklets` |
+| `src/dnt/refine/io.py` | create | Column constants, `read_tracks` (dnt/MOT), `to_work`, `read_context`, `write_tracks`, `sha256_file`, `video_info`, `video_fingerprint` |
+| `src/dnt/refine/config.py` | create | `RefineConfig` dataclass tree, per-target defaults, strict YAML round trip, validation, `to_frames` |
+| `src/dnt/refine/primitives.py` | create | `ramp`, `cv_kalman`, `kalman_nis`, speeds, heading smoothness, majority class, IoU/IoB wrappers over `dnt.engine`, `frame_runs`, `occlusion_flags` |
+| `src/dnt/refine/interpolate.py` | create (moved) | `interpolate_tracks_rts`, plus observed-only measurements and `protected_gaps` |
+| `src/dnt/refine/link.py` | create (moved + new) | Legacy helpers and `link_tracklets`; stage 3 descriptors, gates, scoring, passes, chains, legacy mode |
+| `src/dnt/refine/events.py` | create | `EventKind`, `Decision`, `Event`, `proposal_key`, `Ledger` read/write |
+| `src/dnt/refine/apply.py` | create | Lineage, split, drop, reclass, chain merge, renumber, `apply_edit` |
+| `src/dnt/refine/verify.py` | create | `Band`, `band_route`, `decide`, `route_without_vlm` |
+| `src/dnt/refine/features.py` | create | `Appearance` protocol, `ArrayAppearance`, `track_embeddings` |
+| `src/dnt/refine/hints.py` | create | `ReclassHint`, `read_reclass_hints` |
+| `src/dnt/refine/switch.py` | create | Stage 1 proposals |
+| `src/dnt/refine/screen.py` | create | Stage 2 proposals and the orphan pass |
+| `src/dnt/refine/refiner.py` | create | `TrackRefiner`, `RefineResult`, `resolve_fps`, `fill_stage` |
+| `src/dnt/refine/cli.py` | create | `dnt-refine run` |
 | `src/dnt/track/post_process.py` | modify | Becomes a re-export shim |
-| `src/dnt/filter/filter.py:833` | modify | Wrapper imports from `dnt.post.interpolate` |
+| `src/dnt/filter/filter.py:833` | modify | Wrapper imports from `dnt.refine.interpolate` |
 | `pyproject.toml` | modify | `[project.scripts] dnt-refine`; drop the `post_process.py` per-file ignore |
-| `tests/post/…` | create | Unit and integration tests, fixtures, characterization data |
-| `tests/test_post_independence.py` | create | §2.2 import rule |
-| `docs/api/post/*.md`, `mkdocs.yml`, `docs/api/track/post_process.md`, `docs/changelog.md` | create/modify | API docs and changelog |
+| `tests/refine/…` | create | Unit and integration tests, fixtures, characterization data |
+| `tests/test_refine_independence.py` | create | §2.2 import rule |
+| `docs/api/refine/*.md`, `mkdocs.yml`, `docs/api/track/post_process.md`, `docs/changelog.md` | create/modify | API docs and changelog |
 
 The *work table* is the internal representation every stage uses. It is a DataFrame with columns `frame, track, x, y, w, h, score, cls, interp, r4, raw_id`:
 - `raw_id` is the input track ID of the row, and never changes.
@@ -116,42 +117,42 @@ The *work table* is the internal representation every stage uses. It is a DataFr
 ### Task 1: Package skeleton, independence test, characterization baselines
 
 **Files:**
-- Create: `src/dnt/post/__init__.py`
-- Create: `tests/post/__init__.py` (empty)
-- Create: `tests/post/_fixtures.py`
-- Create: `tests/post/make_baselines.py`
-- Create: `tests/post/data/raw_{0,1,2}.csv`, `interp_{0,1,2}.csv`, `interp_smooth_{0,1,2}.csv`, `link_{0,1,2}.csv` (generated)
-- Test: `tests/test_post_independence.py`
+- Create: `src/dnt/refine/__init__.py`
+- Create: `tests/refine/__init__.py` (empty)
+- Create: `tests/refine/_fixtures.py`
+- Create: `tests/refine/make_baselines.py`
+- Create: `tests/refine/data/raw_{0,1,2}.csv`, `interp_{0,1,2}.csv`, `interp_smooth_{0,1,2}.csv`, `link_{0,1,2}.csv` (generated)
+- Test: `tests/test_refine_independence.py`
 
 **Interfaces:**
 - Produces:
-  - `tests.post._fixtures`:
+  - `tests.refine._fixtures`:
     - `TRACK_COLUMNS: list[str]`
     - `box_rows(track, frames, x0, y0, *, vx=0.0, vy=0.0, w=30.0, h=60.0, cls=0, score=0.9) -> list[list]`
     - `table(*row_lists) -> pd.DataFrame`
     - `random_tracks(seed=0, n_objects=40, n_frames=300) -> pd.DataFrame`
     - `load_raw(seed) -> pd.DataFrame`
     - `DATA: Path`
-  - The baseline CSVs in `tests/post/data/`.
+  - The baseline CSVs in `tests/refine/data/`.
 
 The baselines **must be generated before any code moves**. They record today's `interpolate_tracks_rts` and `link_tracklets` outputs, which Tasks 3–5 must reproduce byte for byte.
 
 - [ ] **Step 1: Create the package and test package**
 
 ```python
-# src/dnt/post/__init__.py
+# src/dnt/refine/__init__.py
 """Track refinement: switch splitting, false-track screening, linking, and gap filling."""
 ```
 
 ```python
-# tests/post/__init__.py
+# tests/refine/__init__.py
 ```
 
 - [ ] **Step 2: Write the fixtures module**
 
 ```python
-# tests/post/_fixtures.py
-"""Deterministic synthetic track tables for the dnt.post tests."""
+# tests/refine/_fixtures.py
+"""Deterministic synthetic track tables for the dnt.refine tests."""
 
 from __future__ import annotations
 
@@ -225,12 +226,12 @@ def load_raw(seed: int) -> pd.DataFrame:
 - [ ] **Step 3: Write the baseline generator**
 
 ```python
-# tests/post/make_baselines.py
-"""Write characterization baselines for the dnt.post move.
+# tests/refine/make_baselines.py
+"""Write characterization baselines for the dnt.refine move.
 
 Run ONCE, before moving any code (plan Task 1), against the pre-move dnt.track.post_process:
 
-    .venv/bin/python tests/post/make_baselines.py
+    .venv/bin/python tests/refine/make_baselines.py
 """
 
 from __future__ import annotations
@@ -272,13 +273,13 @@ if __name__ == "__main__":
 
 - [ ] **Step 4: Generate the baselines on the unmodified code**
 
-Run: `.venv/bin/python tests/post/make_baselines.py && ls tests/post/data`
+Run: `.venv/bin/python tests/refine/make_baselines.py && ls tests/refine/data`
 Expected: 12 CSV files (`raw_*`, `interp_*`, `interp_smooth_*`, `link_*` for seeds 0–2), each non-empty.
 
 - [ ] **Step 5: Write the independence test**
 
 ```python
-# tests/test_post_independence.py
+# tests/test_refine_independence.py
 import json
 import subprocess
 import sys
@@ -286,11 +287,11 @@ import sys
 FORBIDDEN = ("dnt.track", "dnt.detect", "dnt.label", "dnt.filter", "boxmot")
 
 
-def test_post_imports_nothing_forbidden():
+def test_refine_imports_nothing_forbidden():
     code = (
         "import importlib, json, pkgutil, sys\n"
-        "import dnt.post\n"
-        "for m in pkgutil.walk_packages(dnt.post.__path__, 'dnt.post.'):\n"
+        "import dnt.refine\n"
+        "for m in pkgutil.walk_packages(dnt.refine.__path__, 'dnt.refine.'):\n"
         "    importlib.import_module(m.name)\n"
         f"forbidden = {FORBIDDEN!r}\n"
         "bad = sorted(m for m in sys.modules\n"
@@ -303,14 +304,14 @@ def test_post_imports_nothing_forbidden():
 
 - [ ] **Step 6: Run it**
 
-Run: `.venv/bin/python -m pytest tests/test_post_independence.py -v`
+Run: `.venv/bin/python -m pytest tests/test_refine_independence.py -v`
 Expected: PASS. The package is empty, so this pins the rule before any code arrives.
 
 - [ ] **Step 7: Commit**
 
 ```bash
-git add src/dnt/post/__init__.py tests/post tests/test_post_independence.py
-git commit -m "test: add dnt.post skeleton, independence test, and pre-move baselines
+git add src/dnt/refine/__init__.py tests/refine tests/test_refine_independence.py
+git commit -m "test: add dnt.refine skeleton, independence test, and pre-move baselines
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ```
@@ -320,12 +321,12 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ### Task 2: Numeric primitives
 
 **Files:**
-- Create: `src/dnt/post/primitives.py`
-- Test: `tests/post/test_primitives.py`
+- Create: `src/dnt/refine/primitives.py`
+- Test: `tests/refine/test_primitives.py`
 
 **Interfaces:**
 - Consumes: `dnt.engine.ious` (tlbr, pixel-inclusive), `dnt.engine.iobs` (xywh), `dnt.engine.cluster_by_gap`.
-- Produces (all in `dnt.post.primitives`):
+- Produces (all in `dnt.refine.primitives`):
   - `ramp(x, lo: float, hi: float) -> float | np.ndarray`
   - `cv_kalman(process_var=10.0, meas_var_pos=25.0, meas_var_size=16.0) -> filterpy.kalman.KalmanFilter`
   - `xywh_to_z(boxes) -> np.ndarray`
@@ -344,12 +345,12 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 - [ ] **Step 1: Write the failing tests**
 
 ```python
-# tests/post/test_primitives.py
+# tests/refine/test_primitives.py
 import numpy as np
 import pandas as pd
 import pytest
 
-from dnt.post import primitives as P
+from dnt.refine import primitives as P
 
 
 def test_ramp_increasing_decreasing_and_clipped():
@@ -443,14 +444,14 @@ def test_occlusion_flags_use_same_frame_boxes_and_context():
 
 - [ ] **Step 2: Run to verify failure**
 
-Run: `.venv/bin/python -m pytest tests/post/test_primitives.py -v`
+Run: `.venv/bin/python -m pytest tests/refine/test_primitives.py -v`
 Expected: FAIL with `ImportError: cannot import name 'primitives'`.
 
 - [ ] **Step 3: Implement**
 
 ```python
-# src/dnt/post/primitives.py
-"""Numeric primitives shared by the dnt.post stages (spec section 5)."""
+# src/dnt/refine/primitives.py
+"""Numeric primitives shared by the dnt.refine stages (spec section 5)."""
 
 from __future__ import annotations
 
@@ -651,36 +652,36 @@ def occlusion_flags(work: pd.DataFrame, context: pd.DataFrame | None, thr: float
 
 - [ ] **Step 4: Run tests**
 
-Run: `.venv/bin/python -m pytest tests/post/test_primitives.py -v && .venv/bin/ruff check src/dnt/post`
+Run: `.venv/bin/python -m pytest tests/refine/test_primitives.py -v && .venv/bin/ruff check src/dnt/refine`
 Expected: all PASS; ruff clean.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/dnt/post/primitives.py tests/post/test_primitives.py
-git commit -m "feat(post): add shared numeric primitives (ramp, CV Kalman, NIS, speeds, geometry)
+git add src/dnt/refine/primitives.py tests/refine/test_primitives.py
+git commit -m "feat(refine): add shared numeric primitives (ramp, CV Kalman, NIS, speeds, geometry)
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ```
 
 ---
 
-### Task 3: Move `interpolate_tracks_rts` into `dnt.post` (behaviour-preserving)
+### Task 3: Move `interpolate_tracks_rts` into `dnt.refine` (behaviour-preserving)
 
 **Files:**
-- Create: `src/dnt/post/interpolate.py`
+- Create: `src/dnt/refine/interpolate.py`
 - Modify: `src/dnt/track/post_process.py` (delete lines 1–318, the module docstring, imports, and `interpolate_tracks_rts`; keep `link_tracklets` for Task 5)
 - Modify: `src/dnt/filter/filter.py:833` (wrapper import)
-- Test: `tests/post/test_interpolate.py`
+- Test: `tests/refine/test_interpolate.py`
 
 **Interfaces:**
 - Consumes: `primitives.cv_kalman`.
-- Produces: `dnt.post.interpolate.interpolate_tracks_rts`, with the signature unchanged from 0.3.3. `dnt.track.post_process.interpolate_tracks_rts` and `dnt.track.interpolate_tracks_rts` remain the same object.
+- Produces: `dnt.refine.interpolate.interpolate_tracks_rts`, with the signature unchanged from 0.3.3. `dnt.track.post_process.interpolate_tracks_rts` and `dnt.track.interpolate_tracks_rts` remain the same object.
 
 - [ ] **Step 1: Write the characterization test**
 
 ```python
-# tests/post/test_interpolate.py
+# tests/refine/test_interpolate.py
 import pandas as pd
 import pytest
 
@@ -698,7 +699,7 @@ def test_matches_pre_move_baseline(tmp_path, seed, smooth, name):
 
 
 def test_shim_and_package_are_the_same_function():
-    from dnt.post.interpolate import interpolate_tracks_rts
+    from dnt.refine.interpolate import interpolate_tracks_rts
     from dnt.track import interpolate_tracks_rts as track_level
 
     assert shim_interpolate is interpolate_tracks_rts is track_level
@@ -706,15 +707,15 @@ def test_shim_and_package_are_the_same_function():
 
 - [ ] **Step 2: Run to verify failure**
 
-Run: `.venv/bin/python -m pytest tests/post/test_interpolate.py -v`
-Expected: the baseline tests PASS (the old code is still in place), and `test_shim_and_package_are_the_same_function` FAILS with `ModuleNotFoundError: No module named 'dnt.post.interpolate'`.
+Run: `.venv/bin/python -m pytest tests/refine/test_interpolate.py -v`
+Expected: the baseline tests PASS (the old code is still in place), and `test_shim_and_package_are_the_same_function` FAILS with `ModuleNotFoundError: No module named 'dnt.refine.interpolate'`.
 
-- [ ] **Step 3: Create `src/dnt/post/interpolate.py`**
+- [ ] **Step 3: Create `src/dnt/refine/interpolate.py`**
 
 Move the function body verbatim into two helpers. The per-track body becomes `_rts_rows`, and the Kalman setup becomes a `cv_kalman` call. Keep the original docstring of `interpolate_tracks_rts` (`src/dnt/track/post_process.py` lines 30–123) as-is, and wrap any line over 100 characters.
 
 ```python
-# src/dnt/post/interpolate.py
+# src/dnt/refine/interpolate.py
 """Kalman RTS gap filling for track tables (spec 6.4).
 
 Moved from ``dnt.track.post_process`` (which re-exports it) in dnt 0.4.
@@ -917,7 +918,7 @@ The `"""<paste …>"""` line is not a placeholder to leave in. Replace it with t
 Delete lines 1–318 of `src/dnt/track/post_process.py` (the module docstring, the imports, and `interpolate_tracks_rts`), and put this at the top of the file, above `def link_tracklets`:
 
 ```python
-"""Backward-compatible home of the track post-processing functions (moved to ``dnt.post``)."""
+"""Backward-compatible home of the track post-processing functions (moved to ``dnt.refine``)."""
 
 from __future__ import annotations
 
@@ -925,7 +926,7 @@ import numpy as np
 import pandas as pd
 from tqdm import tqdm
 
-from ..post.interpolate import interpolate_tracks_rts
+from ..refine.interpolate import interpolate_tracks_rts
 
 __all__ = ["interpolate_tracks_rts", "link_tracklets"]
 ```
@@ -943,21 +944,21 @@ In `src/dnt/filter/filter.py`, inside `Filter.interpolate_tracks_rts`, change
 to
 
 ```python
-        from ..post.interpolate import interpolate_tracks_rts as _interpolate_tracks_rts
+        from ..refine.interpolate import interpolate_tracks_rts as _interpolate_tracks_rts
 ```
 
-and change its docstring reference to `:func:`dnt.post.interpolate.interpolate_tracks_rts``.
+and change its docstring reference to `:func:`dnt.refine.interpolate.interpolate_tracks_rts``.
 
 - [ ] **Step 6: Run tests**
 
-Run: `.venv/bin/python -m pytest tests/post/test_interpolate.py tests/test_post_process.py tests/test_filter.py tests/test_pipeline_cpu.py tests/test_post_independence.py -v && .venv/bin/ruff check src/dnt/post src/dnt/track/post_process.py src/dnt/filter/filter.py`
+Run: `.venv/bin/python -m pytest tests/refine/test_interpolate.py tests/test_post_process.py tests/test_filter.py tests/test_pipeline_cpu.py tests/test_refine_independence.py -v && .venv/bin/ruff check src/dnt/refine src/dnt/track/post_process.py src/dnt/filter/filter.py`
 Expected: all PASS, and every baseline is byte-identical. Ruff is clean.
 
 - [ ] **Step 7: Commit**
 
 ```bash
-git add src/dnt/post/interpolate.py src/dnt/track/post_process.py src/dnt/filter/filter.py tests/post/test_interpolate.py
-git commit -m "refactor: move interpolate_tracks_rts to dnt.post; share the CV Kalman model
+git add src/dnt/refine/interpolate.py src/dnt/track/post_process.py src/dnt/filter/filter.py tests/refine/test_interpolate.py
+git commit -m "refactor: move interpolate_tracks_rts to dnt.refine; share the CV Kalman model
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ```
@@ -967,22 +968,22 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ### Task 4: `interpolate_tracks_rts` — filled rows are not measurements; `protected_gaps`
 
 **Files:**
-- Modify: `src/dnt/post/interpolate.py`
-- Test: `tests/post/test_interpolate.py` (append)
+- Modify: `src/dnt/refine/interpolate.py`
+- Test: `tests/refine/test_interpolate.py` (append)
 
 **Interfaces:**
 - Produces: `interpolate_tracks_rts(..., protected_gaps: Mapping[int, Iterable[tuple[int, int]]] | None = None)`. This is a new keyword-only-by-convention parameter, added last, with default `None`.
 
 - [ ] **Step 1: Write the failing tests**
 
-Merge these imports into the import block at the top of `tests/post/test_interpolate.py`, so the file's imports read:
+Merge these imports into the import block at the top of `tests/refine/test_interpolate.py`, so the file's imports read:
 
 ```python
 import numpy as np
 import pandas as pd
 import pytest
 
-from dnt.post.interpolate import interpolate_tracks_rts
+from dnt.refine.interpolate import interpolate_tracks_rts
 from dnt.track.post_process import interpolate_tracks_rts as shim_interpolate
 
 from ._fixtures import DATA, box_rows, load_raw, table
@@ -991,7 +992,7 @@ from ._fixtures import DATA, box_rows, load_raw, table
 Then append the tests:
 
 ```python
-# append to tests/post/test_interpolate.py
+# append to tests/refine/test_interpolate.py
 def _positional(df):
     return df.set_axis(range(df.shape[1]), axis=1)
 
@@ -1041,12 +1042,12 @@ def test_two_protected_gaps_in_one_chain():
 
 - [ ] **Step 2: Run to verify failure**
 
-Run: `.venv/bin/python -m pytest tests/post/test_interpolate.py -v`
+Run: `.venv/bin/python -m pytest tests/refine/test_interpolate.py -v`
 Expected: the new tests FAIL. The absurd row is used as a measurement, and `protected_gaps` is an unexpected keyword.
 
 - [ ] **Step 3: Implement**
 
-In `src/dnt/post/interpolate.py`:
+In `src/dnt/refine/interpolate.py`:
 
 1. Add `from collections.abc import Iterable, Mapping` to the imports.
 2. Add this helper above `interpolate_tracks_rts`:
@@ -1109,30 +1110,30 @@ and document both behaviours in the docstring's Parameters and Notes. `protected
 
 - [ ] **Step 4: Run tests (new + baselines + legacy)**
 
-Run: `.venv/bin/python -m pytest tests/post/test_interpolate.py tests/test_post_process.py tests/test_filter.py -v && .venv/bin/ruff check src/dnt/post`
+Run: `.venv/bin/python -m pytest tests/refine/test_interpolate.py tests/test_post_process.py tests/test_filter.py -v && .venv/bin/ruff check src/dnt/refine`
 Expected: all PASS. The baselines are still byte-identical, because raw tracker files carry `r3 = -1` and no protected gaps.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/dnt/post/interpolate.py tests/post/test_interpolate.py
-git commit -m "feat(post): interpolate ignores filled rows as measurements; add protected_gaps
+git add src/dnt/refine/interpolate.py tests/refine/test_interpolate.py
+git commit -m "feat(refine): interpolate ignores filled rows as measurements; add protected_gaps
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ```
 
 ---
 
-### Task 5: Move `link_tracklets` into `dnt.post.link` with shared legacy helpers
+### Task 5: Move `link_tracklets` into `dnt.refine.link` with shared legacy helpers
 
 **Files:**
-- Create: `src/dnt/post/link.py`
+- Create: `src/dnt/refine/link.py`
 - Modify: `src/dnt/track/post_process.py` (becomes a pure shim)
 - Modify: `pyproject.toml` (remove the `"src/dnt/track/post_process.py" = ["E501"]` line)
-- Test: `tests/post/test_link_legacy.py`
+- Test: `tests/refine/test_link_legacy.py`
 
 **Interfaces:**
-- Produces (in `dnt.post.link`):
+- Produces (in `dnt.refine.link`):
   - `LEGACY_COL_NAMES`
   - `_iou_xywh(a, b) -> float`
   - `_estimate_velocity(frames, cx, cy, k) -> tuple[float, float]`
@@ -1148,7 +1149,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 - [ ] **Step 1: Write the characterization test**
 
 ```python
-# tests/post/test_link_legacy.py
+# tests/refine/test_link_legacy.py
 import pytest
 
 from dnt.track.post_process import link_tracklets as shim_link
@@ -1164,14 +1165,14 @@ def test_matches_pre_move_baseline(tmp_path, seed):
 
 
 def test_shim_and_package_are_the_same_function():
-    from dnt.post.link import link_tracklets
+    from dnt.refine.link import link_tracklets
     from dnt.track import link_tracklets as track_level
 
     assert shim_link is link_tracklets is track_level
 
 
 def test_gate_cost_rejects_and_scores_like_the_original():
-    from dnt.post.link import _legacy_gate_cost
+    from dnt.refine.link import _legacy_gate_cost
 
     a = {"track": 1, "cls": 2, "t_end": 10, "end_c": (115.0, 130.0), "end_box": (100.0, 100.0, 30.0, 60.0),
          "area_end": 1800.0, "vx": 2.0, "vy": 0.0}
@@ -1189,15 +1190,15 @@ def test_gate_cost_rejects_and_scores_like_the_original():
 
 - [ ] **Step 2: Run to verify failure**
 
-Run: `.venv/bin/python -m pytest tests/post/test_link_legacy.py -v`
-Expected: the baseline tests PASS. The other two FAIL with `ModuleNotFoundError: No module named 'dnt.post.link'`.
+Run: `.venv/bin/python -m pytest tests/refine/test_link_legacy.py -v`
+Expected: the baseline tests PASS. The other two FAIL with `ModuleNotFoundError: No module named 'dnt.refine.link'`.
 
-- [ ] **Step 3: Create `src/dnt/post/link.py` (legacy part)**
+- [ ] **Step 3: Create `src/dnt/refine/link.py` (legacy part)**
 
 Keep `link_tracklets`'s full original numpy docstring (`post_process.py`, the text between its signature and `def _iou_xywh`), wrapping lines to 100 characters. Copy `_iou_xywh`, `_estimate_velocity` and `_DSU` verbatim from their nested definitions inside `link_tracklets`, then dedent them to module level. Their original docstrings stay. After dedenting, `_estimate_velocity`'s signature is 106 characters; wrap its parameters onto a second line.
 
 ```python
-# src/dnt/post/link.py
+# src/dnt/refine/link.py
 """Stage 3: tracklet linking (spec 6.3), including the legacy ``link_tracklets``.
 
 ``link_tracklets`` moved here from ``dnt.track.post_process`` (which re-exports it) in dnt 0.4.
@@ -1421,10 +1422,10 @@ Replace the three `...  # verbatim …` bodies and both `"""<paste …>"""` docs
 
 ```python
 # src/dnt/track/post_process.py  (entire file)
-"""Backward-compatible home of the track post-processing functions (moved to ``dnt.post``)."""
+"""Backward-compatible home of the track post-processing functions (moved to ``dnt.refine``)."""
 
-from ..post.interpolate import interpolate_tracks_rts
-from ..post.link import link_tracklets
+from ..refine.interpolate import interpolate_tracks_rts
+from ..refine.link import link_tracklets
 
 __all__ = ["interpolate_tracks_rts", "link_tracklets"]
 ```
@@ -1433,14 +1434,14 @@ In `pyproject.toml`, delete the line `"src/dnt/track/post_process.py" = ["E501"]
 
 - [ ] **Step 5: Run tests**
 
-Run: `.venv/bin/python -m pytest tests/post tests/test_post_process.py tests/test_filter.py tests/test_pipeline_cpu.py tests/test_imports.py tests/test_post_independence.py -v && .venv/bin/ruff check src tests tools`
+Run: `.venv/bin/python -m pytest tests/refine tests/test_post_process.py tests/test_filter.py tests/test_pipeline_cpu.py tests/test_imports.py tests/test_refine_independence.py -v && .venv/bin/ruff check src tests tools`
 Expected: all PASS, and the link baselines are byte-identical. Ruff is clean with the smaller baseline.
 
 - [ ] **Step 6: Commit**
 
 ```bash
-git add src/dnt/post/link.py src/dnt/track/post_process.py pyproject.toml tests/post/test_link_legacy.py
-git commit -m "refactor: move link_tracklets to dnt.post.link with shared legacy gate helpers
+git add src/dnt/refine/link.py src/dnt/track/post_process.py pyproject.toml tests/refine/test_link_legacy.py
+git commit -m "refactor: move link_tracklets to dnt.refine.link with shared legacy gate helpers
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ```
@@ -1449,11 +1450,11 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ### Task 6: Track, context, and video I/O
 
 **Files:**
-- Create: `src/dnt/post/io.py`
-- Test: `tests/post/test_io.py`
+- Create: `src/dnt/refine/io.py`
+- Test: `tests/refine/test_io.py`
 
 **Interfaces:**
-- Produces (in `dnt.post.io`):
+- Produces (in `dnt.refine.io`):
   - `TRACK_COLUMNS`, `OUT_COLUMNS`, `WORK_COLUMNS`, `CONTEXT_COLUMNS`
   - `TrackInput(work: pd.DataFrame, n_filled_removed: int, n_duplicates_removed: int)`, a frozen dataclass
   - `empty_work() -> pd.DataFrame`
@@ -1468,13 +1469,13 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 - [ ] **Step 1: Write the failing tests**
 
 ```python
-# tests/post/test_io.py
+# tests/refine/test_io.py
 import hashlib
 import logging
 
 import pytest
 
-from dnt.post import io
+from dnt.refine import io
 
 from ._fixtures import box_rows, table
 
@@ -1561,14 +1562,14 @@ def test_sha256_and_video_info(tmp_path, synthetic_video):
 
 - [ ] **Step 2: Run to verify failure**
 
-Run: `.venv/bin/python -m pytest tests/post/test_io.py -v`
-Expected: FAIL with `ImportError: cannot import name 'io' from 'dnt.post'`.
+Run: `.venv/bin/python -m pytest tests/refine/test_io.py -v`
+Expected: FAIL with `ImportError: cannot import name 'io' from 'dnt.refine'`.
 
 - [ ] **Step 3: Implement**
 
 ```python
-# src/dnt/post/io.py
-"""Track, context, and video I/O for dnt.post (spec 2.5)."""
+# src/dnt/refine/io.py
+"""Track, context, and video I/O for dnt.refine (spec 2.5)."""
 
 from __future__ import annotations
 
@@ -1750,14 +1751,14 @@ def video_fingerprint(path, frame_count: int) -> dict:
 
 - [ ] **Step 4: Run tests**
 
-Run: `.venv/bin/python -m pytest tests/post/test_io.py -v && .venv/bin/ruff check src/dnt/post`
+Run: `.venv/bin/python -m pytest tests/refine/test_io.py -v && .venv/bin/ruff check src/dnt/refine`
 Expected: all PASS; ruff clean.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/dnt/post/io.py tests/post/test_io.py
-git commit -m "feat(post): add track/context/video I/O with filled-row removal
+git add src/dnt/refine/io.py tests/refine/test_io.py
+git commit -m "feat(refine): add track/context/video I/O with filled-row removal
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ```
@@ -1767,11 +1768,11 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ### Task 7: `RefineConfig`
 
 **Files:**
-- Create: `src/dnt/post/config.py`
-- Test: `tests/post/test_config.py`
+- Create: `src/dnt/refine/config.py`
+- Test: `tests/refine/test_config.py`
 
 **Interfaces:**
-- Produces (in `dnt.post.config`):
+- Produces (in `dnt.refine.config`):
   - `to_frames(seconds: float, fps: float) -> int`
   - The dataclasses `ContextConfig, HintsConfig, MotionConfig, EncoderConfig, SwitchConfig, ScreenConfig, LinkConfig, OrphanConfig, FillConfig, VLMConfig`, each with the fields below.
   - `RefineConfig`, with `defaults(target="person")`, `from_dict(data)`, `from_yaml(path)`, `to_dict()`, `to_yaml(path)`, and `validate()`.
@@ -1810,11 +1811,11 @@ The field names and defaults are part of the interface for every later task and 
 - [ ] **Step 1: Write the failing tests**
 
 ```python
-# tests/post/test_config.py
+# tests/refine/test_config.py
 import pytest
 import yaml
 
-from dnt.post.config import RefineConfig, to_frames
+from dnt.refine.config import RefineConfig, to_frames
 
 
 def test_to_frames():
@@ -1880,13 +1881,13 @@ def test_from_yaml_rejects_non_mapping(tmp_path):
 
 - [ ] **Step 2: Run to verify failure**
 
-Run: `.venv/bin/python -m pytest tests/post/test_config.py -v`
-Expected: FAIL with `ModuleNotFoundError: No module named 'dnt.post.config'`.
+Run: `.venv/bin/python -m pytest tests/refine/test_config.py -v`
+Expected: FAIL with `ModuleNotFoundError: No module named 'dnt.refine.config'`.
 
 - [ ] **Step 3: Implement**
 
 ```python
-# src/dnt/post/config.py
+# src/dnt/refine/config.py
 """``RefineConfig``: every refinement setting, with per-target defaults (spec 9)."""
 
 from __future__ import annotations
@@ -2243,14 +2244,14 @@ def _overlay(obj, data: Mapping, path: str) -> None:
 
 - [ ] **Step 4: Run tests**
 
-Run: `.venv/bin/python -m pytest tests/post/test_config.py -v && .venv/bin/ruff check src/dnt/post`
+Run: `.venv/bin/python -m pytest tests/refine/test_config.py -v && .venv/bin/ruff check src/dnt/refine`
 Expected: all PASS; ruff clean.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/dnt/post/config.py tests/post/test_config.py
-git commit -m "feat(post): add RefineConfig with per-target defaults, strict YAML, validation
+git add src/dnt/refine/config.py tests/refine/test_config.py
+git commit -m "feat(refine): add RefineConfig with per-target defaults, strict YAML, validation
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ```
@@ -2260,11 +2261,11 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ### Task 8: Events, proposal keys, and the ledger file
 
 **Files:**
-- Create: `src/dnt/post/events.py`
-- Test: `tests/post/test_events.py`
+- Create: `src/dnt/refine/events.py`
+- Test: `tests/refine/test_events.py`
 
 **Interfaces:**
-- Produces (in `dnt.post.events`):
+- Produces (in `dnt.refine.events`):
   - `EventKind(StrEnum)`: `DROP, RECLASS, SPLIT, LINK, FILL, SMOOTH`
   - `Decision(StrEnum)`: `AUTO_ACCEPT, AUTO_REJECT, VLM_ACCEPT, VLM_REJECT, HUMAN_PENDING, HUMAN_ACCEPT, HUMAN_REJECT`
   - `ACCEPTED`, `REJECTED` (frozensets of `Decision`)
@@ -2280,10 +2281,10 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 - [ ] **Step 1: Write the failing tests**
 
 ```python
-# tests/post/test_events.py
+# tests/refine/test_events.py
 import math
 
-from dnt.post.events import Decision, Event, EventKind, Ledger, assign_ids, proposal_key
+from dnt.refine.events import Decision, Event, EventKind, Ledger, assign_ids, proposal_key
 
 
 def _split(tracks=(4,), cut=821, lineage=((12, 780, 900),)):
@@ -2342,13 +2343,13 @@ def test_assign_ids_continues_sequence():
 
 - [ ] **Step 2: Run to verify failure**
 
-Run: `.venv/bin/python -m pytest tests/post/test_events.py -v`
-Expected: FAIL with `ModuleNotFoundError: No module named 'dnt.post.events'`.
+Run: `.venv/bin/python -m pytest tests/refine/test_events.py -v`
+Expected: FAIL with `ModuleNotFoundError: No module named 'dnt.refine.events'`.
 
 - [ ] **Step 3: Implement**
 
 ```python
-# src/dnt/post/events.py
+# src/dnt/refine/events.py
 """Proposed edits, their decisions, and the JSONL ledger (spec 4.1, 4.2)."""
 
 from __future__ import annotations
@@ -2518,14 +2519,14 @@ def assign_ids(events: list[Event], stage: str, round: int, start: int = 1) -> i
 
 - [ ] **Step 4: Run tests**
 
-Run: `.venv/bin/python -m pytest tests/post/test_events.py -v && .venv/bin/ruff check src/dnt/post`
+Run: `.venv/bin/python -m pytest tests/refine/test_events.py -v && .venv/bin/ruff check src/dnt/refine`
 Expected: all PASS; ruff clean. (`round` shadows a builtin inside these signatures by design; it matches the spec's field name. If ruff flags `A002`, that rule is not selected, so no action is needed.)
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/dnt/post/events.py tests/post/test_events.py
-git commit -m "feat(post): add events, immutable proposal keys, and the JSONL ledger
+git add src/dnt/refine/events.py tests/refine/test_events.py
+git commit -m "feat(refine): add events, immutable proposal keys, and the JSONL ledger
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ```
@@ -2535,12 +2536,12 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ### Task 9: Applying edits to the work table
 
 **Files:**
-- Create: `src/dnt/post/apply.py`
-- Test: `tests/post/test_apply.py`
+- Create: `src/dnt/refine/apply.py`
+- Test: `tests/refine/test_apply.py`
 
 **Interfaces:**
 - Consumes: `events.Event`, `events.EventKind`.
-- Produces (in `dnt.post.apply`). All of these preserve the DataFrame index except `renumber`.
+- Produces (in `dnt.refine.apply`). All of these preserve the DataFrame index except `renumber`.
   - `lineage_of_rows(rows) -> list[list[int]]`
   - `lineage(work, track) -> list[list[int]]`
   - `next_track_id(work) -> int`
@@ -2554,12 +2555,12 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 - [ ] **Step 1: Write the failing tests**
 
 ```python
-# tests/post/test_apply.py
+# tests/refine/test_apply.py
 import pytest
 
-from dnt.post import apply as A
-from dnt.post import io
-from dnt.post.events import Event, EventKind
+from dnt.refine import apply as A
+from dnt.refine import io
+from dnt.refine.events import Event, EventKind
 
 from ._fixtures import box_rows, table
 
@@ -2622,13 +2623,13 @@ def test_apply_edit_uses_edit_not_proposal():
 
 - [ ] **Step 2: Run to verify failure**
 
-Run: `.venv/bin/python -m pytest tests/post/test_apply.py -v`
+Run: `.venv/bin/python -m pytest tests/refine/test_apply.py -v`
 Expected: FAIL with `ImportError: cannot import name 'apply'`.
 
 - [ ] **Step 3: Implement**
 
 ```python
-# src/dnt/post/apply.py
+# src/dnt/refine/apply.py
 """The only code that edits the work table (spec 2.1). Every function preserves the index."""
 
 from __future__ import annotations
@@ -2763,14 +2764,14 @@ def apply_edit(work: pd.DataFrame, event: Event, *, new_id: int | None = None) -
 
 - [ ] **Step 4: Run tests**
 
-Run: `.venv/bin/python -m pytest tests/post/test_apply.py -v && .venv/bin/ruff check src/dnt/post`
+Run: `.venv/bin/python -m pytest tests/refine/test_apply.py -v && .venv/bin/ruff check src/dnt/refine`
 Expected: all PASS; ruff clean.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/dnt/post/apply.py tests/post/test_apply.py
-git commit -m "feat(post): add apply (split, drop, reclass, chain merge, renumber, lineage)
+git add src/dnt/refine/apply.py tests/refine/test_apply.py
+git commit -m "feat(refine): add apply (split, drop, reclass, chain merge, renumber, lineage)
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ```
@@ -2780,9 +2781,9 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ### Task 10: Band routing and the `Appearance` protocol
 
 **Files:**
-- Create: `src/dnt/post/verify.py`
-- Create: `src/dnt/post/features.py`
-- Test: `tests/post/test_verify_features.py`
+- Create: `src/dnt/refine/verify.py`
+- Create: `src/dnt/refine/features.py`
+- Test: `tests/refine/test_verify_features.py`
 
 **Interfaces:**
 - Consumes: `events.*`.
@@ -2800,12 +2801,12 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 - [ ] **Step 1: Write the failing tests**
 
 ```python
-# tests/post/test_verify_features.py
+# tests/refine/test_verify_features.py
 import numpy as np
 
-from dnt.post.events import Decision, Event, EventKind
-from dnt.post.features import ArrayAppearance, track_embeddings
-from dnt.post.verify import Band, band_route, route_without_vlm
+from dnt.refine.events import Decision, Event, EventKind
+from dnt.refine.features import ArrayAppearance, track_embeddings
+from dnt.refine.verify import Band, band_route, route_without_vlm
 
 
 def _ev(kind, score, params):
@@ -2849,13 +2850,13 @@ def test_track_embeddings_follow_lineage():
 
 - [ ] **Step 2: Run to verify failure**
 
-Run: `.venv/bin/python -m pytest tests/post/test_verify_features.py -v`
+Run: `.venv/bin/python -m pytest tests/refine/test_verify_features.py -v`
 Expected: FAIL with `ModuleNotFoundError`.
 
 - [ ] **Step 3: Implement**
 
 ```python
-# src/dnt/post/verify.py
+# src/dnt/refine/verify.py
 """Routing proposals by confidence band (spec 4.3). VLM routing arrives in Plan 3."""
 
 from __future__ import annotations
@@ -2908,7 +2909,7 @@ def route_without_vlm(events: list[Event], band: Band, *, round: int = 0) -> Non
 ```
 
 ```python
-# src/dnt/post/features.py
+# src/dnt/refine/features.py
 """The appearance interface the stages use (spec 5.3); real providers arrive in Plan 2."""
 
 from __future__ import annotations
@@ -2964,14 +2965,14 @@ def track_embeddings(appearance: Appearance, lineage) -> tuple[np.ndarray, np.nd
 
 - [ ] **Step 4: Run tests**
 
-Run: `.venv/bin/python -m pytest tests/post/test_verify_features.py -v && .venv/bin/ruff check src/dnt/post`
+Run: `.venv/bin/python -m pytest tests/refine/test_verify_features.py -v && .venv/bin/ruff check src/dnt/refine`
 Expected: all PASS; ruff clean.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/dnt/post/verify.py src/dnt/post/features.py tests/post/test_verify_features.py
-git commit -m "feat(post): add band routing and the Appearance protocol
+git add src/dnt/refine/verify.py src/dnt/refine/features.py tests/refine/test_verify_features.py
+git commit -m "feat(refine): add band routing and the Appearance protocol
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ```
@@ -2980,8 +2981,8 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ### Task 11: Stage 1 — ID-switch proposals
 
 **Files:**
-- Create: `src/dnt/post/switch.py`
-- Test: `tests/post/test_switch.py`
+- Create: `src/dnt/refine/switch.py`
+- Test: `tests/refine/test_switch.py`
 
 **Interfaces:**
 - Consumes:
@@ -2990,7 +2991,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
   - `features.Appearance`, `track_embeddings`
   - `apply.lineage_of_rows`
   - `events.Event`, `EventKind`
-- Produces (in `dnt.post.switch`):
+- Produces (in `dnt.refine.switch`):
   - `STAGE = "switch"`
   - `SwitchResult(events: list[Event], weak_cuts: dict[int, list[int]], candidates: dict[int, list[int]])`. `weak_cuts` are cut frames scoring in `[screen.segment_at, switch.reject_below)`, and `candidates` are all surviving local maxima, which Plan 2 densifies around.
   - `contact_flags(work, thr) -> pd.Series`
@@ -3000,14 +3001,14 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 - [ ] **Step 1: Write the failing tests**
 
 ```python
-# tests/post/test_switch.py
+# tests/refine/test_switch.py
 import numpy as np
 import pytest
 
-from dnt.post import io
-from dnt.post.config import RefineConfig
-from dnt.post.features import ArrayAppearance
-from dnt.post.switch import propose_splits
+from dnt.refine import io
+from dnt.refine.config import RefineConfig
+from dnt.refine.features import ArrayAppearance
+from dnt.refine.switch import propose_splits
 
 from ._fixtures import box_rows, table
 
@@ -3116,13 +3117,13 @@ def test_single_row_and_two_row_tracks_do_not_crash():
 
 - [ ] **Step 2: Run to verify failure**
 
-Run: `.venv/bin/python -m pytest tests/post/test_switch.py -v`
-Expected: FAIL with `ModuleNotFoundError: No module named 'dnt.post.switch'`.
+Run: `.venv/bin/python -m pytest tests/refine/test_switch.py -v`
+Expected: FAIL with `ModuleNotFoundError: No module named 'dnt.refine.switch'`.
 
 - [ ] **Step 3: Implement**
 
 ```python
-# src/dnt/post/switch.py
+# src/dnt/refine/switch.py
 """Stage 1: ID-switch proposals (spec 6.1)."""
 
 from __future__ import annotations
@@ -3428,7 +3429,7 @@ def propose_splits(
 
 - [ ] **Step 4: Run tests**
 
-Run: `.venv/bin/python -m pytest tests/post/test_switch.py -v && .venv/bin/ruff check src/dnt/post`
+Run: `.venv/bin/python -m pytest tests/refine/test_switch.py -v && .venv/bin/ruff check src/dnt/refine`
 Expected: all PASS; ruff clean.
 
 If `test_weak_candidate_becomes_a_weak_cut` finds the NIS term pushing the score to at least 0.5, check the frame-50 values with `res.candidates` and the event's `signals`. Size changes ride on the `w` measurement, whose noise is `meas_var_size = 16`, so a +8 px width step should give NIS well under `nis_hi/2`. Adjust the fixture's width step, not the thresholds.
@@ -3436,8 +3437,8 @@ If `test_weak_candidate_becomes_a_weak_cut` finds the NIS term pushing the score
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/dnt/post/switch.py tests/post/test_switch.py
-git commit -m "feat(post): add stage 1 switch proposals with gates, appearance change, swaps
+git add src/dnt/refine/switch.py tests/refine/test_switch.py
+git commit -m "feat(refine): add stage 1 switch proposals with gates, appearance change, swaps
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ```
@@ -3447,9 +3448,9 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ### Task 12: ReClass hints and stage 2 — screening
 
 **Files:**
-- Create: `src/dnt/post/hints.py`
-- Create: `src/dnt/post/screen.py`
-- Test: `tests/post/test_screen.py`
+- Create: `src/dnt/refine/hints.py`
+- Create: `src/dnt/refine/screen.py`
+- Test: `tests/refine/test_screen.py`
 
 **Interfaces:**
 - Consumes: `primitives.*`, `apply.lineage_of_rows`, `events.*`, `config.RefineConfig`.
@@ -3468,16 +3469,16 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 - [ ] **Step 1: Write the failing tests**
 
 ```python
-# tests/post/test_screen.py
+# tests/refine/test_screen.py
 import pandas as pd
 import pytest
 
-from dnt.post import io
-from dnt.post.config import RefineConfig
-from dnt.post.events import Decision, EventKind
-from dnt.post.hints import ReclassHint, read_reclass_hints
-from dnt.post.screen import ScreenContext, propose_screen
-from dnt.post.verify import Band, route_without_vlm
+from dnt.refine import io
+from dnt.refine.config import RefineConfig
+from dnt.refine.events import Decision, EventKind
+from dnt.refine.hints import ReclassHint, read_reclass_hints
+from dnt.refine.screen import ScreenContext, propose_screen
+from dnt.refine.verify import Band, route_without_vlm
 
 from ._fixtures import box_rows, table
 
@@ -3622,13 +3623,13 @@ def test_read_reclass_hints(tmp_path, caplog):
 
 - [ ] **Step 2: Run to verify failure**
 
-Run: `.venv/bin/python -m pytest tests/post/test_screen.py -v`
+Run: `.venv/bin/python -m pytest tests/refine/test_screen.py -v`
 Expected: FAIL with `ModuleNotFoundError`.
 
 - [ ] **Step 3: Implement `hints.py`**
 
 ```python
-# src/dnt/post/hints.py
+# src/dnt/refine/hints.py
 """Optional external cue files: ReClass hints (spec 2.5, 6.2)."""
 
 from __future__ import annotations
@@ -3680,7 +3681,7 @@ def read_reclass_hints(path, known_raw_ids) -> dict[int, ReclassHint]:
 - [ ] **Step 4: Implement `screen.py`**
 
 ```python
-# src/dnt/post/screen.py
+# src/dnt/refine/screen.py
 """Stage 2: false-track screening, and the orphan pass (spec 6.2)."""
 
 from __future__ import annotations
@@ -3984,14 +3985,14 @@ def propose_screen(
 
 - [ ] **Step 5: Run tests**
 
-Run: `.venv/bin/python -m pytest tests/post/test_screen.py -v && .venv/bin/ruff check src/dnt/post`
+Run: `.venv/bin/python -m pytest tests/refine/test_screen.py -v && .venv/bin/ruff check src/dnt/refine`
 Expected: all PASS; ruff clean.
 
 - [ ] **Step 6: Commit**
 
 ```bash
-git add src/dnt/post/hints.py src/dnt/post/screen.py tests/post/test_screen.py
-git commit -m "feat(post): add stage 2 screening (static, in-vehicle, rider, duplicate, segments)
+git add src/dnt/refine/hints.py src/dnt/refine/screen.py tests/refine/test_screen.py
+git commit -m "feat(refine): add stage 2 screening (static, in-vehicle, rider, duplicate, segments)
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ```
@@ -4001,8 +4002,8 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ### Task 13: The orphan pass
 
 **Files:**
-- Modify: `src/dnt/post/screen.py` (append)
-- Test: `tests/post/test_orphan.py`
+- Modify: `src/dnt/refine/screen.py` (append)
+- Test: `tests/refine/test_orphan.py`
 
 **Interfaces:**
 - Produces: `screen.propose_orphans(work, cfg, fps, *, linked_tracks: set[int], pending_endpoints: set[int]) -> tuple[list[Event], list[int]]`. It returns the events and the deferred track IDs. Events use `stage="orphan"` and `params={"reason": "orphan", "spans": None}`.
@@ -4010,12 +4011,12 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 - [ ] **Step 1: Write the failing tests**
 
 ```python
-# tests/post/test_orphan.py
+# tests/refine/test_orphan.py
 import pytest
 
-from dnt.post import io
-from dnt.post.config import RefineConfig
-from dnt.post.screen import propose_orphans
+from dnt.refine import io
+from dnt.refine.config import RefineConfig
+from dnt.refine.screen import propose_orphans
 
 from ._fixtures import box_rows, table
 
@@ -4051,7 +4052,7 @@ def test_nearly_long_enough_track_scores_below_reject():
 
 - [ ] **Step 2: Run to verify failure**
 
-Run: `.venv/bin/python -m pytest tests/post/test_orphan.py -v`
+Run: `.venv/bin/python -m pytest tests/refine/test_orphan.py -v`
 Expected: FAIL with `ImportError: cannot import name 'propose_orphans'`.
 
 - [ ] **Step 3: Implement (append to `screen.py`)**
@@ -4090,14 +4091,14 @@ def propose_orphans(
 
 - [ ] **Step 4: Run tests**
 
-Run: `.venv/bin/python -m pytest tests/post/test_orphan.py tests/post/test_screen.py -v && .venv/bin/ruff check src/dnt/post`
+Run: `.venv/bin/python -m pytest tests/refine/test_orphan.py tests/refine/test_screen.py -v && .venv/bin/ruff check src/dnt/refine`
 Expected: all PASS.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/dnt/post/screen.py tests/post/test_orphan.py
-git commit -m "feat(post): add the orphan pass with deferral for pending links
+git add src/dnt/refine/screen.py tests/refine/test_orphan.py
+git commit -m "feat(refine): add the orphan pass with deferral for pending links
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ```
@@ -4106,8 +4107,8 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ### Task 14: Stage 3 — descriptors, gates, scoring, and legacy mode
 
 **Files:**
-- Modify: `src/dnt/post/link.py` (new imports at the top; new code appended after `link_tracklets`)
-- Test: `tests/post/test_link_scoring.py`
+- Modify: `src/dnt/refine/link.py` (new imports at the top; new code appended after `link_tracklets`)
+- Test: `tests/refine/test_link_scoring.py`
 
 **Interfaces:**
 - Consumes:
@@ -4116,7 +4117,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
   - `features.track_embeddings`
   - `apply.lineage_of_rows`
   - `config.to_frames`
-- Produces (in `dnt.post.link`):
+- Produces (in `dnt.refine.link`):
   - `STAGE = "link"`
   - `TrackDesc` (dataclass). Fields: `track, frames, boxes, cls_major, cls_last, h_end, h_start, vel, speed_static, speed_end, speed_start, end_clean, start_clean, lineage`. Properties: `t_s, t_e, start_box, end_box, start_c, end_c`. Method: `legacy() -> dict`.
   - `describe_tracks(work, cfg, fps, occluded) -> dict[int, TrackDesc]`
@@ -4127,16 +4128,16 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 - [ ] **Step 1: Write the failing tests**
 
 ```python
-# tests/post/test_link_scoring.py
+# tests/refine/test_link_scoring.py
 import numpy as np
 import pytest
 
-from dnt.post import io
-from dnt.post.apply import merge_chains
-from dnt.post.config import RefineConfig
-from dnt.post.features import ArrayAppearance
-from dnt.post.link import legacy_link_events, link_tracklets, score_candidates
-from dnt.post.primitives import occlusion_flags
+from dnt.refine import io
+from dnt.refine.apply import merge_chains
+from dnt.refine.config import RefineConfig
+from dnt.refine.features import ArrayAppearance
+from dnt.refine.link import legacy_link_events, link_tracklets, score_candidates
+from dnt.refine.primitives import occlusion_flags
 
 from ._fixtures import box_rows, load_raw, table
 
@@ -4253,12 +4254,12 @@ def test_legacy_mode_matches_link_tracklets_grouping(seed):
 
 - [ ] **Step 2: Run to verify failure**
 
-Run: `.venv/bin/python -m pytest tests/post/test_link_scoring.py -v`
+Run: `.venv/bin/python -m pytest tests/refine/test_link_scoring.py -v`
 Expected: FAIL with `ImportError: cannot import name 'score_candidates'`.
 
 - [ ] **Step 3: Implement**
 
-Replace the import block at the top of `src/dnt/post/link.py` (below the module docstring) with:
+Replace the import block at the top of `src/dnt/refine/link.py` (below the module docstring) with:
 
 ```python
 from __future__ import annotations
@@ -4607,14 +4608,14 @@ def legacy_link_events(work, cfg: RefineConfig, fps: float) -> list[Event]:
 
 - [ ] **Step 4: Run tests**
 
-Run: `.venv/bin/python -m pytest tests/post/test_link_scoring.py tests/post/test_link_legacy.py tests/test_post_independence.py -v && .venv/bin/ruff check src/dnt/post`
+Run: `.venv/bin/python -m pytest tests/refine/test_link_scoring.py tests/refine/test_link_legacy.py tests/test_refine_independence.py -v && .venv/bin/ruff check src/dnt/refine`
 Expected: all PASS; ruff clean.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/dnt/post/link.py tests/post/test_link_scoring.py
-git commit -m "feat(post): add stage 3 gates and scoring (normal, static, occluded, overlap) + legacy
+git add src/dnt/refine/link.py tests/refine/test_link_scoring.py
+git commit -m "feat(refine): add stage 3 gates and scoring (normal, static, occluded, overlap) + legacy
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ```
@@ -4624,11 +4625,11 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ### Task 15: Stage 3 — assignment passes, frozen pairs, chains
 
 **Files:**
-- Modify: `src/dnt/post/link.py` (append; the import block becomes the one shown in Step 3)
-- Test: `tests/post/test_link_passes.py`
+- Modify: `src/dnt/refine/link.py` (append; the import block becomes the one shown in Step 3)
+- Test: `tests/refine/test_link_passes.py`
 
 **Interfaces:**
-- Produces (in `dnt.post.link`):
+- Produces (in `dnt.refine.link`):
   - `assign_in_passes(cands, cfg, *, make_event: Callable[[Candidate, float, dict], Event], route: Callable[[list[Event]], None]) -> list[Event]`
   - `resolve_chains(accepted, descs, overlap_frames) -> tuple[list[tuple[int, int]], list[Event]]`
   - `LinkStageResult(events, accepted, pending_endpoints, skipped)`
@@ -4638,22 +4639,22 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 - [ ] **Step 1: Write the failing tests**
 
 ```python
-# tests/post/test_link_passes.py
+# tests/refine/test_link_passes.py
 import numpy as np
 import pytest
 
-from dnt.post import io
-from dnt.post.config import RefineConfig
-from dnt.post.events import Decision, Event, EventKind
-from dnt.post.link import (
+from dnt.refine import io
+from dnt.refine.config import RefineConfig
+from dnt.refine.events import Decision, Event, EventKind
+from dnt.refine.link import (
     Candidate,
     assign_in_passes,
     describe_tracks,
     resolve_chains,
     run_link_stage,
 )
-from dnt.post.primitives import occlusion_flags
-from dnt.post.verify import Band, decide, route_without_vlm
+from dnt.refine.primitives import occlusion_flags
+from dnt.refine.verify import Band, decide, route_without_vlm
 
 from ._fixtures import box_rows, table
 
@@ -4757,7 +4758,7 @@ def test_run_link_stage_links_collinear_fragments():
 
 - [ ] **Step 2: Run to verify failure**
 
-Run: `.venv/bin/python -m pytest tests/post/test_link_passes.py -v`
+Run: `.venv/bin/python -m pytest tests/refine/test_link_passes.py -v`
 Expected: FAIL with `ImportError: cannot import name 'assign_in_passes'`.
 
 - [ ] **Step 3: Implement (update the imports, then append to `link.py`)**
@@ -4954,35 +4955,36 @@ def run_link_stage(
 
 - [ ] **Step 4: Run tests**
 
-Run: `.venv/bin/python -m pytest tests/post/test_link_passes.py tests/post/test_link_scoring.py -v && .venv/bin/ruff check src/dnt/post`
+Run: `.venv/bin/python -m pytest tests/refine/test_link_passes.py tests/refine/test_link_scoring.py -v && .venv/bin/ruff check src/dnt/refine`
 Expected: all PASS; ruff clean.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/dnt/post/link.py tests/post/test_link_passes.py
-git commit -m "feat(post): add stage 3 assignment passes, frozen pairs, and chain resolution
+git add src/dnt/refine/link.py tests/refine/test_link_passes.py
+git commit -m "feat(refine): add stage 3 assignment passes, frozen pairs, and chain resolution
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ```
 
 ---
-### Task 16: `TrackRefiner.refine` and stage 4
+### Task 16: `TrackRefiner` (refine, refine_batch) and stage 4
 
 **Files:**
-- Create: `src/dnt/post/refiner.py`
-- Test: `tests/post/test_refiner.py`
+- Create: `src/dnt/refine/refiner.py`
+- Test: `tests/refine/test_refiner.py`
 
 **Interfaces:**
 - Consumes: everything above.
-- Produces (in `dnt.post.refiner`):
+- Produces (in `dnt.refine.refiner`):
   - `RefineResult(tracks, ledger_path, review_path, summary, events)`
   - `output_paths(out) -> dict[str, Path]`, with keys `ledger`, `review`, `features`
   - `resolve_fps(arg, cfg_fps, video_fps) -> tuple[float, str]`
   - `table_summary(work, fps) -> dict`
   - `fill_stage(work, cfg, fps, protected) -> tuple[pd.DataFrame, list[Event]]`
-  - `TrackRefiner(config=None, *, appearance_factory=None)`
-    - `refine(tracks, *, video=None, context=None, hints=None, fps=None, out, fmt="dnt") -> RefineResult`
+  - `TrackRefiner(config=None, config_yaml=None, device=None, *, appearance_factory=None)`. The shape follows `Tracker` (spec 2.4): pass `config` or `config_yaml`, not both, and `device` overrides `config.encoder.device`.
+    - `refine(track_file, out_file, video_file=None, context_file=None, reclass_file=None, fps=None, fmt="dnt", video_index=None, video_tot=None, message="", verbose=True) -> pd.DataFrame`. It returns the refined table, like `Tracker.track()`. The full result is on `refiner.last_result: RefineResult`.
+    - `refine_batch(track_files, video_files=None, output_path=None, context_files=None, reclass_files=None, fps=None, is_overwrite=False, is_report=True, message="", verbose=True) -> list[str]`. Files are paired by position. Outputs are `<output_path>/<base>_refined.txt`, where `<base>` is the stem without a trailing `_track`. Existing outputs are skipped unless `is_overwrite`, and skipped ones are still listed when `is_report`. `output_path` is required.
     - `appearance_factory(work=, video=, context=, fps=, config=)` returns `Appearance | None`. It is the seam Plan 2 fills.
   - Ledger header keys: `format, dnt_version, round, parent, config, inputs{tracks, video, context, hints, features}, fps, fps_source, frame_size, id_map, n_filled_input_rows_removed, smoothing, summary`.
   - Summary keys: `before, after, events` (`"stage/kind/decision" -> count`), `vlm`, `orphan_deferred` (final IDs), `filled_input_rows_removed`, `duplicate_input_rows_removed`.
@@ -4990,7 +4992,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 - [ ] **Step 1: Write the failing tests**
 
 ```python
-# tests/post/test_refiner.py
+# tests/refine/test_refiner.py
 import logging
 import sys
 
@@ -4998,10 +5000,10 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from dnt.post import io
-from dnt.post.config import RefineConfig
-from dnt.post.events import Decision, EventKind, Ledger
-from dnt.post.refiner import TrackRefiner
+from dnt.refine import io
+from dnt.refine.config import RefineConfig
+from dnt.refine.events import Decision, EventKind, Ledger
+from dnt.refine.refiner import TrackRefiner
 
 from ._fixtures import box_rows, table
 
@@ -5011,6 +5013,13 @@ def _write(dirpath, df, name="t.txt"):
     p = dirpath / name
     df.to_csv(p, index=False, header=False)
     return p
+
+
+def _refine(src, out, cfg=None, **kw):
+    refiner = TrackRefiner(cfg)
+    df = refiner.refine(src, out, verbose=False, **kw)
+    assert df is refiner.last_result.tracks
+    return refiner.last_result
 
 
 def _crit1_rows(offset=0):
@@ -5030,7 +5039,7 @@ def test_default_config_no_video_all_three_stages_score(tmp_path, monkeypatch):
     for name in ("transformers", "torchreid", "openai", "anthropic"):
         monkeypatch.setitem(sys.modules, name, None)  # a minimal install
     src = _write(tmp_path, table(_crit1_rows()))
-    res = TrackRefiner().refine(src, fps=10, out=tmp_path / "o.csv")
+    res = _refine(src, tmp_path / "o.csv", fps=10)
     assert {"switch", "screen", "link"} <= {e.stage for e in res.events}
     for e in res.events:
         if e.stage in ("switch", "screen"):
@@ -5048,8 +5057,7 @@ def test_default_config_no_video_all_three_stages_score(tmp_path, monkeypatch):
 def test_frame_offset_does_not_change_scores(tmp_path):
     def run(offset):
         d = tmp_path / f"o{offset}"
-        res = TrackRefiner().refine(_write(d, table(_crit1_rows(offset))), fps=10,
-                                    out=d / "o.csv")
+        res = _refine(_write(d, table(_crit1_rows(offset))), d / "o.csv", fps=10)
         return sorted((e.stage, str(e.kind), round(e.algo_score, 9)) for e in res.events)
 
     assert run(0) == run(120000)
@@ -5058,13 +5066,13 @@ def test_frame_offset_does_not_change_scores(tmp_path):
 def test_no_video_and_no_fps_fails_before_processing(tmp_path):
     src = _write(tmp_path, table(box_rows(1, range(5), 0.0, 0.0)))
     with pytest.raises(ValueError, match="fps="):
-        TrackRefiner().refine(src, out=tmp_path / "o.csv")
+        _refine(src, tmp_path / "o.csv")
     assert not (tmp_path / "o.csv").exists()
 
 
 def test_empty_track_file(tmp_path):
     (tmp_path / "e.txt").write_text("")
-    res = TrackRefiner().refine(tmp_path / "e.txt", fps=10, out=tmp_path / "o.csv")
+    res = _refine(tmp_path / "e.txt", tmp_path / "o.csv", fps=10)
     assert (tmp_path / "o.csv").read_text() == ""
     assert len(res.ledger_path.read_text().splitlines()) == 1 and res.events == []
 
@@ -5073,7 +5081,7 @@ def test_short_fragment_with_pending_link_is_deferred_not_dropped(tmp_path):
     rows = (box_rows(1, range(780, 821), 200.0, 500.0, vy=-5.0, w=50.0, h=50.0)
             + box_rows(2, [883], 160.0, 240.0, w=50.0, h=50.0)
             + box_rows(99, range(821, 883), 100.0, 150.0, vx=0.5, w=300.0, h=300.0))
-    res = TrackRefiner().refine(_write(tmp_path, table(rows)), fps=10, out=tmp_path / "o.csv")
+    res = _refine(_write(tmp_path, table(rows)), tmp_path / "o.csv", fps=10)
     link = [e for e in res.events if e.stage == "link" and e.tracks == [1, 2]]
     assert link and link[0].decision is Decision.HUMAN_PENDING
     assert link[0].params["gate"] == "occluded"
@@ -5089,7 +5097,7 @@ def test_filled_input_rows_are_removed_and_refilled_once(tmp_path):
     filled = table(box_rows(1, range(10, 15), 20.0, 0.0))
     filled["r3"] = 1
     src = _write(tmp_path, pd.concat([df, filled]))
-    res = TrackRefiner().refine(src, fps=10, out=tmp_path / "o.csv")
+    res = _refine(src, tmp_path / "o.csv", fps=10)
     assert res.summary["filled_input_rows_removed"] == 5
     fills = [e for e in res.events if e.kind is EventKind.FILL]
     assert len(fills) == 1 and fills[0].params == {"gap": [9, 15], "n_rows": 5}
@@ -5103,7 +5111,7 @@ def test_smoothing_writes_smooth_records(tmp_path):
     rows = box_rows(1, range(50), 100.0, 100.0, vx=2.0)
     for r in rows:
         r[2] += float(rng.normal(0, 3))
-    res = TrackRefiner(cfg).refine(_write(tmp_path, table(rows)), fps=10, out=tmp_path / "o.csv")
+    res = _refine(_write(tmp_path, table(rows)), tmp_path / "o.csv", cfg=cfg, fps=10)
     sm = [e for e in res.events if e.kind is EventKind.SMOOTH]
     assert len(sm) == 1 and sm[0].params["n_rows"] > 0 and sm[0].signals["max_shift_px"] > 0
     assert Ledger.read(res.ledger_path).header["smoothing"] is True
@@ -5113,7 +5121,7 @@ def test_video_supplies_fps_frame_size_and_fingerprint(tmp_path, synthetic_video
     video, _ = synthetic_video
     src = _write(tmp_path, table(box_rows(1, range(100), 10.0, 40.0, vx=1.5)))
     with caplog.at_level(logging.WARNING):
-        res = TrackRefiner().refine(src, video=video, out=tmp_path / "o.csv")
+        res = _refine(src, tmp_path / "o.csv", video_file=video)
     h = Ledger.read(res.ledger_path).header
     assert h["fps"] == pytest.approx(25.0) and h["fps_source"] == "video"
     assert h["frame_size"] == [320, 240]
@@ -5125,30 +5133,65 @@ def test_track_frames_beyond_the_video_are_rejected(tmp_path, synthetic_video):
     video, _ = synthetic_video
     src = _write(tmp_path, table(box_rows(1, range(495, 505), 0.0, 0.0)))
     with pytest.raises(ValueError, match="frame count"):
-        TrackRefiner().refine(src, video=video, out=tmp_path / "o.csv")
+        _refine(src, tmp_path / "o.csv", video_file=video)
+
+
+def test_refiner_api_matches_tracker(tmp_path):
+    cfg_file = tmp_path / "c.yaml"
+    cfg = RefineConfig.defaults("vehicle")
+    cfg.to_yaml(cfg_file)
+    refiner = TrackRefiner(config_yaml=str(cfg_file), device="cpu")
+    assert refiner.config.target == "vehicle" and refiner.config.encoder.device == "cpu"
+    with pytest.raises(ValueError, match="not both"):
+        TrackRefiner(config=cfg, config_yaml=str(cfg_file))
+    src = _write(tmp_path, table(box_rows(1, range(40), 100.0, 100.0, vx=2.0)))
+    df = refiner.refine(src, tmp_path / "o.csv", fps=10, verbose=False)
+    assert isinstance(df, pd.DataFrame) and refiner.last_result.ledger_path.exists()
+
+
+def test_refine_batch_names_skips_and_overwrites(tmp_path):
+    srcs = [_write(tmp_path / "in", table(box_rows(1, range(30), 0.0, 0.0, vx=2.0)), f"cam{i}_track.txt")
+            for i in (1, 2)]
+    out_dir = tmp_path / "out"
+    refiner = TrackRefiner()
+    with pytest.raises(ValueError, match="output_path"):
+        refiner.refine_batch(srcs, fps=10)
+    first = refiner.refine_batch(srcs, output_path=out_dir, fps=10, verbose=False)
+    assert first == [str(out_dir / "cam1_refined.txt"), str(out_dir / "cam2_refined.txt")]
+    assert (out_dir / "cam1_refined.ledger.jsonl").exists()
+    stamp = (out_dir / "cam1_refined.txt").stat().st_mtime_ns
+    assert refiner.refine_batch(srcs, output_path=out_dir, fps=10, verbose=False) == first
+    assert refiner.refine_batch(srcs, output_path=out_dir, fps=10, is_report=False,
+                                verbose=False) == []
+    assert (out_dir / "cam1_refined.txt").stat().st_mtime_ns == stamp
+    again = refiner.refine_batch(srcs[:1], output_path=out_dir, fps=10, is_overwrite=True,
+                                 verbose=False)
+    assert again == first[:1]
 ```
 
 - [ ] **Step 2: Run to verify failure**
 
-Run: `.venv/bin/python -m pytest tests/post/test_refiner.py -v`
-Expected: FAIL with `ModuleNotFoundError: No module named 'dnt.post.refiner'`.
+Run: `.venv/bin/python -m pytest tests/refine/test_refiner.py -v`
+Expected: FAIL with `ModuleNotFoundError: No module named 'dnt.refine.refiner'`.
 
 - [ ] **Step 3: Implement**
 
 ```python
-# src/dnt/post/refiner.py
+# src/dnt/refine/refiner.py
 """``TrackRefiner``: runs the refinement stages in order and writes the outputs (spec 3)."""
 
 from __future__ import annotations
 
 import logging
+import re
 from collections import Counter
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
+from tqdm import tqdm
 
 from .. import __version__
 from . import io
@@ -5165,7 +5208,7 @@ from .switch import propose_splits
 from .verify import Band, decide, route_without_vlm
 
 log = logging.getLogger(__name__)
-LEDGER_FORMAT = "dnt.post.ledger/1"
+LEDGER_FORMAT = "dnt.refine.ledger/1"
 
 
 @dataclass
@@ -5317,14 +5360,21 @@ class _Stages:
             e.id = f"{stage}-r0-{self.seq[stage]:06d}"
         self.events.extend(evs)
 
-    def run(self, work: pd.DataFrame) -> tuple[pd.DataFrame, list[Event]]:
-        """Run every enabled stage in the spec's order."""
+    def run(self, work: pd.DataFrame, tick: Callable[[str], None] | None = None
+            ) -> tuple[pd.DataFrame, list[Event]]:
+        """Run every enabled stage in the spec's order; ``tick(name)`` follows each stage."""
+        tick = tick or (lambda _name: None)
         occluded = occlusion_flags(work, self.ctx_boxes, self.cfg.encoder.occlusion_iou)
         work, split_raw, cuts = self._switch(work)
+        tick("switch")
         work = self._screen(work, split_raw, cuts)
+        tick("screen")
         work, protected, linked, pending = self._link(work, occluded)
+        tick("link")
         work = self._orphans(work, linked, pending)
+        tick("orphan")
         work = self._fill(work, protected)
+        tick("fill")
         return work, self.events
 
     def _switch(self, work):
@@ -5415,22 +5465,51 @@ class _Stages:
 
 
 class TrackRefiner:
-    """Refine a track file: split switches, screen false tracks, link, drop orphans, fill."""
+    """Refine track files after tracking; used like ``Detector`` and ``Tracker`` (spec 2.4)."""
 
-    def __init__(self, config: RefineConfig | None = None, *,
-                 appearance_factory: Callable[..., Appearance | None] | None = None):
-        """Use ``config`` (validated here); ``appearance_factory`` injects appearance."""
+    def __init__(
+        self,
+        config: RefineConfig | None = None,
+        config_yaml: str | None = None,
+        device: str | None = None,
+        *,
+        appearance_factory: Callable[..., Appearance | None] | None = None,
+    ) -> None:
+        """Configure once with ``config`` or ``config_yaml``; ``device`` sets ``encoder.device``."""
+        if config is not None and config_yaml is not None:
+            raise ValueError("pass config or config_yaml, not both")
+        if config_yaml is not None:
+            config = RefineConfig.from_yaml(config_yaml)
         self.config = config if config is not None else RefineConfig.defaults()
+        if device is not None:
+            self.config.encoder.device = device
         self.config.validate()
         self.appearance_factory = appearance_factory
+        self.last_result: RefineResult | None = None
 
-    def refine(self, tracks, *, video=None, context=None, hints: Mapping[str, str] | None = None,
-               fps: float | None = None, out, fmt: str = "dnt") -> RefineResult:
-        """Refine ``tracks`` and write ``out`` plus its ledger (spec 2.4, 2.5)."""
+    def refine(
+        self,
+        track_file,
+        out_file,
+        video_file=None,
+        context_file=None,
+        reclass_file=None,
+        fps: float | None = None,
+        fmt: str = "dnt",
+        video_index: int | None = None,
+        video_tot: int | None = None,
+        message: str | None = "",
+        verbose: bool = True,
+    ) -> pd.DataFrame:
+        """Refine one track file into ``out_file`` and write its ledger (spec 2.4, 2.5).
+
+        Returns the refined track table, like ``Tracker.track()``; ``self.last_result`` holds
+        the ledger path, summary, and events.
+        """
         cfg = self.config
-        out = Path(out)
+        out = Path(out_file)
         paths = output_paths(out)
-        vinfo = io.video_info(video) if video is not None else None
+        vinfo = io.video_info(video_file) if video_file is not None else None
         fps_val, fps_src = resolve_fps(fps, cfg.fps, vinfo["fps"] if vinfo else None)
         if cfg.frame_size:
             frame_size = tuple(int(v) for v in cfg.frame_size)
@@ -5438,33 +5517,40 @@ class TrackRefiner:
             frame_size = (vinfo["width"], vinfo["height"])
         else:
             frame_size = None
-        tin = io.read_tracks(tracks, fmt=fmt, class_id=cfg.class_ids[0])
+        tin = io.read_tracks(track_file, fmt=fmt, class_id=cfg.class_ids[0])
         work = tin.work
         if vinfo and len(work) and int(work["frame"].max()) > vinfo["frame_count"]:
             raise ValueError(
                 f"track frame {int(work['frame'].max())} exceeds the video's frame count "
                 f"{vinfo['frame_count']}; the track file does not belong to this video"
             )
-        ctx_boxes, ctx_fmt = (io.read_context(context, cfg.context.format)
-                              if context is not None else (None, None))
-        hint_path = (hints or {}).get("reclass")
-        hint_map = (read_reclass_hints(hint_path, set(work["raw_id"].unique().tolist()))
-                    if hint_path else {})
+        ctx_boxes, ctx_fmt = (io.read_context(context_file, cfg.context.format)
+                              if context_file is not None else (None, None))
+        hint_map = (read_reclass_hints(reclass_file, set(work["raw_id"].unique().tolist()))
+                    if reclass_file is not None else {})
         inputs = {
-            "tracks": _file_record(tracks, format=fmt),
-            "video": None if video is None else {
-                "path": str(video), "abs_path": str(Path(video).resolve()),
-                "fingerprint": io.video_fingerprint(video, vinfo["frame_count"]),
+            "tracks": _file_record(track_file, format=fmt),
+            "video": None if video_file is None else {
+                "path": str(video_file), "abs_path": str(Path(video_file).resolve()),
+                "fingerprint": io.video_fingerprint(video_file, vinfo["frame_count"]),
                 "frame_count": vinfo["frame_count"],
             },
-            "context": None if context is None else _file_record(context, format=ctx_fmt),
-            "hints": None if not hint_path else {"reclass": _file_record(hint_path)},
+            "context": None if context_file is None else _file_record(context_file,
+                                                                        format=ctx_fmt),
+            "hints": None if reclass_file is None else {"reclass": _file_record(reclass_file)},
             "features": None,
         }
         before = table_summary(work, fps_val)
-        appearance = self._appearance(work, video, ctx_boxes, fps_val)
+        appearance = self._appearance(work, video_file, ctx_boxes, fps_val)
         stages = _Stages(cfg, fps_val, frame_size, appearance, ctx_boxes, ctx_fmt, hint_map)
-        work, events = stages.run(work)
+        desc = ("Refining" if video_index is None or video_tot is None
+                else f"Refining {video_index} of {video_tot}")
+        if message:
+            desc += f" {message}"
+        with tqdm(total=5, desc=desc, unit=" stage", disable=not verbose) as pbar:
+            work, events = stages.run(
+                work, tick=lambda name: (pbar.set_postfix_str(name), pbar.update(1))
+            )
         work, id_map = renumber(work)
         io.write_tracks(work, out)
         summary = {
@@ -5485,28 +5571,73 @@ class TrackRefiner:
         }
         Ledger(header, events).write(paths["ledger"])
         log.info("refined %s: %s", out, summary["events"])
-        return RefineResult(tracks=work, ledger_path=paths["ledger"], review_path=None,
-                            summary=summary, events=events)
+        self.last_result = RefineResult(tracks=work, ledger_path=paths["ledger"],
+                                        review_path=None, summary=summary, events=events)
+        return work
+
+    def refine_batch(
+        self,
+        track_files: Sequence,
+        video_files: Sequence | None = None,
+        output_path=None,
+        context_files: Sequence | None = None,
+        reclass_files: Sequence | None = None,
+        fps: float | None = None,
+        is_overwrite: bool = False,
+        is_report: bool = True,
+        message: str | None = "",
+        verbose: bool = True,
+    ) -> list[str]:
+        """Refine several track files, like ``Tracker.track_batch`` (spec 2.4).
+
+        Files are paired by position. Each output is ``<output_path>/<base>_refined.txt``,
+        where ``<base>`` is the track file's stem without a trailing ``_track``. Existing
+        outputs are skipped unless ``is_overwrite``; with ``is_report`` they are still listed.
+        """
+        if output_path is None:
+            raise ValueError("refine_batch needs output_path: every run writes a ledger "
+                             "next to its output")
+        out_dir = Path(output_path)
+        out_dir.mkdir(parents=True, exist_ok=True)
+
+        def pick(seq, i):
+            return seq[i] if seq is not None and i < len(seq) else None
+
+        results: list[str] = []
+        total = len(track_files)
+        for i, track_file in enumerate(track_files):
+            base = re.sub(r"_track$", "", Path(track_file).stem)
+            out = out_dir / f"{base}_refined.txt"
+            if out.exists() and not is_overwrite:
+                if is_report:
+                    results.append(str(out))
+                continue
+            self.refine(track_file, out, video_file=pick(video_files, i),
+                        context_file=pick(context_files, i),
+                        reclass_file=pick(reclass_files, i), fps=fps, video_index=i + 1,
+                        video_tot=total, message=message, verbose=verbose)
+            results.append(str(out))
+        return results
 
     def _appearance(self, work, video, context, fps) -> Appearance | None:
         if self.appearance_factory is not None:
             return self.appearance_factory(work=work, video=video, context=context, fps=fps,
                                            config=self.config)
         if video is not None and self.config.encoder.kind != "none":
-            log.warning("appearance encoders arrive in dnt.post Plan 2; running motion-only")
+            log.warning("appearance encoders arrive in dnt.refine Plan 2; running motion-only")
         return None
 ```
 
 - [ ] **Step 4: Run tests**
 
-Run: `.venv/bin/python -m pytest tests/post/test_refiner.py -v && .venv/bin/ruff check src/dnt/post`
+Run: `.venv/bin/python -m pytest tests/refine/test_refiner.py -v && .venv/bin/ruff check src/dnt/refine`
 Expected: all PASS; ruff clean.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/dnt/post/refiner.py tests/post/test_refiner.py
-git commit -m "feat(post): add TrackRefiner.refine with stage 4, ledger header, and summary
+git add src/dnt/refine/refiner.py tests/refine/test_refiner.py
+git commit -m "feat(refine): add TrackRefiner.refine with stage 4, ledger header, and summary
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ```
@@ -5516,30 +5647,30 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ### Task 17: Public API, `dnt-refine run`, packaging, and docs
 
 **Files:**
-- Modify: `src/dnt/post/__init__.py`
-- Create: `src/dnt/post/cli.py`
+- Modify: `src/dnt/refine/__init__.py`
+- Create: `src/dnt/refine/cli.py`
 - Modify: `pyproject.toml` (add `[project.scripts]`)
-- Create: `docs/api/post/index.md`, `refiner.md`, `config.md`, `events.md`, `interpolate.md`, `link.md`
+- Create: `docs/api/refine/index.md`, `refiner.md`, `config.md`, `events.md`, `interpolate.md`, `link.md`
 - Modify: `mkdocs.yml` (nav), `docs/api/track/post_process.md`, `docs/changelog.md`
-- Test: `tests/post/test_cli.py`
+- Test: `tests/refine/test_cli.py`
 
 **Interfaces:**
 - Produces:
-  - `dnt.post.__all__ = ["RefineConfig", "RefineResult", "TrackRefiner", "interpolate_tracks_rts", "link_tracklets"]`
-  - `dnt.post.cli.main(argv=None) -> int`, which returns 0 on success and 2 on `ValueError` / `FileNotFoundError`
+  - `dnt.refine.__all__ = ["RefineConfig", "RefineResult", "TrackRefiner", "interpolate_tracks_rts", "link_tracklets"]`
+  - `dnt.refine.cli.main(argv=None) -> int`, which returns 0 on success and 2 on `ValueError` / `FileNotFoundError`
   - The console script `dnt-refine`
 
 - [ ] **Step 1: Write the failing tests**
 
 ```python
-# tests/post/test_cli.py
+# tests/refine/test_cli.py
 import json
 import subprocess
 import sys
 import tomllib
 from pathlib import Path
 
-from dnt.post.config import RefineConfig
+from dnt.refine.config import RefineConfig
 
 from ._fixtures import box_rows, table
 
@@ -5554,7 +5685,7 @@ def _src(tmp_path):
 
 
 def _run(*args):
-    return subprocess.run([sys.executable, "-m", "dnt.post.cli", *map(str, args)],
+    return subprocess.run([sys.executable, "-m", "dnt.refine.cli", *map(str, args)],
                           capture_output=True, text=True)
 
 
@@ -5576,25 +5707,25 @@ def test_cli_reports_errors_with_exit_code_2(tmp_path):
 
 def test_entry_point_is_declared():
     scripts = tomllib.loads((ROOT / "pyproject.toml").read_text())["project"]["scripts"]
-    assert scripts["dnt-refine"] == "dnt.post.cli:main"
+    assert scripts["dnt-refine"] == "dnt.refine.cli:main"
 
 
 def test_public_api():
-    import dnt.post as post
+    import dnt.refine as refine
 
-    assert set(post.__all__) == {"RefineConfig", "RefineResult", "TrackRefiner",
+    assert set(refine.__all__) == {"RefineConfig", "RefineResult", "TrackRefiner",
                                  "interpolate_tracks_rts", "link_tracklets"}
 ```
 
 - [ ] **Step 2: Run to verify failure**
 
-Run: `.venv/bin/python -m pytest tests/post/test_cli.py -v`
-Expected: FAIL (`No module named dnt.post.cli`, `KeyError: 'scripts'`, and `__all__` is missing).
+Run: `.venv/bin/python -m pytest tests/refine/test_cli.py -v`
+Expected: FAIL (`No module named dnt.refine.cli`, `KeyError: 'scripts'`, and `__all__` is missing).
 
 - [ ] **Step 3: Implement the public API and CLI**
 
 ```python
-# src/dnt/post/__init__.py
+# src/dnt/refine/__init__.py
 """Track refinement: switch splitting, false-track screening, linking, and gap filling.
 
 Design: docs/superpowers/specs/2026-09-27-track-refinement-design.md.
@@ -5610,7 +5741,7 @@ __all__ = ["RefineConfig", "RefineResult", "TrackRefiner", "interpolate_tracks_r
 ```
 
 ```python
-# src/dnt/post/cli.py
+# src/dnt/refine/cli.py
 """Command-line entry point ``dnt-refine`` (spec 2.4)."""
 
 from __future__ import annotations
@@ -5620,7 +5751,6 @@ import json
 import logging
 import sys
 
-from .config import RefineConfig
 from .refiner import TrackRefiner
 
 
@@ -5649,12 +5779,12 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
     try:
-        cfg = RefineConfig.from_yaml(args.config)
-        res = TrackRefiner(cfg).refine(
-            args.tracks, video=args.video, context=args.context,
-            hints={"reclass": args.reclass_hints} if args.reclass_hints else None,
-            fps=args.fps, out=args.out, fmt=args.format,
+        refiner = TrackRefiner(config_yaml=args.config)
+        refiner.refine(
+            args.tracks, args.out, video_file=args.video, context_file=args.context,
+            reclass_file=args.reclass_hints, fps=args.fps, fmt=args.format, verbose=False,
         )
+        res = refiner.last_result
     except (ValueError, FileNotFoundError) as exc:
         print(f"dnt-refine: error: {exc}", file=sys.stderr)
         return 2
@@ -5671,47 +5801,57 @@ In `pyproject.toml`, after `[project.optional-dependencies]`, add:
 
 ```toml
 [project.scripts]
-dnt-refine = "dnt.post.cli:main"
+dnt-refine = "dnt.refine.cli:main"
 ```
 
 Re-install so the entry point exists: `.venv/bin/pip install -e . --no-deps -q`.
 
 - [ ] **Step 4: Write the docs**
 
-`docs/api/post/index.md`:
+`docs/api/refine/index.md`:
 
-```markdown
-# Track Refinement (`dnt.post`)
+````markdown
+# Track Refinement (`dnt.refine`)
 
-`dnt.post` refines a track file after tracking: it splits ID switches, screens false tracks,
+`dnt.refine` refines a track file after tracking: it splits ID switches, screens false tracks,
 links fragments (including across static waits and witnessed occlusions), drops orphans, and
 fills gaps. Every edit is recorded in a JSONL ledger next to the output.
 
-Command line: `dnt-refine run TRACKS --fps 10 --config refine.yaml --out clean.csv`.
+Used like `Detector` and `Tracker`:
 
-::: dnt.post
+```python
+from dnt.refine import RefineConfig, TrackRefiner
+
+refiner = TrackRefiner(config=RefineConfig.defaults("vehicle"))  # or config_yaml="veh.yaml"
+tracks = refiner.refine("cam1_track.txt", "cam1_refined.txt", video_file="cam1.mp4")
+refiner.refine_batch(track_files, video_files=video_files, output_path="refined/")
 ```
 
-`docs/api/post/refiner.md`, `config.md`, `events.md`, `interpolate.md`, `link.md` each contain one heading and one directive. For example, `refiner.md` is:
+Command line: `dnt-refine run TRACKS --fps 10 --config refine.yaml --out clean.csv`.
+
+::: dnt.refine
+````
+
+`docs/api/refine/refiner.md`, `config.md`, `events.md`, `interpolate.md`, `link.md` each contain one heading and one directive. For example, `refiner.md` is:
 
 ```markdown
 # Refiner
 
-::: dnt.post.refiner
+::: dnt.refine.refiner
 ```
 
-The others use `::: dnt.post.config` (heading "Configuration"), `::: dnt.post.events` ("Events and Ledger"), `::: dnt.post.interpolate` ("Interpolation"), and `::: dnt.post.link` ("Linking").
+The others use `::: dnt.refine.config` (heading "Configuration"), `::: dnt.refine.events` ("Events and Ledger"), `::: dnt.refine.interpolate` ("Interpolation"), and `::: dnt.refine.link` ("Linking").
 
 In `mkdocs.yml`, insert this after the `- Tracking:` block (same indentation as `- Engine:`):
 
 ```yaml
       - Track Refinement:
-          - api/post/index.md
-          - Refiner: api/post/refiner.md
-          - Configuration: api/post/config.md
-          - Events and Ledger: api/post/events.md
-          - Interpolation: api/post/interpolate.md
-          - Linking: api/post/link.md
+          - api/refine/index.md
+          - Refiner: api/refine/refiner.md
+          - Configuration: api/refine/config.md
+          - Events and Ledger: api/refine/events.md
+          - Interpolation: api/refine/interpolate.md
+          - Linking: api/refine/link.md
 ```
 
 Replace `docs/api/track/post_process.md` with:
@@ -5719,12 +5859,12 @@ Replace `docs/api/track/post_process.md` with:
 ```markdown
 # Post Processing
 
-`interpolate_tracks_rts` and `link_tracklets` moved to [`dnt.post`](../post/index.md).
+`interpolate_tracks_rts` and `link_tracklets` moved to [`dnt.refine`](../refine/index.md).
 `dnt.track.post_process` still re-exports them.
 
-::: dnt.post.interpolate.interpolate_tracks_rts
+::: dnt.refine.interpolate.interpolate_tracks_rts
 
-::: dnt.post.link.link_tracklets
+::: dnt.refine.link.link_tracklets
 ```
 
 At the top of `docs/changelog.md`, below `# Changelog`, add:
@@ -5733,15 +5873,16 @@ At the top of `docs/changelog.md`, below `# Changelog`, add:
 ## Unreleased
 
 ### New
-- `dnt.post` track refinement: `TrackRefiner` and `dnt-refine run` split ID switches, screen
+- `dnt.refine` track refinement: `TrackRefiner` (`refine`, `refine_batch`, used like `Tracker`)
+  and `dnt-refine run` split ID switches, screen
   false tracks, link fragments (including static waits and occlusion-witnessed gaps), drop
   orphans, and fill gaps. Every edit is recorded in a JSONL ledger next to the output. This
   release scores with motion only; appearance encoders, VLM verification, review pages, and
   replay follow.
 
 ### Changed
-- `interpolate_tracks_rts` and `link_tracklets` moved to `dnt.post`. `dnt.track.post_process`
-  re-exports them, and `Filter.interpolate_tracks_rts` now calls `dnt.post.interpolate`.
+- `interpolate_tracks_rts` and `link_tracklets` moved to `dnt.refine`. `dnt.track.post_process`
+  re-exports them, and `Filter.interpolate_tracks_rts` now calls `dnt.refine.interpolate`.
 - `interpolate_tracks_rts` no longer uses rows flagged as filled (`interp`/`r3` equal to 1) as
   measurements, and accepts `protected_gaps`. Output for raw tracker files is unchanged.
 ```
@@ -5750,23 +5891,23 @@ At the top of `docs/changelog.md`, below `# Changelog`, add:
 
 Run:
 ```bash
-.venv/bin/python -m pytest tests/post/test_cli.py -v
+.venv/bin/python -m pytest tests/refine/test_cli.py -v
 .venv/bin/python -m pytest
 .venv/bin/ruff check src tests tools
-.venv/bin/ruff format --check src/dnt/post
+.venv/bin/ruff format --check src/dnt/refine
 .venv/bin/mkdocs --version && .venv/bin/mkdocs build --strict --site-dir "$(mktemp -d)"
 ```
 Expected:
 - The CLI tests PASS.
 - The full default suite PASSES with no failures.
-- Ruff is clean. If `ruff format --check` reports files, run `.venv/bin/ruff format src/dnt/post` and re-run the tests.
+- Ruff is clean. If `ruff format --check` reports files, run `.venv/bin/ruff format src/dnt/refine` and re-run the tests.
 - If mkdocs is installed, the strict build succeeds. (`site/` is committed build output; never regenerate it here.) If `mkdocs --version` fails, the docs extra is not installed. Note that in the handoff; it is not a failure.
 
 - [ ] **Step 6: Commit**
 
 ```bash
-git add src/dnt/post/__init__.py src/dnt/post/cli.py pyproject.toml docs/api/post docs/api/track/post_process.md mkdocs.yml docs/changelog.md tests/post/test_cli.py
-git commit -m "feat(post): add public API, dnt-refine run CLI, API docs, and changelog
+git add src/dnt/refine/__init__.py src/dnt/refine/cli.py pyproject.toml docs/api/refine docs/api/track/post_process.md mkdocs.yml docs/changelog.md tests/refine/test_cli.py
+git commit -m "feat(refine): add public API, dnt-refine run CLI, API docs, and changelog
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ```

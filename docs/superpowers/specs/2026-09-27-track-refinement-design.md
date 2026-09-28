@@ -1,9 +1,9 @@
-# dnt.post: Track Refinement with Algorithmic Screening and VLM Verification
+# dnt.refine: Track Refinement with Algorithmic Screening and VLM Verification
 
 - **Status:** approved 2026-09-28 (rev. 7: addresses [review 2026-09-28 11:24](../../review_2026-09-28_11-24-44.md) / [response](../../response_2026-09-28_11-24-44.md); rev. 6: addresses [review 2026-09-28 11:05](../../review_2026-09-28_11-05-56.md) / [response](../../response_2026-09-28_11-05-56.md); rev. 5: addresses [review 2026-09-28 10:31](../../review_2026-09-28_10-31-56.md) / [response](../../response_2026-09-28_10-31-56.md); rev. 4: addresses [review 2026-09-28 09:53](../../review_2026-09-28_09-53-41.md) / [response](../../response_2026-09-28_09-53-41.md); rev. 3: occlusion-witnessed linking, takeover gates, class groups; rev. 2: reuse of existing dnt post-processing, no location-based filtering)
 - **Date:** 2026-09-27
 - **Baseline:** dnt 0.3.3 (`a290821`)
-- **Roadmap:** [`design/dnt-0.4-upgrade.md`](../../../design/dnt-0.4-upgrade.md). This work belongs to sub-project F (new capabilities). It adopts the `dnt/post/` location from §3 of the roadmap. It does not depend on sub-projects B–E, because its only inputs are a track file and a video.
+- **Roadmap:** [`design/dnt-0.4-upgrade.md`](../../../design/dnt-0.4-upgrade.md). This work belongs to sub-project F (new capabilities). It lives in `dnt/refine/`, a verb-named package like `dnt.detect`, `dnt.track`, `dnt.label` and `dnt.filter`, and supersedes the roadmap's `dnt/post/` name for this work. It does not depend on sub-projects B–E, because its only inputs are a track file and a video.
 
 ## 0. Context and agreed constraints
 
@@ -45,8 +45,8 @@ The correct result: split #12 at about frame 821, give the truck part its own ID
 - a review report of the edits that need a person.
 
 **In scope**
-1. New subpackage `dnt.post`, with the event model, ledger, four stages plus an orphan pass, evidence builder, VLM backends, review and audit reports, `TrackRefiner`, `RefineConfig`, and a `dnt-refine` CLI.
-2. Moving `interpolate_tracks_rts` and `link_tracklets` into `dnt.post`, leaving a re-export shim at `dnt.track.post_process`, and pointing the `Filter.interpolate_tracks_rts` wrapper at the new location.
+1. New subpackage `dnt.refine`, with the event model, ledger, four stages plus an orphan pass, evidence builder, VLM backends, review and audit reports, `TrackRefiner`, `RefineConfig`, and a `dnt-refine` CLI.
+2. Moving `interpolate_tracks_rts` and `link_tracklets` into `dnt.refine`, leaving a re-export shim at `dnt.track.post_process`, and pointing the `Filter.interpolate_tracks_rts` wrapper at the new location.
 3. Two appearance encoders behind optional extras.
 4. Tests, API docs page, and changelog entry.
 5. Reuse of dnt's existing post-processing code (§2.6):
@@ -63,13 +63,13 @@ The correct result: split #12 at about frame 821, give the truck part its own ID
 - An interactive review server. The review page is static HTML.
 
 **Success criteria**
-1. On an installation with none of the `post-*` extras, `refine` runs to completion on a 10-column track file, using the default config, with no video and the frame rate passed as `fps=` (`--fps`). All three proposal stages score the tracks, and every uncertain event ends up `HUMAN_PENDING`.
+1. On an installation with none of the `refine-*` extras, `refine` runs to completion on a 10-column track file, using the default config, with no video and the frame rate passed as `fps=` (`--fps`). All three proposal stages score the tracks, and every uncertain event ends up `HUMAN_PENDING`.
 2. On synthetic fixtures with injected faults (§11.1), each stage proposes the expected event, and the score lands in the expected band.
 3. Replay is deterministic.
    - Re-applying a ledger with a decisions file that changes no applied edit reproduces the output byte for byte, with no re-proposals and no VLM calls.
    - When a decision changes, `apply` re-proposes from the stage that owns the changed event, or from the first stage whose input changed, whichever comes first. It takes all inputs from the ledger header and verifies them. Unchanged events keep their earlier decisions and edits (§4.2).
    - Given the same inputs, ledger, decisions, and VLM cache, the output is byte-identical.
-4. `dnt.post` imports nothing from `dnt.track`, `dnt.detect`, `dnt.label`, `dnt.filter`, or `boxmot`. A test enforces this.
+4. `dnt.refine` imports nothing from `dnt.track`, `dnt.detect`, `dnt.label`, `dnt.filter`, or `boxmot`. A test enforces this.
 5. Existing `tests/test_post_process.py` passes unchanged through the shim.
 6. On the user's own clips, the audit (§8.2) reports per-stage precision of applied edits with confidence intervals. The precision targets are set by the user after the first audit, not by this spec.
 7. Stage 3 with `link.mode: legacy` reproduces `link_tracklets`'s track-ID mapping on the same input (§6.3).
@@ -79,7 +79,7 @@ The correct result: split #12 at about frame 821, give the truck part its own ID
 ### 2.1 Modules
 
 ```
-src/dnt/post/
+src/dnt/refine/
   __init__.py          # public API: TrackRefiner, RefineConfig, interpolate_tracks_rts, link_tracklets
   io.py                # read/write track CSV (dnt 10-col, MOTChallenge adapter); read detection CSV (context); column constants
   events.py            # Event, Decision, EventKind; Ledger (JSONL read/write, replay)
@@ -88,8 +88,8 @@ src/dnt/post/
   features.py          # TrackFeatures: per-track primitives + clean embeddings; .npz cache
   encoders/
     __init__.py        # AppearanceEncoder protocol, make_encoder(cfg)
-    dino.py            # DINOv2 encoder (extra: dnt[post-dino])
-    reid.py            # torchreid encoder (extra: dnt[post-reid])
+    dino.py            # DINOv2 encoder (extra: dnt[refine-dino])
+    reid.py            # torchreid encoder (extra: dnt[refine-reid])
   switch.py            # stage 1: SPLIT proposals
   screen.py            # stage 2: DROP / RECLASS proposals; orphan pass
   link.py              # stage 3: LINK proposals; contains the moved link_tracklets
@@ -114,7 +114,7 @@ Each module has one job. `screen.py`, `switch.py`, and `link.py` only **propose*
 
 ### 2.2 Dependency rule
 
-`dnt.post` may import `dnt.shared`, `dnt.engine`, and third-party libraries only. `dnt.engine` is pure numeric code. Its one native dependency, `cython_bbox`, is already a required dependency of dnt. It must not import `dnt.track`, `dnt.detect`, `dnt.label`, `dnt.filter`, or `boxmot`. `tests/test_post_independence.py` enforces this by importing `dnt.post` in a subprocess and checking `sys.modules`.
+`dnt.refine` may import `dnt.shared`, `dnt.engine`, and third-party libraries only. `dnt.engine` is pure numeric code. Its one native dependency, `cython_bbox`, is already a required dependency of dnt. It must not import `dnt.track`, `dnt.detect`, `dnt.label`, `dnt.filter`, or `boxmot`. `tests/test_refine_independence.py` enforces this by importing `dnt.refine` in a subprocess and checking `sys.modules`.
 
 Evidence rendering uses cv2 directly rather than `Labeler`, so the rule holds.
 
@@ -122,37 +122,53 @@ Encoders and VLM backends import their heavy dependencies (`transformers`, `torc
 
 ### 2.3 The move of existing functions
 
-- `interpolate_tracks_rts` moves to `dnt/post/interpolate.py`.
-- `link_tracklets` moves to `dnt/post/link.py`.
+- `interpolate_tracks_rts` moves to `dnt/refine/interpolate.py`.
+- `link_tracklets` moves to `dnt/refine/link.py`.
 
-Their signatures stay the same. `interpolate_tracks_rts` gets two backward-compatible changes (§6.4): rows flagged as filled are no longer used as measurements, and a new `protected_gaps` keyword marks gaps that must not be filled. For raw tracker output, which never contains filled rows, the output is unchanged. `dnt/track/post_process.py` becomes a shim: `from ..post.interpolate import interpolate_tracks_rts` and `from ..post.link import link_tracklets`, with `__all__`. That keeps `from dnt.track import link_tracklets` and existing scripts working. The shim direction (track → post) does not violate §2.2, which only restricts what `dnt.post` imports.
+Their signatures stay the same. `interpolate_tracks_rts` gets two backward-compatible changes (§6.4): rows flagged as filled are no longer used as measurements, and a new `protected_gaps` keyword marks gaps that must not be filled. For raw tracker output, which never contains filled rows, the output is unchanged. `dnt/track/post_process.py` becomes a shim: `from ..refine.interpolate import interpolate_tracks_rts` and `from ..refine.link import link_tracklets`, with `__all__`. That keeps `from dnt.track import link_tracklets` and existing scripts working. The shim direction (track → refine) does not violate §2.2, which only restricts what `dnt.refine` imports.
 
 Two pieces of existing code are **factored out and shared**, rather than copied:
 
 - **Link gates.** The gate and cost logic inside `link_tracklets` becomes module-level helpers in `link.py`: `_iou_xywh`, `_estimate_velocity`, and a new `_legacy_gate_cost(end, start, …) -> float | None`, which returns the legacy cost or `None` when a gate fails. Both `link_tracklets` and stage 3 call them. `link_tracklets`'s output does not change.
 - **Kalman model.** The Kalman setup inside `interpolate_tracks_rts` becomes `primitives.cv_kalman(process_var, meas_var_pos, meas_var_size)`. Stage 4 (through `interpolate_tracks_rts`) and stage 1's motion test (§5.2) both use it.
 
-`Filter.interpolate_tracks_rts` is a backward-compatible wrapper. It is changed to import from `dnt.post.interpolate`.
+`Filter.interpolate_tracks_rts` is a backward-compatible wrapper. It is changed to import from `dnt.refine.interpolate`.
 
 ### 2.4 Entry points
 
-```python
-from dnt.post import TrackRefiner, RefineConfig
+`TrackRefiner` follows the shape of `Detector` and `Tracker`:
+- a verb-named package, `dnt.refine`, like `dnt.detect` and `dnt.track`;
+- a class that is configured once, with `config=` or `config_yaml=`. `device=` overrides `encoder.device`, the way `Tracker(device=...)` does;
+- a per-file method that takes input and output paths and returns a DataFrame;
+- a batch method.
 
-cfg = RefineConfig.from_yaml("ped.yaml")
-result = TrackRefiner(cfg).refine(
-    "ped_tracks.csv",
-    video="cam1.mp4",                 # optional; without it, motion-only mode (§10)
-    context="veh_tracks.csv",         # optional; a track file or a detection file (§2.5)
-    hints={"reclass": "reclass.csv"}, # optional; ReClass output (§2.5, §6.2)
-    fps=None,                         # required when there is no video (§5.1)
-    out="ped_clean.csv",
+Common keywords match `Tracker.track`: `video_file`, `video_index`, `video_tot`, `message`, and `verbose` (a progress bar).
+
+```python
+from dnt.refine import RefineConfig, TrackRefiner
+
+refiner = TrackRefiner(config=RefineConfig.defaults("person"))  # or TrackRefiner(config_yaml="ped.yaml")
+tracks = refiner.refine(
+    "ped_track.txt", "ped_refined.txt",
+    video_file="cam1.mp4",         # optional; without it, motion-only mode (§10)
+    context_file="veh_track.txt",  # optional; a track file or a detection file (§2.5)
+    reclass_file="reclass.csv",    # optional; ReClass output (§2.5, §6.2)
+    fps=None,                      # required when there is no video (§5.1)
+)                                  # -> DataFrame, like Tracker.track()
+refiner.last_result                # RefineResult: tracks, ledger_path, review_path, summary, events
+
+refiner.refine_batch(track_files, video_files=video_files, output_path="refined/")  # -> list[str]
+
+tracks = refiner.apply(            # replay after review (§4.2); inputs come from the ledger header
+    "ped_refined.ledger.jsonl", "ped_refined_v2.txt", decisions_file="decisions.json",
 )
-result = TrackRefiner.apply(          # replay after review (§4.2); inputs, including the feature cache, come from the ledger header
-    "ped_clean.ledger.jsonl", decisions="decisions.json", out="ped_clean_v2.csv",
-)
-# result.tracks: DataFrame; result.ledger_path; result.review_path; result.summary
 ```
+
+**`refine_batch`.** Its signature is `refine_batch(track_files, video_files=None, output_path=None, context_files=None, reclass_files=None, fps=None, is_overwrite=False, is_report=True, message="", verbose=True) -> list[str]`.
+- **Pairing.** Files are matched by position, as in `track_batch`.
+- **Naming.** Each output is `<output_path>/<base>_refined.txt`, where `<base>` is the track file's stem with any trailing `_track` removed.
+- **Existing outputs** are skipped unless `is_overwrite`. With `is_report`, skipped outputs are still listed in the return value.
+- **`output_path` is required**, because every run writes a ledger next to its output.
 
 ```
 dnt-refine run    TRACKS [--video V] [--fps F] [--context C] [--reclass-hints R] --config CFG --out OUT
@@ -161,7 +177,7 @@ dnt-refine audit  --ledger L [--video V] --n 50 [--seed S]
 dnt-refine audit-score --ledger L --marks M.json
 ```
 
-The CLI is a thin `argparse` wrapper over `TrackRefiner`, registered as `[project.scripts] dnt-refine = "dnt.post.cli:main"`.
+The CLI is a thin `argparse` wrapper over `TrackRefiner`, registered as `[project.scripts] dnt-refine = "dnt.refine.cli:main"`.
 
 ### 2.5 Input and output contract
 
@@ -301,7 +317,7 @@ A JSONL file.
 - A VLM redirection, or a person's class choice, changes `edit` but not the key. On re-proposal, the same proposal gets the same key and takes over the recorded `edit`.
 - A decision about "cut raw track 12 at frame 821", or "link the raw-12 part ending at 820 to raw 81 starting at 883", keeps the same key however the tracks happen to be numbered.
 
-**Inputs for replay.** `TrackRefiner.apply(ledger, decisions=None, *, tracks=None, video=None, context=None, hints=None, features=None, vlm=True, fill=True, out)` takes its inputs from the ledger header. Each keyword overrides only the *location* of a recorded input, for example after files have moved. It never changes which input is used. Before any processing:
+**Inputs for replay.** `TrackRefiner.apply(ledger_file, out_file, decisions_file=None, *, track_file=None, video_file=None, context_file=None, reclass_file=None, features_file=None, vlm=True, fill=True, video_index=None, video_tot=None, message="", verbose=True) -> DataFrame` takes its inputs from the ledger header. Each `*_file` keyword overrides only the *location* of a recorded input, for example after files have moved. It never changes which input is used. Before any processing:
 - **Resolution.** Each recorded input is taken from its override if one is given, otherwise from its recorded path.
 - **Verification of defining inputs.** The **defining inputs** are `tracks`, `video`, `context`, and `hints`, because they determine the proposals. Each one's SHA-256 (the fingerprint, for the video) must equal the recorded value. A mismatch raises `ValueError`, naming the input and both hashes. The fix is to run `dnt-refine run` again: `apply` never re-proposes with different inputs.
 - **The feature cache is a derived input.** It is computed entirely from the defining inputs and the encoder settings, so it does not follow the rule above. A bad cache is a *cache miss*, never a different input. The rule for it is below.
@@ -411,15 +427,15 @@ For each stage, `accept_above` and `reject_below`, with `reject_below < accept_a
 ### 5.5 Appearance encoders
 
 - **Protocol:** `AppearanceEncoder.encode(crops: list[np.ndarray]) -> np.ndarray` (N×D, float32, L2-normalized), with `name` and `dim` properties.
-- **`dino`:** DINOv2 ViT-S/14 via `transformers` (`facebook/dinov2-small` by default, configurable). Uses the CLS token. Crops are resized to 224 on the long side and padded. Extra: `dnt[post-dino] = ["transformers>=4.40"]`.
-- **`reid`:** `torchreid` feature extractor. The default for `person` is `osnet_x1_0` with MSMT17 weights. The `vehicle` target has no default and needs `encoder.weights` (for example, VeRi-776 weights). Extra: `dnt[post-reid] = ["torchreid"]`.
+- **`dino`:** DINOv2 ViT-S/14 via `transformers` (`facebook/dinov2-small` by default, configurable). Uses the CLS token. Crops are resized to 224 on the long side and padded. Extra: `dnt[refine-dino] = ["transformers>=4.40"]`.
+- **`reid`:** `torchreid` feature extractor. The default for `person` is `osnet_x1_0` with MSMT17 weights. The `vehicle` target has no default and needs `encoder.weights` (for example, VeRi-776 weights). Extra: `dnt[refine-reid] = ["torchreid"]`.
 - **`none`:** no appearance. Stages 1 and 3 run in motion-only mode (§10). The video, if given, is still used for VLM evidence.
 - `RefineConfig.encoder.kind` selects the encoder. A config that is structurally wrong is rejected when it loads: an unknown kind, or `reid` for a vehicle without `weights`, raises `ValueError`.
 - **Dependency checks are deferred.** They run at the start of `refine` and `apply`, before any processing, and only for the components that run will use. The encoder's extra is required only when a video is given and `kind` is not `none`. A missing extra raises `ImportError` with the install command, and suggests `encoder.kind: none` as an alternative.
 
 ### 5.6 Geometry
 
-- IoU and IoB come from `dnt.engine.ious` and `dnt.engine.iobs`. `dnt.post` has no second implementation.
+- IoU and IoB come from `dnt.engine.ious` and `dnt.engine.iobs`. `dnt.refine` has no second implementation.
 - Runs of consecutive observed frames (gaps) come from `dnt.engine.cluster_by_gap`.
 - `ious` uses cython_bbox's pixel-inclusive convention, where a box's area is `(w+1)(h+1)`. The thresholds in §6 are applied to those values as they are. For boxes wider than about 20 px the difference is negligible.
 
@@ -763,7 +779,7 @@ class VLMBackend(Protocol):
   - API key from `vlm.api_key_env` (default `OPENAI_API_KEY`, optional for local servers).
   - Sends the image as a base64 data URL.
   - Requests `response_format={"type": "json_object"}` when `vlm.json_mode: true` (the default), and falls back to parsing JSON from the text.
-  - Extra: `dnt[post-vlm] = ["openai>=1.40", "anthropic>=0.40"]`.
+  - Extra: `dnt[refine-vlm] = ["openai>=1.40", "anthropic>=0.40"]`.
 - **`anthropic`**
   - Anthropic Messages API, sending the image as a base64 image block.
   - The key comes from `ANTHROPIC_API_KEY`.
@@ -793,7 +809,7 @@ class VLMBackend(Protocol):
 - for `LINK` events, the recorded next-best alternatives,
 - for partial screen events, the supported and unsupported segments,
 - accept and reject controls, plus a class picker for `RECLASS` and for screen events that the VLM redirected,
-- a copy-to-clipboard `Labeler.draw_track_clips(...)` snippet covering the event's tracks and frame span ±2 s, for events that need motion to judge. `dnt.post` does not import `Labeler`; it only prints the snippet.
+- a copy-to-clipboard `Labeler.draw_track_clips(...)` snippet covering the event's tracks and frame span ±2 s, for events that need motion to judge. `dnt.refine` does not import `Labeler`; it only prints the snippet.
 
 An **Export decisions** button downloads `decisions.json` in the §4.2 format.
 
@@ -815,7 +831,7 @@ That precision is how success is measured (§1, criterion 6) and how bands are t
 
 ### 8.3 Run summary
 
-The summary is written to the ledger header, printed at the end of the run, and returned as `result.summary`. It contains:
+The summary is written to the ledger header, printed at the end of the run, and available as `refiner.last_result.summary`. It contains:
 - tracks per class, before and after,
 - observed and interpolated row counts,
 - median observed track duration,
@@ -969,7 +985,7 @@ Durations in config are in seconds and are converted to frames with `fps`.
 
 All tests below run in the default suite (CPU, no network), except where a marker is named.
 
-### 11.1 Stage detectors, with synthetic tracks built in numpy (`tests/post/`)
+### 11.1 Stage detectors, with synthetic tracks built in numpy (`tests/refine/`)
 
 - `test_screen.py`:
   - a static box with low confidence repeated at one spot → static score at the cap, routed to the VLM band, never `AUTO_ACCEPT`.
@@ -1075,7 +1091,7 @@ All tests below run in the default suite (CPU, no network), except where a marke
   - the truck part has its own ID;
   - no rows are filled in the 63-frame gap, even with `fill.max_gap` raised to 100 frames.
 - `@pytest.mark.realdata` (new marker, excluded by default): the same checks on the real Miami track file and video, found through `DNT_REFINE_CASE_DIR`. That directory holds `tracks.txt`, `video.mp4`, and an `expected.yaml` listing the expected `SPLIT` and `LINK` events, with frame tolerance ±3.
-- `test_post_independence.py`: the §2.2 import rule.
+- `test_refine_independence.py`: the §2.2 import rule.
 - The existing `tests/test_post_process.py` passes unchanged through the shim. The existing `tests/test_filter.py` passes with the retargeted `Filter.interpolate_tracks_rts` wrapper.
 - `test_interpolate.py`:
   - An input with `interp == 1` rows → those rows are not used as measurements, and are either filled again with flag 1 or dropped. A raw tracker file → output identical to the pre-change function.
@@ -1098,19 +1114,19 @@ All tests below run in the default suite (CPU, no network), except where a marke
 ## 12. Packaging and documentation
 
 - **`pyproject.toml`**
-  - extras: `post-dino`, `post-reid`, `post-vlm`, and `post` (the union of those three).
+  - extras: `refine-dino`, `refine-reid`, `refine-vlm`, and `refine` (the union of those three).
   - `[project.scripts] dnt-refine`.
   - a `realdata` pytest marker, added to the default `-m` exclusions in `addopts`.
   - No new required dependencies.
 - **Docs**
-  - `docs/api/post.md`, pointing mkdocstrings at `dnt.post`, `dnt.post.config`, and `dnt.post.vlm`, plus a `mkdocs.yml` `nav` entry.
+  - `docs/api/refine.md`, pointing mkdocstrings at `dnt.refine`, `dnt.refine.config`, and `dnt.refine.vlm`, plus a `mkdocs.yml` `nav` entry.
   - A "Refining tracks" section in `docs/quickstart.md`, covering:
     - the pedestrian and vehicle YAML examples;
     - the review/audit loop;
     - producing ReClass hints with `match_class=[1, 3, 36]`;
     - the recommendation to run `Filter.deduplicate_boxes` on detections before tracking;
     - a note that location-based filtering is the next procedure and runs on the refined output.
-- **`docs/changelog.md`:** a new-feature entry, and a note that `dnt.track.post_process` is now a shim and that `Filter.interpolate_tracks_rts` points at `dnt.post`.
+- **`docs/changelog.md`:** a new-feature entry, and a note that `dnt.track.post_process` is now a shim and that `Filter.interpolate_tracks_rts` points at `dnt.refine`.
 - **Lint:** all new code is ruff-clean under the repo rules and numpy-style docstrings. Nothing is added to the legacy per-file baseline.
 - **Version:** this adds public API, so it ships in a minor release and not in a 0.3.x patch. The version number is picked when the release is cut, following the "bump both files" rule in CLAUDE.md.
 
