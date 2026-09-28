@@ -359,3 +359,34 @@ def propose_screen(
             signals={**signals, "hypothesis": name},
         ))
     return events
+
+
+def propose_orphans(
+    work: pd.DataFrame, cfg: RefineConfig, fps: float, *, linked_tracks: set[int],
+    pending_endpoints: set[int],
+) -> tuple[list[Event], list[int]]:
+    """Propose dropping short unlinked tracks; defer those with a pending link (spec 6.2)."""
+    oc = cfg.orphan
+    events: list[Event] = []
+    deferred: list[int] = []
+    for t, g in work.groupby("track", sort=True):
+        t = int(t)
+        if t in linked_tracks:
+            continue
+        observed = len(g) / fps
+        if observed >= oc.min_seconds:
+            continue
+        if t in pending_endpoints:
+            deferred.append(t)
+            continue
+        score = float(ramp(observed, *oc.ramp))
+        if score < oc.reject_below:
+            continue
+        g = g.sort_values("frame")
+        events.append(Event.propose(
+            stage=ORPHAN_STAGE, kind=EventKind.DROP, tracks=[t], lineage=[lineage_of_rows(g)],
+            frames=(int(g["frame"].iloc[0]), int(g["frame"].iloc[-1])),
+            params={"reason": "orphan", "spans": None}, algo_score=score,
+            signals={"observed_seconds": observed},
+        ))
+    return events, deferred
