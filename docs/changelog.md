@@ -1,5 +1,24 @@
 # Changelog
 
+## Unreleased
+
+### New
+- `dnt.refine` track refinement: `TrackRefiner` (`refine`, `refine_batch`, used like `Tracker`)
+  and `dnt-refine run`. They propose ID-switch splits, false-track drops and reclasses, and
+  fragment links, drop orphans, and fill gaps. Every proposal is recorded in a JSONL ledger
+  next to the output.
+- This release scores with motion only and applies only the edits it is sure of: false-track
+  drops and reclasses, links across short gaps and static waits, orphan drops, and filling.
+  ID-switch splits found from motion alone and links across occlusions are capped below
+  auto-accept. They are recorded as `HUMAN_PENDING` and not applied yet. Appearance encoders,
+  VLM verification, review pages, and applying review decisions follow in later releases.
+
+### Changed
+- `interpolate_tracks_rts` and `link_tracklets` moved to `dnt.refine`. `dnt.track.post_process`
+  re-exports them, and `Filter.interpolate_tracks_rts` now calls `dnt.refine.interpolate`.
+- `interpolate_tracks_rts` no longer uses rows flagged as filled (`interp`/`r3` equal to 1) as
+  measurements, and accepts `protected_gaps`. Output for raw tracker files is unchanged.
+
 ## 0.3.3 — 2026-09-26
 
 ### Important

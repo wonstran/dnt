@@ -48,6 +48,9 @@ dependencies = [
 dev = ["pytest", "pytest-cov", "ruff", "build"]
 docs = ["mkdocs-material", "mkdocstrings[python]", "mkdocs-with-pdf", "qrcode"]
 
+[project.scripts]
+dnt-refine = "dnt.refine.cli:main"
+
 [project.urls]
 Homepage = "https://github.com/wonstran/dnt"
 
