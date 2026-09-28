@@ -832,8 +832,8 @@ class Filter:
         video_index: int | None = None,
         video_tot: int | None = None,
     ) -> pd.DataFrame:
-        """Backward-compatible wrapper for :func:`dnt.track.post_process.interpolate_tracks_rts`."""
-        from ..track.post_process import interpolate_tracks_rts as _interpolate_tracks_rts
+        """Backward-compatible wrapper for :func:`dnt.refine.interpolate.interpolate_tracks_rts`."""
+        from ..refine.interpolate import interpolate_tracks_rts as _interpolate_tracks_rts
 
         return _interpolate_tracks_rts(
             tracks=tracks,
