@@ -120,3 +120,24 @@ def test_sha256_and_video_info(tmp_path, synthetic_video):
     assert info == {"fps": pytest.approx(25.0), "frame_count": 150, "width": 320, "height": 240}
     fp = io.video_fingerprint(video, info["frame_count"])
     assert fp["sha256"] == io.sha256_file(video) and fp["frame_count"] == 150
+
+
+def test_read_tracks_reports_true_file_line_with_blank_lines(tmp_path):
+    """Blank lines should not affect the reported line number."""
+    (tmp_path / "blank.txt").write_text("\n0,1,1,1,1,1,0.9,0,-1,-1\n\n0,1,abc,1,1,1,0.9,0,-1,-1\n")
+    with pytest.raises(ValueError, match="line 4"):
+        io.read_tracks(tmp_path / "blank.txt")
+
+
+def test_read_tracks_names_file_for_ragged_rows(tmp_path):
+    """ParserError on ragged rows should name the file."""
+    (tmp_path / "ragged.txt").write_text("0,1,1,1,1,1,0.9,0,-1,-1\n1,1,1,1,1,1,0.9,0,-1,-1,extra\n")
+    with pytest.raises(ValueError, match=r"ragged\.txt"):
+        io.read_tracks(tmp_path / "ragged.txt")
+
+
+def test_read_tracks_only_blank_lines(tmp_path):
+    """A file with only blank lines should read as an empty work table."""
+    (tmp_path / "blank_only.txt").write_text("\n\n\n")
+    tin = io.read_tracks(tmp_path / "blank_only.txt")
+    assert tin.work.empty and list(tin.work.columns) == io.WORK_COLUMNS

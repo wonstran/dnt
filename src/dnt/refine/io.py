@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import logging
 from dataclasses import dataclass
+from io import StringIO
 from pathlib import Path
 
 import numpy as np
@@ -37,10 +38,26 @@ def empty_work() -> pd.DataFrame:
 
 def _read_numeric_csv(path, min_cols: int, check_cols: int | None = None) -> pd.DataFrame:
     path = Path(path)
-    try:
-        raw = pd.read_csv(path, header=None, dtype=str, skip_blank_lines=True)
-    except pd.errors.EmptyDataError:
+    rows_list = []
+    true_line_map = []
+    line_num = 0
+    with Path(path).open("r") as f:
+        for line_num, line in enumerate(f, start=1):
+            line = line.rstrip("\n\r")
+            if not line.strip():
+                continue
+            rows_list.append(line)
+            true_line_map.append(line_num)
+    if not rows_list:
         return pd.DataFrame()
+    try:
+        raw = pd.read_csv(
+            StringIO("\n".join(rows_list)),
+            header=None,
+            dtype=str,
+        )
+    except pd.errors.ParserError as exc:
+        raise ValueError(f"{path}: {exc}") from exc
     if raw.shape[1] < min_cols:
         raise ValueError(f"{path}: expected at least {min_cols} columns, found {raw.shape[1]}")
     num = raw.apply(pd.to_numeric, errors="coerce")
@@ -49,7 +66,9 @@ def _read_numeric_csv(path, min_cols: int, check_cols: int | None = None) -> pd.
     if bad.any():
         i = int(np.flatnonzero(bad)[0])
         text = ",".join(raw.iloc[i].fillna("").tolist())
-        raise ValueError(f"{path}: non-numeric value on line {i + 1}: {text}")
+        true_line = true_line_map[i]
+        raise ValueError(f"{path}: non-numeric value on line {true_line}: {text}")
+    num = num.reset_index(drop=True)
     return num
 
 
