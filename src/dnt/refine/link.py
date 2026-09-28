@@ -884,7 +884,8 @@ def assign_in_passes(
     lc = cfg.link
     edges = {(c.i, c.j): c for c in cands if c.score >= lc.reject_below}
     by_edge: dict[tuple[int, int], Event] = {}
-    rejected_key: dict[int, str] = {}
+    rej_end: dict[int, Event] = {}  # END node i freed by the latest rejected (i, .)
+    rej_start: dict[int, Event] = {}  # START node j freed by the latest rejected (., j)
     events: list[Event] = []
     for p in range(1, lc.max_passes + 1):
         live = [e for e, ev in by_edge.items() if ev.decision not in REJECTED]
@@ -907,9 +908,9 @@ def assign_in_passes(
             extra = {"S_link": c.score, "margin": margin, "pass": p,
                      "alternatives": [{"i": a.i, "j": a.j, "score": a.score}
                                       for a in alts[: lc.n_alternatives]]}
-            replaced = rejected_key.get(i) or rejected_key.get(j)
-            if replaced:
-                extra["replaces"] = replaced
+            freed_by = [ev for ev in (rej_end.get(i), rej_start.get(j)) if ev is not None]
+            if freed_by:  # the stronger rejected competitor wins; a tie takes the end side
+                extra["replaces"] = max(freed_by, key=lambda ev: ev.signals["S_link"]).proposal_key
             ev = make_event(c, routed, extra)
             by_edge[(i, j)] = ev
             new.append(ev)
@@ -917,8 +918,8 @@ def assign_in_passes(
         events.extend(new)
         freed = [ev for ev in new if ev.decision in REJECTED]
         for ev in freed:
-            for t in ev.tracks:
-                rejected_key[int(t)] = ev.proposal_key
+            rej_end[int(ev.tracks[0])] = ev
+            rej_start[int(ev.tracks[1])] = ev
         if not freed:
             break
     return events
@@ -948,7 +949,7 @@ def _first_conflict(active: list[Event], descs: dict[int, TrackDesc], overlap_fr
                 shared = np.intersect1d(descs[x].frames, descs[y].frames)
                 if not len(shared):
                     continue
-                if (x, y) in linked and len(shared) <= overlap_frames + 1:
+                if ((x, y) in linked or (y, x) in linked) and len(shared) <= overlap_frames + 1:
                     continue
                 return min(evs, key=lambda e: (e.algo_score, e.proposal_key))
     return None
@@ -981,7 +982,7 @@ def run_link_stage(
         acc = [e for e in evs if e.decision in ACCEPTED]
         for e in acc:
             e.applied = True
-        return LinkStageResult(evs, [(e.tracks[0], e.tracks[1]) for e in acc], set(), [])
+        return LinkStageResult(evs, [(int(e.tracks[0]), int(e.tracks[1])) for e in acc], set(), [])
     cands, descs = score_candidates(work, cfg, fps, appearance=appearance, context=context,
                                     frame_size=frame_size, occluded=occluded)
 

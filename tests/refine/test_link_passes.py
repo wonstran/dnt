@@ -367,6 +367,66 @@ def test_rejected_strong_first_choice_frees_endpoints_for_weaker_pass_two_edges(
     assert all(e.signals["replaces"] == evs[0].proposal_key for e in evs[1:])
 
 
+# ---- `replaces` names the rejected event that freed the END or the START --------------------
+
+
+def _key(evs, i, j):
+    return next(e.proposal_key for e in evs if e.tracks == [i, j])
+
+
+def test_replaces_ignores_rejections_of_the_other_node_of_the_same_track():
+    # (1,2) frees END 1 / START 2; (5,3) frees END 5 / START 3. (2,3) takes START 3 over
+    # from (5,3); END 2 was never freed (track 2 was only the START of the rejected (1,2)).
+    cands = [_c(1, 2, 0.9), _c(5, 3, 0.9), _c(2, 3, 0.6)]
+    evs = _assign(cands, {(1, 2): Decision.AUTO_REJECT, (5, 3): Decision.AUTO_REJECT})
+    assert _pairs(evs) == [(1, 2), (5, 3), (2, 3)]
+    assert evs[2].signals["pass"] == 2
+    assert evs[2].signals["replaces"] == _key(evs, 5, 3)
+    assert evs[2].signals["replaces"] != _key(evs, 1, 2)
+
+
+def test_replaces_names_the_end_side_or_the_start_side_that_was_freed():
+    end_only = _assign([_c(1, 2, 0.9), _c(1, 3, 0.6)], {(1, 2): Decision.AUTO_REJECT})
+    assert end_only[1].signals["replaces"] == _key(end_only, 1, 2)
+    start_only = _assign([_c(1, 2, 0.9), _c(3, 2, 0.6)], {(1, 2): Decision.AUTO_REJECT})
+    assert start_only[1].signals["replaces"] == _key(start_only, 1, 2)
+
+
+def _both_sides(s_end, s_start):
+    # (2,7) frees END 2, (5,3) frees START 3; the pass-2 pair (2,3) took over both
+    cands = [_c(2, 7, s_end), _c(5, 3, s_start), _c(2, 3, 0.5)]
+    evs = _assign(cands, {(2, 7): Decision.AUTO_REJECT, (5, 3): Decision.AUTO_REJECT})
+    assert _pairs(evs) == [(2, 7), (5, 3), (2, 3)]
+    return evs
+
+
+def test_replaces_prefers_the_stronger_rejected_competitor_when_both_sides_were_freed():
+    evs = _both_sides(0.8, 0.9)
+    assert evs[2].signals["replaces"] == _key(evs, 5, 3)  # start side scored higher
+    evs = _both_sides(0.9, 0.8)
+    assert evs[2].signals["replaces"] == _key(evs, 2, 7)  # end side scored higher
+
+
+def test_replaces_takes_the_end_side_on_an_exact_tie():
+    evs = _both_sides(0.9, 0.9)
+    assert evs[2].signals["replaces"] == _key(evs, 2, 7)
+
+
+def test_pass_one_events_have_no_replaces():
+    evs = _assign([_c(1, 2, 0.9), _c(1, 3, 0.6), _c(4, 5, 0.9)], {(1, 2): Decision.AUTO_REJECT})
+    assert [e.signals["pass"] for e in evs] == [1, 1, 2]
+    assert "replaces" not in evs[0].signals and "replaces" not in evs[1].signals
+
+
+def test_replaces_does_not_leak_between_components():
+    # component A: (1,2) rejected then (1,3); component B: (10,11) rejected then (12,11)
+    cands = [_c(1, 2, 0.9), _c(1, 3, 0.6), _c(10, 11, 0.9), _c(12, 11, 0.6)]
+    evs = _assign(cands, {(1, 2): Decision.AUTO_REJECT, (10, 11): Decision.AUTO_REJECT})
+    assert _pairs(evs) == [(1, 2), (10, 11), (1, 3), (12, 11)]
+    assert evs[2].signals["replaces"] == _key(evs, 1, 2)
+    assert evs[3].signals["replaces"] == _key(evs, 10, 11)
+
+
 # ---- resolve_chains -----------------------------------------------------------------------
 
 
@@ -411,6 +471,18 @@ def test_separate_chains_may_overlap_each_other():
     assert pairs == [(1, 2), (3, 4)] and skipped == []
 
 
+def test_link_whose_successor_starts_first_keeps_a_small_overlap():
+    # 5 -> 3 where 3 starts BEFORE 5 (a very short predecessor); shared frames 10-11 (2 <= 3)
+    descs = _descs(box_rows(5, range(10, 12), 0.0, 0.0), box_rows(3, range(9, 31), 30.0, 0.0))
+    assert descs[3].t_s < descs[5].t_s
+    assert resolve_chains([_acc(5, 3, 0.9)], descs, overlap_frames=2) == ([(5, 3)], [])
+    # 4 shared frames is more than overlap_frames + 1: still a conflict
+    long = _descs(box_rows(5, range(10, 14), 0.0, 0.0), box_rows(3, range(9, 31), 30.0, 0.0))
+    ev = _acc(5, 3, 0.9)
+    pairs, skipped = resolve_chains([ev], long, overlap_frames=2)
+    assert pairs == [] and skipped == [ev] and ev.signals["skipped_reason"] == "overlap"
+
+
 def test_resolve_chains_without_links_is_empty():
     assert resolve_chains([], {}, 2) == ([], [])
 
@@ -450,7 +522,9 @@ def test_pending_endpoints_collect_every_pending_event():
     w = _three_fragments()
     res = _stage(w, {(1, 2): Decision.HUMAN_PENDING, (4, 5): Decision.HUMAN_PENDING})
     assert res.pending_endpoints == {1, 2, 4, 5}
-    assert res.accepted == [] or all(p not in [(1, 2), (4, 5)] for p in res.accepted)
+    assert res.accepted == [(2, 3)]  # a pending link reserves nothing beyond its own nodes
+    assert {tuple(e.tracks): e.applied for e in res.events} == {
+        (1, 2): False, (2, 3): True, (4, 5): False}
 
 
 def test_all_links_accepted_gives_no_pending_and_all_applied():
@@ -506,6 +580,18 @@ def test_legacy_mode_routes_every_match_as_accepted_and_applies_it():
     assert all(e.applied and e.decision is Decision.AUTO_ACCEPT for e in res.events)
     assert res.pending_endpoints == set() and res.skipped == []
     assert all(e.params["gate"] == "legacy" for e in res.events)
+
+
+def test_accepted_pairs_are_plain_python_ints_in_both_modes():
+    scored = _stage(_three_fragments(), {})
+    w = io.to_work(load_raw(1)).work
+    cfg = RefineConfig.defaults()
+    cfg.link.mode = "legacy"
+    legacy = run_link_stage(w, cfg, 25.0, appearance=None, context=None, frame_size=None,
+                            occluded=occlusion_flags(w, None, 0.3), route=_route({}))
+    for res in (scored, legacy):
+        assert res.accepted
+        assert all(type(t) is int for pair in res.accepted for t in pair)
 
 
 def test_legacy_mode_does_not_apply_rejected_matches():
