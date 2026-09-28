@@ -1,6 +1,6 @@
 # dnt.post: Track Refinement with Algorithmic Screening and VLM Verification
 
-- **Status:** written spec (rev. 4: addresses [review 2026-09-28 09:53](../../review_2026-09-28_09-53-41.md) / [response](../../response_2026-09-28_09-53-41.md); rev. 3: occlusion-witnessed linking, takeover gates, class groups; rev. 2: reuse of existing dnt post-processing, no location-based filtering), awaiting review
+- **Status:** written spec (rev. 5: addresses [review 2026-09-28 10:31](../../review_2026-09-28_10-31-56.md) / [response](../../response_2026-09-28_10-31-56.md); rev. 4: addresses [review 2026-09-28 09:53](../../review_2026-09-28_09-53-41.md) / [response](../../response_2026-09-28_09-53-41.md); rev. 3: occlusion-witnessed linking, takeover gates, class groups; rev. 2: reuse of existing dnt post-processing, no location-based filtering), awaiting review
 - **Date:** 2026-09-27
 - **Baseline:** dnt 0.3.3 (`a290821`)
 - **Roadmap:** [`design/dnt-0.4-upgrade.md`](../../../design/dnt-0.4-upgrade.md). This work belongs to sub-project F (new capabilities). It adopts the `dnt/post/` location from §3 of the roadmap. It does not depend on sub-projects B–E, because its only inputs are a track file and a video.
@@ -63,11 +63,11 @@ The correct result: split #12 at about frame 821, give the truck part its own ID
 - An interactive review server. The review page is static HTML.
 
 **Success criteria**
-1. On an installation with none of the `post-*` extras, `refine` runs to completion on a 10-column track file with `vlm.backend: none` and no video, using the default config, and every uncertain event ends up `HUMAN_PENDING`.
+1. On an installation with none of the `post-*` extras, `refine` runs to completion on a 10-column track file, using the default config, with no video and the frame rate passed as `fps=` (`--fps`). All three proposal stages score the tracks, and every uncertain event ends up `HUMAN_PENDING`.
 2. On synthetic fixtures with injected faults (§11.1), each stage proposes the expected event, and the score lands in the expected band.
 3. Replay is deterministic.
    - Re-applying a ledger with a decisions file that changes no applied edit reproduces the output byte for byte, with no re-proposals and no VLM calls.
-   - When decisions do change what is applied, `apply` re-proposes the downstream stages. Unchanged events keep their earlier decisions (§4.2).
+   - When a decision changes, `apply` re-proposes from the stage that owns the changed event, or from the first stage whose input changed, whichever comes first. It takes all inputs from the ledger header and verifies them. Unchanged events keep their earlier decisions and edits (§4.2).
    - Given the same inputs, ledger, decisions, and VLM cache, the output is byte-identical.
 4. `dnt.post` imports nothing from `dnt.track`, `dnt.detect`, `dnt.label`, `dnt.filter`, or `boxmot`. A test enforces this.
 5. Existing `tests/test_post_process.py` passes unchanged through the shim.
@@ -145,15 +145,19 @@ result = TrackRefiner(cfg).refine(
     video="cam1.mp4",                 # optional; without it, motion-only mode (§10)
     context="veh_tracks.csv",         # optional; a track file or a detection file (§2.5)
     hints={"reclass": "reclass.csv"}, # optional; ReClass output (§2.5, §6.2)
+    fps=None,                         # required when there is no video (§5.1)
     out="ped_clean.csv",
+)
+result = TrackRefiner.apply(          # replay after review (§4.2); inputs come from the ledger header
+    "ped_clean.ledger.jsonl", decisions="decisions.json", out="ped_clean_v2.csv",
 )
 # result.tracks: DataFrame; result.ledger_path; result.review_path; result.summary
 ```
 
 ```
-dnt-refine run    TRACKS --video V [--context C] [--reclass-hints R] --config CFG --out OUT
-dnt-refine apply  TRACKS --ledger L [--decisions D.json] [--video V] [--no-vlm] [--no-fill] --out OUT
-dnt-refine audit  --ledger L --video V --n 50 [--seed S]
+dnt-refine run    TRACKS [--video V] [--fps F] [--context C] [--reclass-hints R] --config CFG --out OUT
+dnt-refine apply  --ledger L [--decisions D.json] [--tracks T] [--video V] [--context C] [--reclass-hints R] [--no-vlm] [--no-fill] --out OUT
+dnt-refine audit  --ledger L [--video V] --n 50 [--seed S]
 dnt-refine audit-score --ledger L --marks M.json
 ```
 
@@ -172,7 +176,9 @@ The CLI is a thin `argparse` wrapper over `TrackRefiner`, registered as `[projec
 
   The format is detected from the column count, or can be set with `context.format`. Only boxes and classes are used. For the vehicle target, the vehicle file itself is the context for the duplicate cue.
 - **Reclass hints** (optional): the CSV that `ReClass.re_classify(out_file=...)` writes, with header `track, cls, avg_score`.
-  - It is keyed by the input file's raw track IDs. Stage 1 may split a raw track before stage 2 reads the hints, so a hint applies to every segment that descends from its raw ID. Descent is recorded in the ledger lineage (§4.2).
+  - It is keyed by the input file's raw track IDs. `ReClass` judges a whole raw track from a sample of its frames, so the hint cannot say which part of a split track it came from.
+  - A hint is **localized** only when the scored unit covers its whole raw track: the raw track has no applied `SPLIT`, and screening is scoring the whole track rather than a segment.
+  - After a split, or during segment scoring (§6.2), the hint is **unlocalized**, and it only informs review (§6.2).
   - Rows with unknown track IDs are ignored, with a warning.
 
 **Output**
@@ -234,16 +240,18 @@ class Decision(StrEnum):
 @dataclass
 class Event:
     id: str                  # f"{stage}-r{round}-{seq:06d}", unique within the ledger
-    key: str                 # content key, stable across re-proposals (§4.2)
+    proposal_key: str        # immutable key of the proposal, fixed before verification (§4.2)
     round: int               # review round that proposed it (0 = first run)
     stage: str               # "switch" | "screen" | "link" | "orphan" | "fill"
-    kind: EventKind
+    kind: EventKind          # the proposed kind; never changed by verification
     tracks: list[int]        # IDs as they were when the stage ran
     lineage: list[list]      # per track: [[raw_id, f0, f1], ...], the raw rows it is made of
     frames: tuple[int, int]  # the frame span the event concerns
-    params: dict             # DROP: {reason, spans | None}; RECLASS: {new_cls | None, spans | None};
+    params: dict             # the proposed params; never changed by verification
+                             # DROP: {reason, spans | None}; RECLASS: {new_cls | None, spans | None};
                              # SPLIT: {cut_frame}; LINK: {gate, gap: [t_e, t_s]};
                              # FILL: {gap: [f_before, f_after], n_rows}; SMOOTH: {n_rows}
+    edit: dict | None        # the final edit {kind, params} when accepted; None otherwise
     algo_score: float        # [0, 1]
     signals: dict            # every named cue value and ramp output behind algo_score
     decision: Decision
@@ -253,6 +261,10 @@ class Event:
 
 `EventKind` and `Decision` subclass `StrEnum`.
 
+**Proposal and edit are separate.** `kind` and `params` record what the stage proposed, and they never change. `edit` records what is actually applied when the event is accepted.
+- It equals the proposal unless verification changed it: the VLM redirected it (§7.2), or a person picked another class.
+- `apply.py` applies `edit`, never `kind`/`params` directly.
+
 **Position records.** `FILL` and `SMOOTH` are written by stage 4.
 - They are always `AUTO_ACCEPT`, never routed to the VLM, and never sent to the review report.
 - They exist so that the ledger accounts for every position edit, and so the audit can sample them (§8.2).
@@ -261,25 +273,51 @@ class Event:
 ### 4.2 Ledger
 
 A JSONL file.
-- **Line 1** is the header: dnt version, config (full YAML as a dict), input file SHA-256, video path and SHA-256 of its first 64 MiB, fps, `id_map`, and the before/after summary (§8.3).
+- **Line 1** is the header:
+  - the dnt version and the config (the full YAML, as a dict);
+  - `inputs`, a record of every input the run read (below);
+  - `fps` with its source, and `frame_size`;
+  - `id_map`, the count of filled input rows removed (§2.5), and the before/after summary (§8.3).
+
+  `inputs` holds:
+  - `tracks`: `{path, sha256, format}`;
+  - `video`: `{path, fingerprint, frame_count}` or `null` (§5.3 defines the fingerprint);
+  - `context`: `{path, sha256, format}` or `null`;
+  - `hints`: `{reclass: {path, sha256}}` or `null`.
+
+  Paths are stored as given and also resolved to absolute paths.
 - **Each later line** is one `Event`, written when its decision is final.
 
 **Lineage.** Every event records, for each track it involves, the raw rows that track is made of: `[raw_id, f0, f1]` spans. The header's `id_map` and the events' lineage let any output row be traced back to its input row.
 
-**Content key.** `key` is the SHA-256 of `(stage, kind, lineage of the involved tracks, the event's defining params)`, where the defining params are the cut frame, the gap span, the reason, or the spans. A decision about "cut raw track 12 at frame 821", or "link the raw-12 part ending at 820 to raw 81 starting at 883", keeps the same key however the tracks happen to be numbered.
+**Proposal key.** `proposal_key` is the SHA-256 of `(stage, proposed kind, lineage of the involved tracks, the proposal's defining params)`, where the defining params are the cut frame, the gap span, the proposed reason, or the spans.
+- It is computed when the stage proposes the event, before any verification, and it never changes.
+- A VLM redirection, or a person's class choice, changes `edit` but not the key. On re-proposal, the same proposal gets the same key and takes over the recorded `edit`.
+- A decision about "cut raw track 12 at frame 821", or "link the raw-12 part ending at 820 to raw 81 starting at 883", keeps the same key however the tracks happen to be numbered.
 
-`Ledger.replay(raw_tracks, decisions=None, video=None, vlm=True, fill=True)`:
-1. **Overrides.** Decisions come from `decisions.json` (`{event_id: "accept" | "reject" | {"accept": true, "new_cls": 3}}`).
-2. **Unchanged stages.** For each stage in order: if its input tracks are identical to those recorded, the recorded events are applied as they are, with no proposals and no VLM calls.
-3. **Changed stages.** From the first stage whose input differs, because a changed decision altered what is applied upstream, that stage and every later one **re-propose** on the new tracks.
-   - A re-proposed event whose `key` matches an earlier event takes over that event's decision and VLM answer.
+**Inputs for replay.** `TrackRefiner.apply(ledger, decisions=None, *, tracks=None, video=None, context=None, hints=None, vlm=True, fill=True, out)` takes its inputs from the ledger header. Each keyword overrides only the *location* of a recorded input, for example after files have moved. It never changes which input is used. Before any processing:
+- **Resolution.** Each recorded input is taken from its override if one is given, otherwise from its recorded path.
+- **Verification.** Its SHA-256 (the fingerprint, for the video) must equal the recorded value. A mismatch raises `ValueError`, naming the input and both hashes. The fix is to run `dnt-refine run` again: `apply` never re-proposes with different inputs.
+- **Missing files.** A recorded `tracks`, `context`, or `hints` file that cannot be found raises `ValueError`. A missing video is allowed, with a warning. Embeddings come from the cache, but new events that need evidence images become `HUMAN_PENDING` without images.
+- **No new inputs.** An input that the original run did not have (for example `context` when the header says `null`) is rejected, because it would change the proposals.
+- **Settings.** `fps` and `frame_size` come from the header.
+
+`apply` runs `Ledger.replay`:
+1. **Overrides.** Decisions come from `decisions.json` (`{event_id: "accept" | "reject" | {"accept": true, "new_cls": 3}}`). Each event ID is resolved to its `proposal_key`. An override that differs from the recorded decision marks that event as **changed**.
+2. **Unchanged stages.** For each stage in order: if its input tracks are identical to those recorded, **and none of its own events changed**, the recorded events are applied as they are, with no proposals and no VLM calls.
+3. **Re-proposed stages.** The first stage whose input differs, **or which owns a changed event**, re-runs its proposals, and so does every later stage.
+   - Proposals are deterministic, so on an unchanged input they come out with the same keys.
+   - The overridden decisions are then applied by key, and the stage continues from there. In stage 3 this means re-assignment runs without a newly rejected edge (§6.3), even though the stage's input table is unchanged.
+   - A re-proposed event whose `proposal_key` matches an earlier event takes over that event's decision, VLM answer, and final `edit`.
    - Only events with no match are routed (§4.3). With `vlm=False` (`--no-vlm`), or with no video for evidence, they become `HUMAN_PENDING`.
    - New events get `round = previous round + 1`, and a new review report is written for any that are pending.
 4. **Fill.** Stage 4 runs last, unless `fill=False` (`--no-fill`).
 
-Re-proposal is how a human decision takes effect downstream. For example, accepting a pending `SPLIT` gives its tail the chance to be linked in stage 3. Rejecting a `LINK` lets its endpoints be re-assigned (§6.3).
+Re-proposal is how a human decision takes effect. For example, accepting a pending `SPLIT` gives its tail the chance to be linked in stage 3. Rejecting a pending `LINK` re-runs stage 3 itself, so its endpoints can be re-assigned (§6.3).
 
 Stage 1 has no stage upstream of it, so its proposals never change. Only its decisions can.
+
+**Equivalence.** Accepting a pending decision through `apply` gives the same output tracks as a fresh `refine` in which that decision was made during the run.
 
 Embeddings are read from the cache (§5.3). Its key does not depend on decisions, so re-proposal never re-encodes frames that were already encoded.
 
@@ -307,7 +345,10 @@ For each stage, `accept_above` and `reject_below`, with `reject_below < accept_a
 - `h̃_t` is the rolling median of box height over `motion.height_window` frames (default 15).
 - Speed is `v_t = ‖c_t − c_{t−Δ}‖ / (h̃_t · Δ/fps)`, in **box heights per second** (h/s), where `c` is the box center and `Δ` is the step to the previous observed frame.
 - Taking a person as about 1.7 m tall, walking at about 1.0–1.6 m/s gives about 0.6–1.0 h/s, and cycling at 4–7 m/s gives about 2.5–4 h/s.
-- `fps` comes from the video, or from `RefineConfig.fps` when no video is given. If neither is available, that is an error.
+- **Frame rate.** `fps` is resolved in this order: the `fps=` argument (`--fps`), then `RefineConfig.fps`, then the video.
+  - If an explicit value differs from the video's rate by more than 1%, a warning is logged and the explicit value is used.
+  - With no video and neither setting, `refine` raises `ValueError` before any processing, and the message asks for `fps=`. There is no default frame rate: every threshold in seconds depends on it, so a guess would silently change them all.
+  - The ledger header records the value and where it came from, and `apply` reuses it.
 
 ### 5.2 Kalman residual
 
@@ -327,7 +368,7 @@ For each stage, `accept_above` and `reject_below`, with `reject_below < accept_a
 - Embeddings are L2-normalized.
 - **Cache.** `OUT.features.npz` stores embeddings per (raw track ID, frame), under a key made of:
   - the input track file's SHA-256;
-  - the video's identity: SHA-256 of its first 64 MiB, plus file size and frame count;
+  - the video's **fingerprint**: the SHA-256 of the **entire file**, read in 8 MiB chunks, plus the file size and frame count;
   - the context file's SHA-256, or `none`;
   - encoder kind, model name, and the SHA-256 of the weights file;
   - `sample_every` and `occlusion_iou`;
@@ -335,6 +376,7 @@ For each stage, `accept_above` and `reject_below`, with `reject_below < accept_a
   - `FEATURES_VERSION`, a constant bumped whenever the crop or embedding code changes.
 
   If any part differs, the cache is discarded (logged at INFO) and embeddings are recomputed.
+- **Fingerprint.** It is computed once per run and shared by the cache key, the ledger header, and `apply`'s input check. Hashing the whole file costs about 1 s per 1–2 GB, which is small next to decoding. A partial hash, or a hash of size and modification time, is not used, because frames changed later in the file would go undetected.
 
 ### 5.4 Ramp
 
@@ -465,19 +507,21 @@ Cues:
 | `F` | fraction of observed frames with `v_t > 1.8` h/s | 0.3 → 0.7 |
 | `S` | smoothness, `1 − circular variance of heading` over moving frames | 0.5 → 0.9 |
 | `K` | with context: fraction of frames where a context box whose class is in `context.twowheeler_classes` (default `[1, 3]`) has `IoU ≥ 0.3` and moves with the person (same move-together test as the in-vehicle cue, per context format) | 0.2 → 0.6 |
-| `P` | with ReClass hints: the hint's `avg_score` when its `cls` is a key of `hints.reclass_class_map`, otherwise 0 | 0.75 → 0.9 |
+| `P` | with a **localized** ReClass hint (§2.5): the hint's `avg_score` when its `cls` is a key of `hints.reclass_class_map`, otherwise 0 | 0.75 → 0.9 |
 
 ```
 S_rider = max(ramp_F · ramp_S, ramp_K, ramp_P)    # ramp_K and ramp_P count as 0 when their input is absent
 ```
 
 **Subtype.** `params.new_cls` starts as `None`, and one of two sources settles it:
-1. **Hint.** If `ramp_P ≥ hints.subtype_min` (default 1.0, which means `avg_score ≥ 0.9`), the subtype comes from `hints.reclass_class_map` (default `{1: cyclist, 3: motorcycle, 36: scooter}`). No subtype VLM call is made, and `signals.subtype_source` is `"reclass"`.
+1. **Hint.** Only a localized hint can settle the subtype. If `ramp_P ≥ hints.subtype_min` (default 1.0, which means `avg_score ≥ 0.9`), the subtype comes from `hints.reclass_class_map` (default `{1: cyclist, 3: motorcycle, 36: scooter}`). No subtype VLM call is made, and `signals.subtype_source` is `"reclass"`.
 2. **VLM.** Otherwise the VLM chooses cyclist, motorcycle, or scooter.
 
 Either way, the subtype maps to a class ID through `reclass_map` (default `{cyclist: 1, motorcycle: 3, scooter: 36}`).
 
 If the event is in the VLM band anyway and the VLM names a different rider subtype than the hint, the event becomes `HUMAN_PENDING`.
+
+**Unlocalized hints.** A hint whose raw track has been split, or whose track is being scored in segments, is not used as a cue: `ramp_P` counts as 0, and the hint cannot settle the subtype. It is recorded in `signals.hint_unlocalized` and shown on the review card, but it is not included in the VLM prompt. This stops a strong rider hint on a raw track from making every segment a rider, including a pedestrian segment that a correct split separated from the rider segment.
 
 ReClass's default `match_class=[1, 36]` leaves out motorcycles. The docs recommend `match_class=[1, 3, 36]` when producing hints.
 
@@ -639,7 +683,7 @@ If `vlm.send_context_frames: false`, context frames are left out.
   - `person_in_vehicle` → `VLM_ACCEPT` as `DROP{in_vehicle}`.
   - `not_a_person` → `VLM_ACCEPT` as `DROP{static}`.
   - A rider answer → `VLM_ACCEPT` as `RECLASS` with `new_cls` taken from `reclass_map`.
-  - The VLM's answer can therefore **change** the event's kind and reason. The originally proposed kind and reason stay in `signals.proposed`.
+  - The VLM's answer can therefore change the final edit: `edit` gets the answered kind and params (for example `RECLASS{new_cls: 1}` for a proposed `DROP{static}`). The event's `kind`, `params`, and `proposal_key` keep the proposal (§4.1).
 - **Vehicle screen**
   - `vehicle` → `VLM_REJECT`.
   - `part_or_duplicate_of_another_vehicle` → accepts only a `duplicate` event. For a `static` event it is treated as `unsure`.
@@ -747,7 +791,7 @@ The summary is written to the ledger header, printed at the end of the run, and 
 ```yaml
 target: person               # person | vehicle
 class_ids: [0]               # classes in the file that belong to the target
-fps: null                    # null → from video
+fps: null                    # null → the fps= argument, else the video (§5.1)
 reclass_map: {cyclist: 1, motorcycle: 3, scooter: 36}
 frame_size: null             # [width, height]; null → from video
 context:
@@ -876,6 +920,10 @@ Durations in config are in seconds and are converted to frames with `fps`.
 | Input contains filled rows (`interp == 1`) | They are removed on input and counted in the ledger header (§2.5). |
 | VLM errors | §7.4: `HUMAN_PENDING`, never an abort. |
 | Decisions file references an unknown event ID | `ValueError` listing the unknown IDs. Nothing is applied. |
+| No video and no `fps` (argument or config) | `ValueError` before any processing, asking for `fps=` (§5.1). |
+| `apply`: a recorded input's hash or fingerprint differs, or a recorded `tracks`/`context`/`hints` file is missing | `ValueError` before any processing, naming the input (§4.2). |
+| `apply`: an input the original run did not have | `ValueError`: re-run `dnt-refine run` instead (§4.2). |
+| `apply`: the recorded video is missing | Warning. New events that need evidence images become `HUMAN_PENDING` without images (§4.2). |
 
 ## 11. Testing
 
@@ -892,6 +940,10 @@ All tests below run in the default suite (CPU, no network), except where a marke
   - the same in-vehicle case with a **detection** context → `DROP{in_vehicle}`, using the persistence test.
   - a fast "person" with a ReClass hint `(cls 3, avg_score 0.95)` → `RECLASS` to motorcycle with no subtype VLM call (the fake backend raises if called).
   - a hint that disagrees with an in-band VLM subtype answer → `HUMAN_PENDING`.
+  - **mixed pedestrian/rider track with a strong raw hint** `(cls 3, avg_score 0.95)`, split at the change:
+    - The pedestrian segment gets no `RECLASS`: its motion cues are low, and the hint is unlocalized.
+    - The rider segment gets a `RECLASS` from motion cues, with its subtype chosen by the VLM rather than the hint. `signals.hint_unlocalized` is set.
+    - An unsplit fast track with the same hint still gets its subtype from the hint (regression).
   - two vehicles moving together with IoB 0.9 → `DROP{duplicate}` on the smaller.
   - an orphan of 0.2 s after linking → `DROP{orphan}`.
   - **mixed track:** a pedestrian segment followed by an in-vehicle segment.
@@ -924,18 +976,30 @@ All tests below run in the default suite (CPU, no network), except where a marke
 - `test_events.py`: ledger round-trip, header contents, stable event IDs.
 - `test_verify.py` with `FakeVLMBackend`:
   - band routing, including the static cap and the margin rule.
-  - redirected answers (a DROP answered as a rider → RECLASS).
+  - redirected answers (a DROP answered as a rider → `edit` = RECLASS; `kind`, `params`, and `proposal_key` unchanged).
   - votes (majority, tie → pending), `min_conf`.
   - budget exhaustion ordered by distance to the band midpoint.
   - invalid JSON then valid on retry.
   - repeated invalid output → pending.
   - an exception → pending.
   - a cache hit makes no backend call.
-- `test_apply.py`: each event kind on a small table, including partial `DROP`/`RECLASS` with `spans`; renumbering, `id_map`, and lineage; content keys stay the same when track IDs are renumbered.
+- `test_apply.py`: each event kind on a small table, including partial `DROP`/`RECLASS` with `spans`; `edit` applied instead of the proposal; renumbering, `id_map`, and lineage; proposal keys stay the same when track IDs are renumbered.
 - `test_replay.py`:
   - A decisions file that changes nothing → byte-identical output, zero re-proposals, and zero backend calls (the fake backend raises if called).
   - **Accepting a pending `SPLIT` →** `apply` re-proposes stages 2–4. The tail gets a `LINK` event (round 1), which is routed and applied. Every other event keeps its decision through key matching, so the fake backend sees only the new event.
-  - Rejecting a pending `LINK` → re-assignment offers the recorded alternative.
+  - **Rejecting a pending `LINK` via `apply --decisions`** (the stage 3 input table is unchanged) → stage 3 re-runs because it owns a changed event, and re-assignment proposes the alternative as a new event.
+  - **Redirected screen event survives re-proposal:**
+    1. `refine` with the fake VLM redirecting a proposed `DROP{static}` to a cyclist `RECLASS`.
+    2. `apply` with a decision change on an unrelated stage 1 split, which forces stage 2 to re-run.
+    3. The redirected event is matched by `proposal_key` and keeps its `RECLASS` edit. The fake backend is not called for it.
+  - **Replay with context and hints:**
+    1. `refine` with a context file and a hints file, where a `SPLIT` ends up pending.
+    2. `apply` accepting it.
+    3. The output tracks equal those of a fresh `refine` whose fake VLM accepts that split directly, and the set of applied `proposal_key`s is the same.
+  - `apply` with an overridden context path whose content differs from the recorded hash → `ValueError` naming `context`.
+  - `apply` with the recorded hints file missing → `ValueError`.
+  - `apply` supplying a context file the original run did not have → `ValueError`.
+  - `apply` with the video missing → a warning, and no error when no new event needs evidence.
   - The same `apply` run twice → byte-identical output.
   - `--no-fill` reproduces the table as it was before filling, including the original observed positions of smoothed rows.
   - Unknown event IDs → `ValueError`.
@@ -960,9 +1024,11 @@ All tests below run in the default suite (CPU, no network), except where a marke
   - `protected_gaps`: a 63-frame gap stays empty with `max_gap=100`. Two protected gaps in one chain both stay empty. With `smooth_existing=True`, smoothing does not cross a protected gap (the observed rows on each side match smoothing each segment alone).
 - `test_refiner.py` (additions): an input that already has `interp == 1` rows → they are removed, the count is in the header, and the output fills come only from stage 4. One `FILL` record per filled gap, and one `SMOOTH` record per smoothed track.
 - `test_features_cache.py`: the cache is reused when nothing changes, and invalidated when any of these change: the video (same track file), the context file, the encoder weights, a crop preprocessing setting, or `FEATURES_VERSION`.
+- `test_fingerprint.py`: two 65 MiB files that are identical except for one byte after the 64 MiB mark → different fingerprints, with the same size. The cache built with one is not reused with the other.
 - `test_minimal_install.py`: with `transformers`, `torchreid`, `openai`, and `anthropic` imports made to fail (via monkeypatching `sys.modules`):
   - the default config loads;
-  - `refine` without a video succeeds;
+  - `refine` without a video and with `fps=10`, on a fixture with an injected fragment, an injected takeover, and a static box → it completes, the ledger holds proposals from stages 1, 2, and 3, and every uncertain one is `HUMAN_PENDING`;
+  - `refine` without a video and without `fps` → `ValueError` before processing, asking for `fps=`;
   - `refine` with a video and `encoder.kind: dino` raises `ImportError` before any processing, naming the extra;
   - `refine` with a video and `encoder.kind: none` succeeds.
 - `test_primitives.py`: `cv_kalman` gives the same smoothed boxes as the pre-refactor `interpolate_tracks_rts` on the fixtures (the refactor is behavior-preserving), and NIS is χ²₄-distributed on simulated constant-velocity tracks (mean ≈ 4 within tolerance).
