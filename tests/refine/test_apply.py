@@ -69,3 +69,93 @@ def test_apply_edit_uses_edit_not_proposal():
     ev.edit = None
     with pytest.raises(ValueError, match="no edit"):
         A.apply_edit(w, ev)
+
+
+def test_empty_spans_is_noop():
+    w = _work(box_rows(1, range(10), 0.0, 0.0))
+    d = A.drop_rows(w, 1, [])
+    assert len(d) == 10
+    assert d["frame"].tolist() == list(range(10))
+    r = A.reclass_rows(w, 1, 3, [])
+    assert (r["cls"] == 0).all()
+    r_tuple = A.reclass_rows(w, 1, 3, ((2, 4),))
+    assert r_tuple["cls"].tolist()[:6] == [0, 0, 3, 3, 3, 0]
+    import numpy as np
+    r_np = A.reclass_rows(w, 1, 3, np.array([[1, 3]]))
+    assert r_np["cls"].tolist()[:5] == [0, 3, 3, 3, 0]
+
+
+def test_index_preservation_with_nonmonotonic_index():
+    w = _work(box_rows(1, range(5), 0.0, 0.0), box_rows(2, range(3, 8), 10.0, 0.0))
+    original_index = (w.index * 3 + 100)[::-1]
+    w.index = original_index
+    d = A.drop_rows(w, 1, [[1, 3]])
+    assert len(d) == 7
+    surviving_mask = ~((w["track"] == 1) & (w["frame"].isin([1, 2, 3])))
+    expected_labels = original_index[surviving_mask]
+    assert list(d.index) == list(expected_labels)
+    w2 = _work(box_rows(1, range(5), 0.0, 0.0))
+    w2.index = (w2.index * 2 + 50)[::-1]
+    r = A.reclass_rows(w2, 1, 5, [[1, 2]])
+    assert r["cls"].tolist() == [0, 5, 5, 0, 0]
+    assert list(r.index) == list(w2.index)
+    w3 = _work(box_rows(3, range(4), 0.0, 0.0))
+    w3.index = (w3.index * 5 + 200)[::-1]
+    s = A.split_track(w3, 3, 2, 10)
+    assert list(s.index) == list(w3.index)
+
+
+def test_apply_edit_split_and_drop_reclass_coverage():
+    w = _work(box_rows(1, range(10), 0.0, 0.0), box_rows(2, range(5, 8), 10.0, 0.0))
+    ev_split = Event.propose(stage="screen", kind=EventKind.SPLIT, tracks=[1],
+                             lineage=[A.lineage(w, 1)], frames=(0, 9),
+                             params={"cut_frame": 5}, algo_score=0.8)
+    ev_split.edit = {"kind": "SPLIT", "params": {"cut_frame": 5}}
+    result = A.apply_edit(w, ev_split)
+    assert (result.loc[result["track"] == 1, "frame"] < 5).all()
+    assert result[result["track"] != 1].index[0] >= 0
+    ev_split_newid = Event.propose(stage="screen", kind=EventKind.SPLIT, tracks=[1],
+                                   lineage=[A.lineage(w, 1)], frames=(0, 9),
+                                   params={"cut_frame": 5}, algo_score=0.8)
+    ev_split_newid.edit = {"kind": "SPLIT", "params": {"cut_frame": 5}}
+    result2 = A.apply_edit(w, ev_split_newid, new_id=50)
+    assert 50 in result2["track"].values
+    ev_drop = Event.propose(stage="screen", kind=EventKind.DROP, tracks=[2],
+                            lineage=[A.lineage(w, 2)], frames=(5, 7),
+                            params={"reason": "test", "spans": [[5, 6]]}, algo_score=0.7)
+    ev_drop.edit = {"kind": "DROP", "params": {"spans": [[5, 6]]}}
+    result3 = A.apply_edit(w, ev_drop)
+    assert len(result3.loc[result3["track"] == 2]) == 1
+    ev_reclass = Event.propose(stage="screen", kind=EventKind.RECLASS, tracks=[1],
+                               lineage=[A.lineage(w, 1)], frames=(0, 9),
+                               params={"new_cls": 7, "spans": None}, algo_score=0.6)
+    ev_reclass.edit = {"kind": "RECLASS", "params": {"new_cls": 7, "spans": None}}
+    result4 = A.apply_edit(w, ev_reclass)
+    assert (result4.loc[result4["track"] == 1, "cls"] == 7).all()
+    ev_bad = Event.propose(stage="screen", kind=EventKind.RECLASS, tracks=[1],
+                           lineage=[A.lineage(w, 1)], frames=(0, 9),
+                           params={"spans": None}, algo_score=0.6)
+    ev_bad.edit = {"kind": "RECLASS", "params": {"spans": None}}
+    with pytest.raises(ValueError, match="new_cls"):
+        A.apply_edit(w, ev_bad)
+    ev_stage = Event.propose(stage="screen", kind=EventKind.LINK, tracks=[1, 2],
+                             lineage=[A.lineage(w, 1), A.lineage(w, 2)], frames=(0, 9),
+                             params={"gap": 3}, algo_score=0.5)
+    ev_stage.edit = {"kind": "LINK", "params": {"gap": 3}}
+    with pytest.raises(ValueError, match="stage level"):
+        A.apply_edit(w, ev_stage)
+    ev_no_id = Event.propose(stage="screen", kind=EventKind.DROP, tracks=[1],
+                             lineage=[A.lineage(w, 1)], frames=(0, 9),
+                             params={"reason": "test", "spans": None}, algo_score=0.6)
+    ev_no_id.id = ""
+    ev_no_id.edit = {"kind": "DROP", "params": {"spans": None}}
+    result5 = A.apply_edit(w, ev_no_id)
+    assert 1 not in result5["track"].values
+
+
+def test_split_track_rejects_existing_new_id():
+    w = _work(box_rows(1, range(5), 0.0, 0.0), box_rows(2, range(5), 10.0, 0.0))
+    with pytest.raises(ValueError, match="new_id 2 already exists"):
+        A.split_track(w, 1, 2, 2)
+    with pytest.raises(ValueError, match="new_id 1 already exists"):
+        A.split_track(w, 1, 2, 1)

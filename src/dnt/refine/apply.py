@@ -27,6 +27,9 @@ def next_track_id(work: pd.DataFrame) -> int:
 
 
 def _in_spans(frames: pd.Series, spans) -> np.ndarray:
+    """Return boolean mask of frames inside any (inclusive) span."""
+    if isinstance(spans, np.ndarray):
+        spans = spans.tolist()
     mask = np.zeros(len(frames), dtype=bool)
     for a, b in spans:
         mask |= ((frames >= a) & (frames <= b)).to_numpy()
@@ -35,24 +38,37 @@ def _in_spans(frames: pd.Series, spans) -> np.ndarray:
 
 def split_track(work: pd.DataFrame, track: int, cut_frame: int, new_id: int) -> pd.DataFrame:
     """Give rows of ``track`` at or after ``cut_frame`` the ID ``new_id``."""
+    new_id = int(new_id)
+    if new_id in work["track"].values:
+        raise ValueError(f"new_id {new_id} already exists in the work table")
     out = work.copy()
-    out.loc[(out["track"] == track) & (out["frame"] >= cut_frame), "track"] = int(new_id)
+    out.loc[(out["track"] == track) & (out["frame"] >= cut_frame), "track"] = new_id
     return out
 
 
 def drop_rows(work: pd.DataFrame, track: int, spans=None) -> pd.DataFrame:
-    """Drop a track, or only its rows inside ``spans``."""
+    """Drop a track, or only its rows inside ``spans``. An empty ``spans`` list is no-op."""
+    if spans is not None:
+        if isinstance(spans, np.ndarray):
+            spans = spans.tolist()
+        if not spans:
+            return work
     mask = (work["track"] == track).to_numpy()
-    if spans:
+    if spans is not None:
         mask &= _in_spans(work["frame"], spans)
     return work.loc[~mask]
 
 
 def reclass_rows(work: pd.DataFrame, track: int, new_cls: int, spans=None) -> pd.DataFrame:
-    """Set the class of a track, or of its rows inside ``spans``."""
+    """Set the class of a track, or of its rows inside ``spans``. An empty ``spans`` is no-op."""
+    if spans is not None:
+        if isinstance(spans, np.ndarray):
+            spans = spans.tolist()
+        if not spans:
+            return work
     out = work.copy()
     mask = (out["track"] == track).to_numpy()
-    if spans:
+    if spans is not None:
         mask &= _in_spans(out["frame"], spans)
     out.loc[mask, "cls"] = int(new_cls)
     return out
