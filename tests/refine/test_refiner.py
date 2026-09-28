@@ -2,6 +2,7 @@ import logging
 import shutil
 import sys
 import time
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -12,6 +13,7 @@ from dnt.refine import refiner as refiner_mod
 from dnt.refine.config import RefineConfig
 from dnt.refine.events import Decision, EventKind, Ledger
 from dnt.refine.features import ArrayAppearance
+from dnt.refine.primitives import box_centers
 from dnt.refine.refiner import TrackRefiner, resolve_fps
 
 from ._fixtures import box_rows, load_raw, random_tracks, table
@@ -618,3 +620,418 @@ def test_refine_a_large_track_file_in_reasonable_time(tmp_path, target):
     elapsed = time.perf_counter() - t0
     assert res.tracks["track"].nunique() < df["track"].nunique()
     assert elapsed < 60, f"{elapsed:.1f} s"
+
+
+# ---- fix round 1: chain-representative keying, ledger values, hints and MOT input ------------
+
+_OCC, _ORD = "occluded", "normal"
+
+
+def _chain_rows(kinds, seg=40):
+    """Track 1 -> 2 -> 3 along a line; ``kinds`` gives the gap before track 2 and track 3.
+
+    An ordinary gap is 5 missing frames; an occluded gap is 61 missing frames with a big box
+    (track 91 / 92) that hides the path. Boxes are 30x60 at 3 px/frame, ``h == 60`` marks them.
+    """
+    def x(f):
+        return 600.0 + 3.0 * (f - 20)
+
+    rows = box_rows(1, range(20, 20 + seg), x(20), 200.0, vx=3.0)
+    end = 20 + seg - 1
+    for i, kind in enumerate(kinds):
+        gap = 5 if kind == _ORD else 61
+        start = end + gap + 1
+        if kind == _OCC:
+            rows += box_rows(91 + i, range(end + 1, start), x(end) - 20.0, 100.0,
+                             w=3.0 * (gap + 1) + 70.0, h=250.0)
+        rows += box_rows(2 + i, range(start, start + seg), x(start), 200.0, vx=3.0)
+        end = start + seg - 1
+    return rows
+
+
+def _refine_chain(d, kinds, key_check=True):
+    cfg = RefineConfig.defaults()
+    cfg.fill.max_gap = 100.0  # seconds: far more than any gap here
+    refiner = TrackRefiner(cfg)
+    # validate() keeps occluded_score_cap below accept_above, so no valid config auto-accepts an
+    # occlusion-witnessed link (Plan 3's VLM or a human does). Lower the band after validation
+    # to exercise the wiring that protects the gap of such an accepted link.
+    cfg.link.accept_above = 0.45
+    refiner.refine(_write(d, table(_chain_rows(kinds))), d / "o.txt", fps=10, verbose=False)
+    res = refiner.last_result
+    links = {tuple(e.tracks): e for e in _by(res, "link")}
+    assert set(links) == {(1, 2), (2, 3)}
+    for (a, b), kind in zip(((1, 2), (2, 3)), kinds, strict=True):
+        assert links[(a, b)].params["gate"] == kind
+        assert links[(a, b)].decision is Decision.AUTO_ACCEPT and links[(a, b)].applied
+    return res, links
+
+
+@pytest.mark.parametrize("kinds", [(_ORD, _OCC), (_OCC, _OCC), (_OCC, _ORD)],
+                         ids=["head-ordinary-tail-occluded", "both-occluded",
+                              "head-occluded-tail-ordinary"])
+def test_protected_gaps_follow_the_chain_representative(tmp_path, kinds):
+    res, links = _refine_chain(tmp_path, kinds)
+    t = res.tracks
+    obj = t[t["h"] == 60]  # the moving object; the occluder boxes are 250 high
+    assert obj["track"].nunique() == 1  # A, B and C are one output id
+    expected, end = list(range(20, 60)), 59
+    for kind in kinds:  # gap of 5 or 61 missing frames, then a 40-frame segment
+        start = end + (6 if kind == _ORD else 62)
+        expected += range(start, start + 40)
+        end = start + 39
+    assert sorted(obj.loc[obj["interp"] == 0, "frame"]) == expected
+    for (a, b), kind in zip(((1, 2), (2, 3)), kinds, strict=True):
+        f_before, f_after = links[(a, b)].params["gap"]
+        gap_rows = obj[(obj["frame"] > f_before) & (obj["frame"] < f_after)]
+        if kind == _OCC:
+            assert f_after - f_before - 1 == 61 and len(gap_rows) == 0  # left empty
+        else:
+            assert len(gap_rows) == 5 and (gap_rows["interp"] == 1).all()  # filled
+    fills = [tuple(e.params["gap"]) for e in _by(res, "fill", EventKind.FILL)]
+    occluded = [tuple(links[k].params["gap"]) for k, kind in zip(((1, 2), (2, 3)), kinds,
+                                                                  strict=True) if kind == _OCC]
+    assert not set(fills) & set(occluded)
+    assert int(obj["interp"].sum()) == 5 * kinds.count(_ORD)
+
+
+def test_ordinary_gaps_in_the_same_chain_are_all_filled(tmp_path):
+    res, _ = _refine_chain(tmp_path, (_ORD, _ORD))  # control: geometry alone leaves no gap empty
+    obj = res.tracks[res.tracks["h"] == 60]
+    assert obj["track"].nunique() == 1 and int(obj["interp"].sum()) == 10
+    assert len(_by(res, "fill", EventKind.FILL)) == 2
+
+
+def test_fill_record_values_on_a_constant_velocity_track(tmp_path):
+    # 6 px/frame, 30x60 boxes, observed on frames 0-9 and 15-24: the gap is 10 -> 15
+    rows = (box_rows(1, range(0, 10), 0.0, 0.0, vx=6.0)
+            + box_rows(1, range(15, 25), 90.0, 0.0, vx=6.0))
+    res = _refine(_write(tmp_path, table(rows)), tmp_path / "o.csv", fps=10)
+    (fill,) = _by(res, "fill")
+    assert fill.kind is EventKind.FILL and fill.tracks == [1]
+    assert fill.frames == (9, 15)
+    assert fill.params == {"gap": [9, 15], "n_rows": 5}
+    assert fill.lineage == [[[1, 0, 24]]]  # one raw track spanning frames 0..24
+    assert fill.algo_score == 1.0
+    assert fill.signals["gap_seconds"] == pytest.approx(5 / 10)  # 5 missing frames at 10 fps
+    # observed ends: centers (54 + 15, 30) and (90 + 15, 30) -> 36 px apart; median height 60
+    assert fill.signals["chord_h"] == pytest.approx(36.0 / 60.0)
+    # 6 px per frame = 60 px/s over 60 px high boxes = 1 box height per second
+    assert fill.signals["max_fill_speed_h_s"] == pytest.approx(1.0)
+    assert fill.decision is Decision.AUTO_ACCEPT and fill.applied
+    assert fill.decision_history == [{"decision": "AUTO_ACCEPT", "round": 0, "source": "auto"}]
+    assert fill.edit == {"kind": "FILL", "params": {"gap": [9, 15], "n_rows": 5}}
+    filled = res.tracks[res.tracks["interp"] == 1]
+    assert filled["frame"].tolist() == [10, 11, 12, 13, 14]
+    assert filled["x"].tolist() == [60, 66, 72, 78, 84]  # the straight line, as integer boxes
+
+
+def test_fill_speed_signal_is_the_fastest_step_across_the_gap(tmp_path):
+    # 6 px/frame before the gap and after it, but the object covers 72 px over the six steps
+    # of the gap (12 px/frame on average): the filled path must speed up, so steps differ
+    rows = (box_rows(1, range(0, 10), 0.0, 0.0, vx=6.0)
+            + box_rows(1, range(15, 25), 54.0 + 72.0, 0.0, vx=6.0))
+    res = _refine(_write(tmp_path, table(rows)), tmp_path / "o.csv", fps=10)
+    (fill,) = _by(res, "fill")
+    seg = res.tracks[res.tracks["frame"].between(9, 15)].sort_values("frame")
+    steps = np.abs(np.diff(seg["x"].to_numpy(float)))  # px per frame; y and heights are constant
+    assert len(steps) == 6 and steps.sum() == 72 and steps.min() < steps.max()
+    assert fill.signals["max_fill_speed_h_s"] == pytest.approx(steps.max() * 10 / 60.0)
+    assert fill.signals["max_fill_speed_h_s"] > 2.0  # above the mean 72 / 6 px per frame
+    assert fill.signals["chord_h"] == pytest.approx(72.0 / 60.0)
+
+
+def test_smooth_record_values_with_one_displaced_box(tmp_path):
+    cfg = RefineConfig.defaults()
+    cfg.fill.smooth_existing = True
+    rows = box_rows(1, range(41), 100.0, 100.0, vx=2.0)
+    rows[20][2] += 30.0  # a single displaced middle box (frame 20)
+    src = _write(tmp_path, table(rows))
+    res = _refine(src, tmp_path / "o.csv", cfg=cfg, fps=10)
+    (sm,) = _by(res, "fill", EventKind.SMOOTH)
+    inp = io.read_tracks(src).work.set_index("frame")
+    out = res.tracks.set_index("frame")
+    shift = np.linalg.norm(box_centers(out.loc[inp.index, ["x", "y", "w", "h"]].to_numpy())
+                           - box_centers(inp[["x", "y", "w", "h"]].to_numpy()), axis=1)
+    # the smoother pulls the displaced box back and (slightly) moves its neighbours
+    assert 0 < shift[20] < 30 and shift.argmax() == 20
+    assert sm.signals["max_shift_frame"] == 20
+    assert sm.signals["max_shift_px"] == pytest.approx(shift[20])
+    assert sm.signals["mean_shift_px"] == pytest.approx(shift.mean())  # over every row
+    assert sm.params["n_rows"] == int((shift > 0).sum()) and sm.params["n_rows"] >= 3
+    assert sm.frames == (0, 40) and sm.tracks == [1] and sm.lineage == [[[1, 0, 40]]]
+    assert sm.decision is Decision.AUTO_ACCEPT and sm.applied
+    assert not _by(res, "fill", EventKind.FILL)
+    # a straight track barely moves: at most rounding-level shifts, never a displaced box
+    d = tmp_path / "straight"
+    res = _refine(_write(d, table(box_rows(1, range(41), 100.0, 100.0, vx=6.0))), d / "o.csv",
+                  cfg=cfg, fps=10)
+    for e in _by(res, "fill", EventKind.SMOOTH):
+        assert e.signals["max_shift_px"] <= 1.5 and e.params["n_rows"] <= 3
+
+
+def test_summary_counts_on_a_two_class_table(tmp_path):
+    rows = (box_rows(1, range(0, 10), 0.0, 0.0, vx=6.0, cls=0)
+            + box_rows(1, range(15, 25), 90.0, 0.0, vx=6.0, cls=0)  # gap of 5 frames, refilled
+            + box_rows(2, range(100, 130), 800.0, 400.0, vx=2.0, cls=2)  # 3.0 s
+            + box_rows(3, range(200, 250), 300.0, 700.0, vx=-2.0, cls=0))  # 5.0 s
+    res = _refine(_write(tmp_path, table(rows)), tmp_path / "o.csv", fps=10)
+    assert _by(res, "link") == []
+    # observed spans: track 1 frames 0..24 = 2.5 s, track 2 = 3.0 s, track 3 = 5.0 s
+    before = {"tracks": 3, "tracks_per_class": {"0": 2, "2": 1}, "observed_rows": 100,
+              "interpolated_rows": 0, "median_track_seconds": 3.0}
+    assert res.summary["before"] == before
+    assert res.summary["after"] == {**before, "interpolated_rows": 5}
+    assert res.summary["events"] == {"fill/FILL/AUTO_ACCEPT": 1}
+    assert res.summary["vlm"] == {"calls": 0, "cache_hits": 0, "failures": 0}
+    assert Ledger.read(res.ledger_path).header["summary"] == res.summary
+    # an even count of tracks: the median is the mean of the two middle durations
+    d = tmp_path / "four"
+    res = _refine(_write(d, table(rows, box_rows(4, range(400, 420), 100.0, 100.0, vx=2.0,
+                                                  cls=0))), d / "o.csv", fps=10)
+    assert res.summary["before"]["median_track_seconds"] == pytest.approx((2.5 + 3.0) / 2)
+
+
+def test_header_records_video_context_hints_and_frame_size(tmp_path, synthetic_video):
+    video, _ = synthetic_video
+    info = io.video_info(video)
+    src = _write(tmp_path, table(box_rows(1, range(100), 10.0, 40.0, vx=1.5)))
+    ctx = table(box_rows(9, range(100), 200.0, 150.0, vx=1.0, w=80.0, h=60.0, cls=2))
+    ctx_tracks = _write(tmp_path, ctx, "ctx_tracks.txt")
+    dets = pd.DataFrame({"frame": ctx["frame"], "res": -1, "x": ctx["x"], "y": ctx["y"],
+                         "w": ctx["w"], "h": ctx["h"], "conf": 0.9, "cls": ctx["cls"]})
+    ctx_dets = _write(tmp_path, dets, "ctx_dets.txt")
+    hints = tmp_path / "hints.csv"
+    hints.write_text("track,cls,avg_score\n1,3,0.5\n")
+    assert info["frame_count"] >= 100  # the track frames fit the video
+
+    res = _refine(src, tmp_path / "a.txt", video_file=video, context_file=ctx_tracks,
+                  reclass_file=hints)
+    h = Ledger.read(res.ledger_path).header
+    assert h["inputs"]["video"]["frame_count"] == info["frame_count"]
+    assert h["inputs"]["video"]["fingerprint"] == {
+        "sha256": io.sha256_file(video), "size": video.stat().st_size,
+        "frame_count": info["frame_count"]}
+    assert h["inputs"]["video"]["path"] == str(video)
+    assert h["inputs"]["context"]["format"] == "tracks"
+    assert h["inputs"]["context"]["sha256"] == io.sha256_file(ctx_tracks)
+    assert h["inputs"]["context"]["path"] == str(ctx_tracks)
+    assert h["inputs"]["hints"] == {"reclass": {
+        "path": str(hints), "abs_path": str(hints.resolve()), "sha256": io.sha256_file(hints)}}
+    assert h["inputs"]["tracks"]["format"] == "dnt" and h["inputs"]["features"] is None
+    assert h["frame_size"] == [info["width"], info["height"]]  # from the video
+    assert (h["fps"], h["fps_source"]) == (pytest.approx(info["fps"]), "video")
+
+    cfg = RefineConfig.defaults()
+    cfg.frame_size = [640, 480]  # a config value wins over the video's size
+    res = _refine(src, tmp_path / "b.txt", cfg=cfg, video_file=video, context_file=ctx_dets)
+    h = Ledger.read(res.ledger_path).header
+    assert h["frame_size"] == [640, 480]
+    assert h["inputs"]["context"]["format"] == "dets"
+    assert h["inputs"]["hints"] is None
+
+    res = _refine(src, tmp_path / "c.txt", fps=10)  # no video, no override, no context
+    h = Ledger.read(res.ledger_path).header
+    assert h["frame_size"] is None and h["inputs"]["video"] is None
+    assert h["inputs"]["context"] is None and h["fps_source"] == "argument"
+    cfg = RefineConfig.defaults()
+    cfg.fps = 10.0
+    cfg.frame_size = [640, 480]
+    res = _refine(src, tmp_path / "d.txt", cfg=cfg)
+    h = Ledger.read(res.ledger_path).header
+    assert h["frame_size"] == [640, 480] and h["fps_source"] == "config"
+
+
+def _rider_rows(track=1, frames=range(50), x0=100.0):
+    """A fast, smooth person (3 box heights per second): a rider candidate."""
+    return box_rows(track, frames, x0, 110.0, vx=12.0, w=20.0, h=40.0)
+
+
+def _hints(dirpath, *rows, name="hints.csv"):
+    dirpath.mkdir(parents=True, exist_ok=True)
+    p = dirpath / name
+    p.write_text("track,cls,avg_score\n" + "".join(f"{t},{c},{a}\n" for t, c, a in rows))
+    return p
+
+
+@pytest.mark.parametrize("ncols", [7, 10])
+def test_mot_format_matches_the_equivalent_dnt_file(tmp_path, ncols):
+    cfg = RefineConfig.defaults()
+    cfg.class_ids = [2]
+    rows = (box_rows(1, range(0, 10), 0.0, 0.0, vx=6.0, cls=2, score=0.8)
+            + box_rows(1, range(15, 25), 90.0, 0.0, vx=6.0, cls=2, score=0.8)
+            + box_rows(2, range(0, 30), 500.0, 300.0, vx=-3.0, cls=2, score=0.6))
+    dnt = _write(tmp_path / "dnt", table(rows))
+    mot_df = table(rows).iloc[:, :ncols].copy()  # frame, id, x, y, w, h, conf[, r3, r4, r5]
+    if ncols == 10:
+        mot_df.iloc[:, 7:] = -1
+    mot = _write(tmp_path / "mot", mot_df)
+    a = _refine(dnt, tmp_path / "a.txt", cfg=cfg, fps=10)
+    b = _refine(mot, tmp_path / "b.txt", cfg=cfg, fps=10, fmt="mot")
+    pd.testing.assert_frame_equal(a.tracks, b.tracks)
+    assert (tmp_path / "a.txt").read_bytes() == (tmp_path / "b.txt").read_bytes()
+    assert set(b.tracks["cls"]) == {2}  # the class comes from config.class_ids[0]
+    assert (b.tracks["score"].round(2).isin([0.8, 0.6, -1.0])).all()
+    assert Ledger.read(b.ledger_path).header["inputs"]["tracks"]["format"] == "mot"
+    assert int(b.tracks["interp"].sum()) == 5
+    with pytest.raises(ValueError, match="unknown track format"):
+        _refine(mot, tmp_path / "c.txt", fps=10, fmt="csv")
+
+
+def test_reclass_hint_settles_the_rider_subtype_and_is_applied(tmp_path, caplog):
+    hints = _hints(tmp_path, (1, 3, 0.95), (99, 1, 0.8))  # 99 is not a track of this file
+    src = _write(tmp_path, table(_rider_rows()))
+    with caplog.at_level(logging.WARNING):
+        res = _refine(src, tmp_path / "o.txt", fps=10, reclass_file=hints)
+    assert "unknown track IDs" in caplog.text
+    (ev,) = _by(res, "screen")
+    assert ev.kind is EventKind.RECLASS and ev.params["new_cls"] == 3
+    assert ev.signals["subtype_source"] == "reclass" and ev.signals["subtype"] == "motorcycle"
+    assert ev.decision is Decision.AUTO_ACCEPT and ev.applied
+    assert set(res.tracks["cls"]) == {3}  # every row carries the motorcycle class
+    h = Ledger.read(res.ledger_path).header
+    assert h["inputs"]["hints"]["reclass"]["sha256"] == io.sha256_file(hints)
+    assert h["inputs"]["hints"]["reclass"]["path"] == str(hints)
+    # without the hint the rider is only a pending candidate that needs a subtype
+    d = tmp_path / "nohint"
+    res = _refine(_write(d, table(_rider_rows())), d / "o.txt", fps=10)
+    (ev,) = _by(res, "screen")
+    assert ev.params["new_cls"] is None and ev.decision is Decision.HUMAN_PENDING
+    assert not ev.applied and set(res.tracks["cls"]) == {0}
+
+
+def test_a_malformed_hints_file_fails_before_any_output(tmp_path):
+    bad = tmp_path / "bad.csv"
+    bad.write_text("id,cls\n1,3\n")
+    src = _write(tmp_path, table(_rider_rows()))
+    with pytest.raises(ValueError, match="track, cls, avg_score"):
+        _refine(src, tmp_path / "o.txt", fps=10, reclass_file=bad)
+    assert not (tmp_path / "o.txt").exists() and not (tmp_path / "o.ledger.jsonl").exists()
+
+
+def _split_rider_scene():
+    """Raw track 1 walks, then (size jump + appearance step) rides fast: a confident split."""
+    rows = (box_rows(1, range(0, 50), 100.0, 110.0, vx=3.0, w=20.0, h=40.0)
+            + box_rows(1, range(50, 100), 250.0, 110.0, vx=24.0, w=32.0, h=64.0))
+    frames = list(range(100))
+    app = ArrayAppearance({1: (frames, np.array([A_ if f < 50 else B_ for f in frames]))})
+    return table(rows), app
+
+
+def test_a_reclass_hint_is_unlocalized_once_the_raw_track_was_split(tmp_path):
+    rows, app = _split_rider_scene()
+    hints = _hints(tmp_path, (1, 3, 0.95))
+    refiner = TrackRefiner(appearance_factory=lambda **_kw: app)
+    refiner.refine(_write(tmp_path, rows), tmp_path / "o.txt", fps=10, verbose=False,
+                   reclass_file=hints)
+    res = refiner.last_result
+    (split,) = _by(res, "switch")
+    assert split.decision is Decision.AUTO_ACCEPT and split.applied  # an accepted split
+    assert split.params["cut_frame"] == 50
+    (ev,) = _by(res, "screen")
+    assert ev.kind is EventKind.RECLASS and ev.tracks == [2]  # the fast tail, a new track
+    # the hint was made for the whole raw track: recorded, but it cannot settle the subtype
+    assert ev.signals["hint_unlocalized"] == {"cls": 3, "avg_score": 0.95}
+    assert ev.params["new_cls"] is None and "subtype_source" not in ev.signals
+    assert ev.signals["needs_subtype"] is True
+    assert ev.decision is Decision.HUMAN_PENDING and not ev.applied
+    assert set(res.tracks["cls"]) == {0}
+    # the same scene without the split: the hint stays localized and settles the tail
+    # (a raw track that was never split)
+    d = tmp_path / "nosplit"
+    src = _write(d, table(_rider_rows()))
+    res = _refine(src, d / "o.txt", fps=10, reclass_file=_hints(d, (1, 3, 0.95)))
+    (ev,) = _by(res, "screen")
+    assert ev.params["new_cls"] == 3 and "hint_unlocalized" not in ev.signals
+
+
+def test_refine_batch_passes_reclass_and_context_files_by_position(tmp_path):
+    src_a = _write(tmp_path / "in", table(_rider_rows()), "a_track.txt")
+    src_b = _write(tmp_path / "in", table(_rider_rows()), "b_track.txt")
+    hint_a = _hints(tmp_path / "in", (1, 3, 0.95), name="ha.csv")  # motorcycle
+    hint_b = _hints(tmp_path / "in", (1, 1, 0.95), name="hb.csv")  # cyclist
+    out_dir = tmp_path / "out"
+    refiner = TrackRefiner()
+    got = refiner.refine_batch([src_a, src_b], reclass_files=[hint_a, hint_b],
+                               output_path=out_dir, fps=10, verbose=False)
+    cls = [set(pd.read_csv(p, header=None)[7]) for p in got]
+    assert cls == [{3}, {1}]
+    for name, hint in (("a", hint_a), ("b", hint_b)):
+        h = Ledger.read(out_dir / f"{name}_refined.ledger.jsonl").header
+        assert h["inputs"]["hints"]["reclass"]["sha256"] == io.sha256_file(hint)
+    # context files: a passenger inside a car in file 1's context, a car far away in file 2's
+    ped = table(box_rows(1, range(50), 100.0, 110.0, vx=3.0, w=20.0, h=40.0))
+    src_c = _write(tmp_path / "in", ped, "c_track.txt")
+    src_d = _write(tmp_path / "in", ped, "d_track.txt")
+    car_over = _write(tmp_path / "in", table(box_rows(9, range(50), 80.0, 100.0, vx=3.0, w=80.0,
+                                                      h=60.0, cls=2)), "car_over.txt")
+    car_far = _write(tmp_path / "in", table(box_rows(9, range(50), 900.0, 700.0, vx=3.0, w=80.0,
+                                                     h=60.0, cls=2)), "car_far.txt")
+    out2 = tmp_path / "out2"
+    got = refiner.refine_batch([src_c, src_d], context_files=[car_over, car_far],
+                               output_path=out2, fps=10, verbose=False)
+    assert [len(pd.read_csv(p, header=None)) if Path(p).stat().st_size else 0
+            for p in got] == [0, 50]  # the passenger is dropped only where the car is
+    for name, ctx in (("c", car_over), ("d", car_far)):
+        h = Ledger.read(out2 / f"{name}_refined.ledger.jsonl").header
+        assert h["inputs"]["context"]["sha256"] == io.sha256_file(ctx)
+
+
+def test_the_ledger_is_written_before_the_output_track_file(tmp_path, monkeypatch):
+    src = _write(tmp_path, table(box_rows(1, range(30), 0.0, 0.0, vx=2.0)))
+
+    def boom(self, path):
+        raise RuntimeError("disk full")
+
+    monkeypatch.setattr(Ledger, "write", boom)
+    with pytest.raises(RuntimeError, match="disk full"):
+        TrackRefiner().refine(src, tmp_path / "o.txt", fps=10, verbose=False)
+    assert not (tmp_path / "o.txt").exists()  # an existing output would be skipped by a batch
+    monkeypatch.undo()
+    res = _refine(src, tmp_path / "o.txt", fps=10)
+    assert (tmp_path / "o.txt").exists() and res.ledger_path.exists()
+    # the ledger already exists whenever the output does: check the write order directly
+    order = []
+    orig_write, orig_tracks = Ledger.write, io.write_tracks
+    monkeypatch.setattr(Ledger, "write", lambda self, p: (order.append("ledger"),
+                                                          orig_write(self, p)))
+    monkeypatch.setattr(io, "write_tracks", lambda w, p: (order.append("tracks"),
+                                                          orig_tracks(w, p)))
+    _refine(src, tmp_path / "o2.txt", fps=10)
+    assert order == ["ledger", "tracks"]
+
+
+def test_an_empty_track_file_may_come_with_an_empty_context_file(tmp_path):
+    (tmp_path / "e.txt").write_text("")
+    (tmp_path / "c.txt").write_text("")
+    res = _refine(tmp_path / "e.txt", tmp_path / "o.csv", fps=10, context_file=tmp_path / "c.txt")
+    assert (tmp_path / "o.csv").read_text() == "" and res.events == []
+    assert Ledger.read(res.ledger_path).header["inputs"]["context"]["format"] == "tracks"
+    (tmp_path / "w.txt").write_text("\n \n")  # blank lines count as empty too
+    _refine(tmp_path / "w.txt", tmp_path / "o2.csv", fps=10, context_file=tmp_path / "w.txt")
+    # a non-empty track file still may not be its own context
+    src = _write(tmp_path, table(box_rows(1, range(40), 100.0, 100.0, vx=2.0)))
+    with pytest.raises(ValueError, match="same content"):
+        _refine(src, tmp_path / "o3.csv", fps=10, context_file=src)
+
+
+@pytest.mark.parametrize("count", [0, -1])
+def test_an_unknown_video_frame_count_skips_the_frame_check(tmp_path, synthetic_video,
+                                                            monkeypatch, count):
+    video, _ = synthetic_video
+    real = io.video_info(video)
+    monkeypatch.setattr(io, "video_info", lambda _p: {**real, "frame_count": count})
+    src = _write(tmp_path, table(box_rows(1, range(495, 505), 0.0, 0.0)))  # beyond a 150-frame clip
+    res = _refine(src, tmp_path / "o.txt", video_file=video)
+    assert Ledger.read(res.ledger_path).header["inputs"]["video"]["frame_count"] == count
+    assert len(res.tracks) == 10
+
+
+def test_the_fps_error_explains_both_ways_to_get_a_frame_rate(tmp_path):
+    for video_fps in (None, 0.0):
+        with pytest.raises(ValueError) as err:
+            resolve_fps(None, None, video_fps)
+        msg = str(err.value)
+        assert "frame rate is needed" in msg and "fps=" in msg
+        assert "no video is given" in msg and "no usable frame rate" in msg
+    assert "ValueError" in TrackRefiner.refine_batch.__doc__

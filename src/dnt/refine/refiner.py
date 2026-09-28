@@ -63,14 +63,21 @@ def resolve_fps(arg, cfg_fps, video_fps) -> tuple[float, str]:
         return explicit, source
     if video_fps and video_fps > 0:
         return float(video_fps), "video"
-    raise ValueError("no frame rate: pass fps=... (or --fps) when no video is given; "
-                     "every threshold in seconds depends on it")
+    raise ValueError("a frame rate is needed because every threshold is in seconds: pass fps=... "
+                     "(or --fps) when no video is given, or when the video reports no usable "
+                     "frame rate")
 
 
 def _file_record(path, sha256: str | None = None, **extra) -> dict:
     p = Path(path)
     return {"path": str(path), "abs_path": str(p.resolve()),
             "sha256": sha256 if sha256 is not None else io.sha256_file(p), **extra}
+
+
+def _is_blank(path) -> bool:
+    """Whether a file has no content besides whitespace (checked without reading big files)."""
+    size = Path(path).stat().st_size
+    return size == 0 or (size <= 4096 and not Path(path).read_bytes().strip())
 
 
 def table_summary(work: pd.DataFrame, fps: float) -> dict:
@@ -334,7 +341,7 @@ class TrackRefiner:
         context_sha = None
         if context_file is not None:
             context_sha = io.sha256_file(context_file)
-            if context_sha == track_sha:
+            if context_sha == track_sha and not _is_blank(track_file):
                 raise ValueError(
                     "context_file has the same content as track_file; the occlusion mask "
                     "compares each track with the context boxes, so the same file would flag "
@@ -351,7 +358,8 @@ class TrackRefiner:
             frame_size = None
         tin = io.read_tracks(track_file, fmt=fmt, class_id=cfg.class_ids[0])
         work = tin.work
-        if vinfo and len(work) and int(work["frame"].max()) > vinfo["frame_count"]:
+        if (vinfo and vinfo["frame_count"] > 0 and len(work)
+                and int(work["frame"].max()) > vinfo["frame_count"]):
             raise ValueError(
                 f"track frame {int(work['frame'].max())} exceeds the video's frame count "
                 f"{vinfo['frame_count']}; the track file does not belong to this video"
@@ -384,7 +392,6 @@ class TrackRefiner:
                 work, tick=lambda name: (pbar.set_postfix_str(name), pbar.update(1))
             )
         work, id_map = renumber(work)
-        io.write_tracks(work, out)
         summary = {
             "before": before, "after": table_summary(work, fps_val),
             "events": _event_counts(events),
@@ -401,7 +408,10 @@ class TrackRefiner:
             "n_filled_input_rows_removed": tin.n_filled_removed,
             "smoothing": cfg.fill.smooth_existing, "summary": summary,
         }
+        # The ledger goes first and the track file last, so an existing output implies its ledger
+        # (refine_batch skips existing outputs).
         Ledger(header, events).write(paths["ledger"])
+        io.write_tracks(work, out)
         log.info("refined %s: %s", out, summary["events"])
         self.last_result = RefineResult(tracks=work, ledger_path=paths["ledger"],
                                         review_path=None, summary=summary, events=events)
@@ -425,6 +435,13 @@ class TrackRefiner:
         Files are paired by position. Each output is ``<output_path>/<base>_refined.txt``,
         where ``<base>`` is the track file's stem without a trailing ``_track``. Existing
         outputs are skipped unless ``is_overwrite``; with ``is_report`` they are still listed.
+
+        Raises
+        ------
+        ValueError
+            If ``output_path`` is missing, or if ``video_files``, ``context_files`` or
+            ``reclass_files`` is given with a length different from ``track_files``.
+
         """
         if output_path is None:
             raise ValueError("refine_batch needs output_path: every run writes a ledger "
