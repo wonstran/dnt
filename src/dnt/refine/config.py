@@ -16,6 +16,7 @@ ENCODERS = ("dino", "reid", "none")
 BACKENDS = ("none", "openai_compat", "anthropic")
 _FIXED_KEY_DICTS = {"ramps", "weights", "weights_occluded", "legacy_weights", "reclass_map"}
 _RAMP_DICTS = {"ramps", "ramp", "reclass_ramp"}
+_RAMP_FIELDS = {"orphan.ramp", "hints.reclass_ramp"}
 
 
 def to_frames(seconds: float, fps: float) -> int:
@@ -318,7 +319,12 @@ class RefineConfig:
         ramps = {f"switch.ramps.{k}": v for k, v in self.switch.ramps.items()}
         ramps |= {f"screen.ramps.{k}": v for k, v in sc.ramps.items()}
         ramps |= {"orphan.ramp": self.orphan.ramp, "hints.reclass_ramp": self.hints.reclass_ramp}
-        for name, (lo, hi) in ramps.items():
+        for name, v in ramps.items():
+            try:
+                lo, hi = v
+            except (TypeError, ValueError):
+                p.append(f"{name} must be a list of exactly 2 numbers")
+                continue
             if lo == hi:
                 p.append(f"{name} needs lo != hi")
         if self.fps is not None and self.fps <= 0:
@@ -392,6 +398,17 @@ def _check_type(path: str, value, hint) -> None:
     raise ValueError(f"config key '{path}' has unknown type hint {hint}")
 
 
+def _check_ramp_shape(path: str, value) -> None:
+    """Check that a ramp field is a list of exactly 2 numbers."""
+    if not isinstance(value, (list, tuple)):
+        raise ValueError(f"config key '{path}' must be a list of exactly 2 numbers")
+    if len(value) != 2:
+        raise ValueError(f"config key '{path}' must be a list of exactly 2 numbers")
+    ok = all(isinstance(x, (int, float)) and not isinstance(x, bool) for x in value)
+    if not ok:
+        raise ValueError(f"config key '{path}' must be a list of exactly 2 numbers")
+
+
 def _overlay(obj, data: Mapping, path: str) -> None:
     names = {f.name for f in fields(obj)}
     hints = get_type_hints(type(obj))
@@ -451,4 +468,8 @@ def _overlay(obj, data: Mapping, path: str) -> None:
             if key in hints:
                 hint = hints[key]
                 _check_type(full_path, value, hint)
+
+            if full_path in _RAMP_FIELDS:
+                _check_ramp_shape(full_path, value)
+
             setattr(obj, key, value)

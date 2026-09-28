@@ -105,3 +105,22 @@ def test_mutation_independence():
     cfg1.link.class_groups[0].append(5)
     assert cfg2.class_ids == [1, 2]
     assert cfg2.link.class_groups == [[2, 7]]
+
+
+@pytest.mark.parametrize("data, match", [
+    ({"orphan": {"ramp": [0.5]}}, "orphan.ramp"),
+    ({"orphan": {"ramp": [1, 2, 3]}}, "orphan.ramp"),
+    ({"orphan": {"ramp": "x"}}, "orphan.ramp"),
+    ({"orphan": {"ramp": None}}, "orphan.ramp"),
+    ({"hints": {"reclass_ramp": [0.5]}}, "hints.reclass_ramp"),
+])
+def test_plain_ramp_fields_rejected_with_path(data, match):
+    with pytest.raises(ValueError, match=match):
+        RefineConfig.from_dict(data)
+
+
+def test_direct_ramp_assignment_validated():
+    cfg = RefineConfig.defaults()
+    cfg.orphan.ramp = [0.5]
+    with pytest.raises(ValueError, match=r"orphan\.ramp"):
+        cfg.validate()
