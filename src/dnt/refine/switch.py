@@ -96,21 +96,46 @@ def _silhouette(emb: np.ndarray, labels: np.ndarray) -> float:
 
 
 def _bimodal_split(ef, emb, purity: float):
-    """Return ``(k, silhouette)`` where sample ``k`` starts the second cluster, or None."""
-    if len(ef) < 4:
+    """Return ``(k, silhouette)`` where sample ``k`` starts the second cluster, or None.
+
+    Two-means clusters must split in time (spec 6.1): for the best cut ``k`` and orientation,
+    at least ``purity`` of the first cluster's samples lie before ``k`` and at least ``purity``
+    of the second cluster's samples lie at or after it (cluster recall).
+    """
+    n = len(ef)
+    if n < 4:
         return None
     labels = _two_means(emb)
     if labels.min() == labels.max():
         return None
+    ones = np.concatenate([[0], np.cumsum(labels == 1)])
+    zeros = np.concatenate([[0], np.cumsum(labels == 0)])
+    tot = {0: int(zeros[-1]), 1: int(ones[-1])}
+    cum = {0: zeros, 1: ones}
+    ks = np.arange(1, n)
     best = (-1.0, 0)
-    for k in range(1, len(ef)):
-        first = int(np.bincount(labels[:k], minlength=2).argmax())
-        score = min(float(np.mean(labels[:k] == first)), float(np.mean(labels[k:] != first)))
-        if score > best[0]:
-            best = (score, k)
+    for o in (0, 1):
+        other = 1 - o
+        r_first = cum[o][ks] / tot[o]
+        r_second = (tot[other] - cum[other][ks]) / tot[other]
+        score = np.minimum(r_first, r_second)
+        j = int(np.argmax(score))
+        if score[j] > best[0]:
+            best = (float(score[j]), int(ks[j]))
     if best[0] < purity:
         return None
     return best[1], _silhouette(emb, labels)
+
+
+def _covered_seconds(samples: np.ndarray, fps: float, motion_only: bool) -> float:
+    """Amount of clean data in seconds: observed frames (motion-only) or samples x stride."""
+    n = len(samples)
+    if n == 0:
+        return 0.0
+    if motion_only:
+        return n / fps
+    stride = 1.0 if n == 1 else max(1.0, float(np.median(np.diff(samples))))
+    return n * stride / fps
 
 
 def _score_track(g, contact, cfg: RefineConfig, fps, appearance, lin, delta, w):
@@ -127,7 +152,7 @@ def _score_track(g, contact, cfg: RefineConfig, fps, appearance, lin, delta, w):
     samples = frames if motion_only else ef
     if n < 3 or len(samples) == 0:
         return None
-    if (samples[-1] - samples[0] + 1) / fps < 2 * sc.min_side_seconds:
+    if _covered_seconds(samples, fps, motion_only) < 2 * sc.min_side_seconds:
         return None
     nis = kalman_nis(frames, boxes, process_var=mc.process_var, meas_var_pos=mc.meas_var_pos,
                      meas_var_size=mc.meas_var_size)
@@ -198,11 +223,9 @@ def _candidates(info, fps, cfg: RefineConfig, nms: int) -> list[int]:
     for i in kept:
         t = frames[i]
         before, after = samples[samples < t], samples[samples >= t]
-        if not len(before) or not len(after):
+        if _covered_seconds(before, fps, info["motion_only"]) < sc.min_side_seconds:
             continue
-        if (before[-1] - before[0] + 1) / fps < sc.min_side_seconds:
-            continue
-        if (after[-1] - after[0] + 1) / fps < sc.min_side_seconds:
+        if _covered_seconds(after, fps, info["motion_only"]) < sc.min_side_seconds:
             continue
         out.append(i)
     return sorted(out)
@@ -293,8 +316,10 @@ def propose_splits(
                 cross = float(bi @ aj - bi @ ai + bj @ ai - bj @ aj)
                 if cross > 0:
                     inc = sc.swap_boost * ramp(cross, *sc.ramps["cross"])
-                    boost[(ti, ii)] = (inc, tj, cross)
-                    boost[(tj, jj)] = (inc, ti, cross)
+                    for key, other in (((ti, ii), tj), ((tj, jj), ti)):
+                        old = boost.get(key)
+                        if old is None or (inc, cross, -other) > (old[0], old[2], -old[1]):
+                            boost[key] = (inc, other, cross)
 
     for tid, idx in cands.items():
         info, lin = infos[tid]
