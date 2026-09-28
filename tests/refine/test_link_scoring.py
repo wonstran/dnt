@@ -551,3 +551,84 @@ def test_vectorized_iob_matches_the_engine_iob():
     a[0, 2] = 0.0  # a zero-area hidden box
     want = np.array([iob_matrix(a[k : k + 1], b[k : k + 1])[0, 0] for k in range(60)])
     assert np.allclose(_iob_rows(a, b), want) and want.max() > 0.5
+
+
+# ---- fix round 1: the search window reaches max_gap_static and max_gap_occluded alike ----
+
+
+def _stopped(gap, fps=10.0, cfg=None):
+    """A track stopped for 30 frames and a restart ``gap`` frames after its end, same place."""
+    t2 = 29 + gap
+    w = _work(box_rows(1, range(30), 100.0, 100.0), box_rows(2, range(t2, t2 + 30), 100.0, 100.0))
+    return _cands(w, cfg=cfg, fps=fps)
+
+
+def test_static_pairs_beyond_max_gap_occluded_are_candidates():
+    # defaults at 10 fps: max_gap_static 10 s = 100 frames > max_gap_occluded 8 s = 80 frames
+    for gap in (85, 95):
+        found = _stopped(gap)
+        assert list(found) == [(1, 2)]
+        assert found[(1, 2)].gate == "static" and found[(1, 2)].g == gap
+    assert _stopped(100)[(1, 2)].gate == "static"  # exactly max_gap_static
+    assert (1, 2) not in _stopped(101)
+
+
+def test_max_gap_static_alone_moves_the_static_reach():
+    cfg = RefineConfig.defaults()
+    cfg.link.max_gap_static = 12.0  # 120 frames
+    assert _stopped(110, cfg=cfg)[(1, 2)].gate == "static"
+    assert _stopped(120, cfg=cfg)[(1, 2)].gate == "static"
+    assert (1, 2) not in _stopped(121, cfg=cfg)
+    low = RefineConfig.defaults()
+    low.link.max_gap_static = 5.0  # 50 frames, below max_gap_occluded (80)
+    assert _stopped(50, cfg=low)[(1, 2)].gate == "static"
+    # 60 frames is past the static limit; the stopped object is static-eligible so the occluded
+    # branch must not pick it up, even though 60 <= max_gap_occluded
+    assert (1, 2) not in _stopped(60, cfg=low)
+
+
+def _occluded_pair(gap, occluder=True):
+    """A moving box that vanishes and a same-speed restart ``gap`` frames later, under a truck."""
+    t1e = 39
+    t2 = t1e + gap
+    rows = [box_rows(1, range(40), 100.0, 100.0, vx=2.0, w=50.0, h=50.0),
+            box_rows(2, range(t2, t2 + 40), 100.0 + 2.0 * t2, 100.0, vx=2.0, w=50.0, h=50.0)]
+    if occluder:
+        rows.append(box_rows(99, range(t1e + 1, t2), 0.0, 0.0, w=4000.0, h=1000.0))
+    app = _same_app((1, range(40)), (2, range(t2, t2 + 40)))
+    return rows, app
+
+
+def test_max_gap_occluded_alone_moves_the_occluded_reach():
+    rows, app = _occluded_pair(110)  # 11 s at 10 fps, beyond both default limits
+    w = _work(*rows)
+    assert (1, 2) not in _cands(w, fps=10.0, app=app)
+    cfg = RefineConfig.defaults()
+    cfg.link.max_gap_occluded = 12.0  # 120 frames > max_gap_static 100
+    c = _cands(w, cfg=cfg, fps=10.0, app=app)[(1, 2)]
+    assert c.gate == "occluded" and c.g == 110
+    cfg.link.max_gap_occluded = 10.9
+    assert (1, 2) not in _cands(w, cfg=cfg, fps=10.0, app=app)
+
+
+_ZERO_MOTION = {"mot": 0.0, "gap": 0.0, "app": 1.0}
+
+
+def test_zero_motion_and_gap_weights_need_appearance():
+    cfg = RefineConfig.defaults()
+    cfg.link.weights = dict(_ZERO_MOTION)
+    cfg.link.weights_occluded = dict(_ZERO_MOTION)
+    w = _collinear()
+    with pytest.raises(ValueError, match=r"link\.weights.*positive"):
+        _cands(w, cfg=cfg)
+    c = _cands(w, cfg=cfg, app=_same_app((1, range(40)), (2, range(50, 90))))[(1, 2)]
+    assert c.score == pytest.approx(1.0)  # c_app 0, all weight on appearance
+    opposite = _cands(w, cfg=cfg, app=_app(-A_))[(1, 2)]
+    assert opposite.score == pytest.approx(0.0)
+
+
+def test_zero_occluded_motion_weights_are_rejected_in_motion_only_mode():
+    cfg = RefineConfig.defaults()
+    cfg.link.weights_occluded = dict(_ZERO_MOTION)
+    with pytest.raises(ValueError, match=r"link\.weights_occluded.*positive"):
+        _cands(_collinear(), cfg=cfg)

@@ -745,20 +745,29 @@ def score_candidates(
 ) -> tuple[list[Candidate], dict[int, TrackDesc]]:
     """Gate and score every end->start pair (spec 6.3)."""
     lc = cfg.link
+    motion_only = appearance is None
+    if motion_only:
+        for name in ("weights", "weights_occluded"):
+            wts = getattr(lc, name)
+            if wts["mot"] + wts["gap"] <= 0:
+                raise ValueError(
+                    f"link.{name}: motion-only scoring (no appearance provider) needs a "
+                    "positive mot + gap weight"
+                )
     descs = describe_tracks(work, cfg, fps, occluded)
     if len(descs) < 2:
         return [], descs
     occl = _Occluders(work, context)
     gaps = (to_frames(lc.max_gap, fps), to_frames(lc.max_gap_static, fps),
             to_frames(lc.max_gap_occluded, fps))
+    reach = max(gaps)  # each gate applies its own limit; the window only bounds the search
     order = sorted(descs.values(), key=lambda d: (d.t_s, d.track))
     starts = np.array([d.t_s for d in order])
-    motion_only = appearance is None
     cache: dict = {}
     cands: list[Candidate] = []
     for di in sorted(descs.values(), key=lambda d: d.track):
         lo = int(np.searchsorted(starts, di.t_e - lc.overlap_frames, side="left"))
-        hi = int(np.searchsorted(starts, di.t_e + gaps[2], side="right"))
+        hi = int(np.searchsorted(starts, di.t_e + reach, side="right"))
         for dj in order[lo:hi]:
             if dj.track == di.track or not _class_ok(di.cls_major, dj.cls_major, lc.class_groups):
                 continue
