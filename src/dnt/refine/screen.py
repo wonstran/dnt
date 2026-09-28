@@ -57,10 +57,15 @@ def _unit(track, rows: pd.DataFrame, cfg, fps, localized=None, unlocalized=None)
     frames = rows["frame"].to_numpy(int)
     boxes = rows[["x", "y", "w", "h"]].to_numpy(float)
     return _Unit(
-        track=int(track), frames=frames, boxes=boxes, score=rows["score"].to_numpy(float),
+        track=int(track),
+        frames=frames,
+        boxes=boxes,
+        score=rows["score"].to_numpy(float),
         hmed=max(float(np.median(boxes[:, 3])), 1.0),
         v=speeds_hps(frames, boxes, fps, cfg.motion.height_window),
-        vel=_pixel_velocity(frames, boxes), localized_hint=localized, unlocalized_hint=unlocalized,
+        vel=_pixel_velocity(frames, boxes),
+        localized_hint=localized,
+        unlocalized_hint=unlocalized,
         area=float(np.median(boxes[:, 2] * boxes[:, 3])),
         unique_frames=bool(np.all(np.diff(frames) > 0)),
     )
@@ -125,8 +130,9 @@ class _ContextIndex:
 _NO_BOXES = (np.empty((0, 4)), np.empty((0, 2)))
 
 
-def _context_fraction(u: _Unit, ctx: _ContextIndex, classes, overlap: str, thr: float,
-                      cfg: RefineConfig, fps: float) -> float:
+def _context_fraction(
+    u: _Unit, ctx: _ContextIndex, classes, overlap: str, thr: float, cfg: RefineConfig, fps: float
+) -> float:
     """Fraction of rows where a context box of ``classes`` overlaps ``u`` and moves with it."""
     overlap_fn = _iob_rows if overlap == "iob" else iou_matrix
     view = ctx.view(classes)
@@ -190,8 +196,9 @@ def _static(u: _Unit, cfg, fps, static_meds: tuple[np.ndarray, np.ndarray], cap:
 def _in_vehicle(u: _Unit, ctx: _ContextIndex, cfg, fps):
     if not ctx.present:
         return None
-    frac = _context_fraction(u, ctx, cfg.context.vehicle_classes, "iob",
-                             cfg.screen.in_vehicle_iob, cfg, fps)
+    frac = _context_fraction(
+        u, ctx, cfg.context.vehicle_classes, "iob", cfg.screen.in_vehicle_iob, cfg, fps
+    )
     return ramp(frac, *cfg.screen.ramps["inside"]), {"inside_frac": frac}, {"reason": "in_vehicle"}
 
 
@@ -200,16 +207,25 @@ def _rider(u: _Unit, ctx: _ContextIndex, cfg: RefineConfig, fps):
     v = u.v[1:]
     v = v[np.isfinite(v)]
     frac_fast = float(np.mean(v > sc.rider_speed)) if len(v) else 0.0
-    smooth = heading_smoothness(u.frames, u.boxes, fps, window=cfg.motion.height_window,
-                                moving_min=cfg.motion.moving_min)
+    smooth = heading_smoothness(
+        u.frames, u.boxes, fps, window=cfg.motion.height_window, moving_min=cfg.motion.moving_min
+    )
     smooth = 0.0 if not np.isfinite(smooth) else smooth
-    k = (_context_fraction(u, ctx, cfg.context.twowheeler_classes, "iou", sc.twowheeler_iou,
-                           cfg, fps) if ctx.present else None)
+    k = (
+        _context_fraction(
+            u, ctx, cfg.context.twowheeler_classes, "iou", sc.twowheeler_iou, cfg, fps
+        )
+        if ctx.present
+        else None
+    )
     hint = u.localized_hint
     p = hint.avg_score if hint is not None and hint.cls in cfg.hints.reclass_class_map else None
     rp = ramp(p, *cfg.hints.reclass_ramp) if p is not None else 0.0
-    score = max(ramp(frac_fast, *r["F"]) * ramp(smooth, *r["S"]),
-                ramp(k, *r["K"]) if k is not None else 0.0, rp)
+    score = max(
+        ramp(frac_fast, *r["F"]) * ramp(smooth, *r["S"]),
+        ramp(k, *r["K"]) if k is not None else 0.0,
+        rp,
+    )
     signals = {"F": frac_fast, "S_smooth": smooth, "K": k, "P": p}
     new_cls = None
     if p is not None and rp >= cfg.hints.subtype_min:
@@ -218,8 +234,10 @@ def _rider(u: _Unit, ctx: _ContextIndex, cfg: RefineConfig, fps):
         signals["subtype_source"] = "reclass"
         signals["subtype"] = subtype
     if u.unlocalized_hint is not None:
-        signals["hint_unlocalized"] = {"cls": u.unlocalized_hint.cls,
-                                       "avg_score": u.unlocalized_hint.avg_score}
+        signals["hint_unlocalized"] = {
+            "cls": u.unlocalized_hint.cls,
+            "avg_score": u.unlocalized_hint.avg_score,
+        }
     return score, signals, {"new_cls": new_cls}
 
 
@@ -245,14 +263,19 @@ def _duplicate(u: _Unit, index: _DupIndex, cfg: RefineConfig, fps):
     for k in cand:
         tid = int(index.ids[k])
         o = index.units[tid]
-        common, iu, io_ = np.intersect1d(u.frames, o.frames, assume_unique=(
-            u.unique_frames and o.unique_frames), return_indices=True)
+        common, iu, io_ = np.intersect1d(
+            u.frames,
+            o.frames,
+            assume_unique=(u.unique_frames and o.unique_frames),
+            return_indices=True,
+        )
         if len(common) < sc.duplicate_min_frames:
             continue
         iob = _paired_iob(u.boxes[iu], o.boxes[io_])
         dv = np.linalg.norm(u.vel[iu] - o.vel[io_], axis=1) / u.hmed * fps
         frac = int(np.count_nonzero((iob >= sc.duplicate_iob) & (dv < sc.move_together))) / len(
-            common)
+            common
+        )
         s = ramp(frac, *sc.ramps["D"])
         if best is None or s > best[0]:
             best = (s, {"D": frac}, {"reason": "duplicate", "of": tid})
@@ -279,7 +302,10 @@ def _segments(rows: pd.DataFrame, cuts: list[int]) -> list[pd.DataFrame]:
 
 
 def propose_screen(
-    work: pd.DataFrame, cfg: RefineConfig, fps: float, sctx: ScreenContext,
+    work: pd.DataFrame,
+    cfg: RefineConfig,
+    fps: float,
+    sctx: ScreenContext,
     segment_cuts: dict[int, list[int]],
 ) -> list[Event]:
     """Propose DROP / RECLASS events for false tracks (spec 6.2)."""
@@ -313,8 +339,11 @@ def propose_screen(
         hint = sctx.hints.get(next(iter(raw_ids))) if len(raw_ids) == 1 else None
         segs = _segments(g, segment_cuts.get(t, []))
         localized = hint is not None and not segs and not (raw_ids & sctx.split_raw_ids)
-        whole = replace(wholes[t], localized_hint=hint if localized else None,
-                        unlocalized_hint=None if localized else hint)
+        whole = replace(
+            wholes[t],
+            localized_hint=hint if localized else None,
+            unlocalized_hint=None if localized else hint,
+        )
         seg_units = [_unit(t, s, cfg, fps, unlocalized=hint) for s in segs]
         whole_h = hyps(whole)
         seg_h = [hyps(su) for su in seg_units]
@@ -326,11 +355,15 @@ def propose_screen(
                 cand = None if w is None else (w[0], w[1], w[2], None)
             else:
                 scores = [h[name]() for h in seg_h]
-                sup = [(su, s) for su, s in zip(seg_units, scores, strict=True)
-                       if s is not None and s[0] >= sc.reject_below]
-                segments = [[int(su.frames[0]), int(su.frames[-1]),
-                             None if s is None else float(s[0])]
-                            for su, s in zip(seg_units, scores, strict=True)]
+                sup = [
+                    (su, s)
+                    for su, s in zip(seg_units, scores, strict=True)
+                    if s is not None and s[0] >= sc.reject_below
+                ]
+                segments = [
+                    [int(su.frames[0]), int(su.frames[-1]), None if s is None else float(s[0])]
+                    for su, s in zip(seg_units, scores, strict=True)
+                ]
                 if sup and len(sup) == len(seg_units):
                     # Every segment supports the hypothesis: the event covers the whole track,
                     # scored by its weakest segment (spec 6.2). The whole-track score is not
@@ -351,18 +384,32 @@ def propose_screen(
         name, (score, signals, params, spans) = best
         lin = lineage_of_rows(g)
         kind = EventKind.RECLASS if name == "rider" else EventKind.DROP
-        frames = ((spans[0][0], spans[-1][1]) if spans is not None
-                  else (int(g["frame"].iloc[0]), int(g["frame"].iloc[-1])))
-        events.append(Event.propose(
-            stage=STAGE, kind=kind, tracks=[t], lineage=[lin], frames=frames,
-            params={**params, "spans": spans}, algo_score=score,
-            signals={**signals, "hypothesis": name},
-        ))
+        frames = (
+            (spans[0][0], spans[-1][1])
+            if spans is not None
+            else (int(g["frame"].iloc[0]), int(g["frame"].iloc[-1]))
+        )
+        events.append(
+            Event.propose(
+                stage=STAGE,
+                kind=kind,
+                tracks=[t],
+                lineage=[lin],
+                frames=frames,
+                params={**params, "spans": spans},
+                algo_score=score,
+                signals={**signals, "hypothesis": name},
+            )
+        )
     return events
 
 
 def propose_orphans(
-    work: pd.DataFrame, cfg: RefineConfig, fps: float, *, linked_tracks: set[int],
+    work: pd.DataFrame,
+    cfg: RefineConfig,
+    fps: float,
+    *,
+    linked_tracks: set[int],
     pending_endpoints: set[int],
 ) -> tuple[list[Event], list[int]]:
     """Propose dropping short unlinked tracks; defer those with a pending link (spec 6.2)."""
@@ -383,10 +430,16 @@ def propose_orphans(
         if score < oc.reject_below:
             continue
         g = g.sort_values("frame")
-        events.append(Event.propose(
-            stage=ORPHAN_STAGE, kind=EventKind.DROP, tracks=[t], lineage=[lineage_of_rows(g)],
-            frames=(int(g["frame"].iloc[0]), int(g["frame"].iloc[-1])),
-            params={"reason": "orphan", "spans": None}, algo_score=score,
-            signals={"observed_seconds": observed},
-        ))
+        events.append(
+            Event.propose(
+                stage=ORPHAN_STAGE,
+                kind=EventKind.DROP,
+                tracks=[t],
+                lineage=[lineage_of_rows(g)],
+                frames=(int(g["frame"].iloc[0]), int(g["frame"].iloc[-1])),
+                params={"reason": "orphan", "spans": None},
+                algo_score=score,
+                signals={"observed_seconds": observed},
+            )
+        )
     return events, deferred

@@ -46,7 +46,11 @@ def xywh_to_z(boxes) -> np.ndarray:
 
 
 def kalman_nis(
-    frames, boxes, *, process_var: float = 10.0, meas_var_pos: float = 25.0,
+    frames,
+    boxes,
+    *,
+    process_var: float = 10.0,
+    meas_var_pos: float = 25.0,
     meas_var_size: float = 16.0,
 ) -> np.ndarray:
     """Return the normalized innovation squared at each observed row; NaN for the first row."""

@@ -119,17 +119,35 @@ class Event:
 
     @classmethod
     def propose(
-        cls, *, stage: str, kind, tracks, lineage, frames, params: dict, algo_score: float,
-        signals: dict | None = None, round: int = 0,
+        cls,
+        *,
+        stage: str,
+        kind,
+        tracks,
+        lineage,
+        frames,
+        params: dict,
+        algo_score: float,
+        signals: dict | None = None,
+        round: int = 0,
     ) -> Event:
         """Create an undecided proposal and compute its key."""
         params = clean_json(dict(params))
         lineage = clean_json(lineage)
         return cls(
-            id="", proposal_key=proposal_key(stage, kind, lineage, params), round=int(round),
-            stage=stage, kind=EventKind(kind), tracks=[int(t) for t in tracks], lineage=lineage,
-            frames=(int(frames[0]), int(frames[1])), params=params, edit=None,
-            algo_score=float(algo_score), signals=clean_json(dict(signals or {})), decision=None,
+            id="",
+            proposal_key=proposal_key(stage, kind, lineage, params),
+            round=int(round),
+            stage=stage,
+            kind=EventKind(kind),
+            tracks=[int(t) for t in tracks],
+            lineage=lineage,
+            frames=(int(frames[0]), int(frames[1])),
+            params=params,
+            edit=None,
+            algo_score=float(algo_score),
+            signals=clean_json(dict(signals or {})),
+            decision=None,
         )
 
     @property

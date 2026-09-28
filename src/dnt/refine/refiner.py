@@ -45,9 +45,11 @@ class RefineResult:
 def output_paths(out) -> dict[str, Path]:
     """Return the ledger, review, and feature-cache paths that sit next to ``out`` (spec 2.5)."""
     out = Path(out)
-    return {"ledger": out.with_suffix(".ledger.jsonl"),
-            "review": out.with_suffix(".review.html"),
-            "features": out.with_suffix(".features.npz")}
+    return {
+        "ledger": out.with_suffix(".ledger.jsonl"),
+        "review": out.with_suffix(".review.html"),
+        "features": out.with_suffix(".features.npz"),
+    }
 
 
 def resolve_fps(arg, cfg_fps, video_fps) -> tuple[float, str]:
@@ -58,20 +60,31 @@ def resolve_fps(arg, cfg_fps, video_fps) -> tuple[float, str]:
         if explicit <= 0:
             raise ValueError(f"fps must be positive, got {explicit}")
         if video_fps and abs(explicit - video_fps) / video_fps > 0.01:
-            log.warning("fps %.3f (%s) differs from the video's %.3f by more than 1%%; "
-                        "using %.3f", explicit, source, video_fps, explicit)
+            log.warning(
+                "fps %.3f (%s) differs from the video's %.3f by more than 1%%; using %.3f",
+                explicit,
+                source,
+                video_fps,
+                explicit,
+            )
         return explicit, source
     if video_fps and video_fps > 0:
         return float(video_fps), "video"
-    raise ValueError("a frame rate is needed because every threshold is in seconds: pass fps=... "
-                     "(or --fps) when no video is given, or when the video reports no usable "
-                     "frame rate")
+    raise ValueError(
+        "a frame rate is needed because every threshold is in seconds: pass fps=... "
+        "(or --fps) when no video is given, or when the video reports no usable "
+        "frame rate"
+    )
 
 
 def _file_record(path, sha256: str | None = None, **extra) -> dict:
     p = Path(path)
-    return {"path": str(path), "abs_path": str(p.resolve()),
-            "sha256": sha256 if sha256 is not None else io.sha256_file(p), **extra}
+    return {
+        "path": str(path),
+        "abs_path": str(p.resolve()),
+        "sha256": sha256 if sha256 is not None else io.sha256_file(p),
+        **extra,
+    }
 
 
 def _is_blank(path) -> bool:
@@ -83,15 +96,21 @@ def _is_blank(path) -> bool:
 def table_summary(work: pd.DataFrame, fps: float) -> dict:
     """Summarize a work table for the ledger header (spec 8.3)."""
     if work.empty:
-        return {"tracks": 0, "tracks_per_class": {}, "observed_rows": 0, "interpolated_rows": 0,
-                "median_track_seconds": 0.0}
+        return {
+            "tracks": 0,
+            "tracks_per_class": {},
+            "observed_rows": 0,
+            "interpolated_rows": 0,
+            "median_track_seconds": 0.0,
+        }
     per_track = work.groupby("track")["cls"].agg(majority_class)
     obs = work[work["interp"] == 0]
     dur = obs.groupby("track")["frame"].agg(lambda f: (f.max() - f.min() + 1) / fps)
     return {
         "tracks": int(work["track"].nunique()),
-        "tracks_per_class": {str(k): int(v)
-                             for k, v in per_track.value_counts().sort_index().items()},
+        "tracks_per_class": {
+            str(k): int(v) for k, v in per_track.value_counts().sort_index().items()
+        },
         "observed_rows": len(obs),
         "interpolated_rows": int((work["interp"] == 1).sum()),
         "median_track_seconds": float(dur.median()) if len(dur) else 0.0,
@@ -112,10 +131,15 @@ def fill_stage(
     max_gap_s = cfg.fill.max_gap if cfg.fill.max_gap is not None else cfg.link.max_gap
     before = work[io.WORK_COLUMNS].reset_index(drop=True)
     out = interpolate_tracks_rts(
-        tracks=before.copy(), fill_gaps_only=True, smooth_existing=cfg.fill.smooth_existing,
-        process_var=cfg.motion.process_var, meas_var_pos=cfg.motion.meas_var_pos,
-        meas_var_size=cfg.motion.meas_var_size, max_gap=to_frames(max_gap_s, fps),
-        verbose=False, protected_gaps=protected,
+        tracks=before.copy(),
+        fill_gaps_only=True,
+        smooth_existing=cfg.fill.smooth_existing,
+        process_var=cfg.motion.process_var,
+        meas_var_pos=cfg.motion.meas_var_pos,
+        meas_var_size=cfg.motion.meas_var_size,
+        max_gap=to_frames(max_gap_s, fps),
+        verbose=False,
+        protected_gaps=protected,
     )
     out = out.sort_values(["track", "frame"]).reset_index(drop=True)
     out["raw_id"] = out.groupby("track")["raw_id"].ffill().astype(int)
@@ -133,12 +157,18 @@ def fill_stage(
             ends = box_centers(boxes[[0, -1]])
             h = max(float(np.median(boxes[:, 3])), 1.0)
             ev = Event.propose(
-                stage="fill", kind=EventKind.FILL, tracks=[int(t)], lineage=[lin],
+                stage="fill",
+                kind=EventKind.FILL,
+                tracks=[int(t)],
+                lineage=[lin],
                 frames=(f_before, f_after),
-                params={"gap": [f_before, f_after], "n_rows": int(b - a + 1)}, algo_score=1.0,
-                signals={"gap_seconds": (f_after - f_before - 1) / fps,
-                         "chord_h": float(np.linalg.norm(ends[1] - ends[0]) / h),
-                         "max_fill_speed_h_s": float(np.nanmax(v[1:])) if len(v) > 1 else 0.0},
+                params={"gap": [f_before, f_after], "n_rows": int(b - a + 1)},
+                algo_score=1.0,
+                signals={
+                    "gap_seconds": (f_after - f_before - 1) / fps,
+                    "chord_h": float(np.linalg.norm(ends[1] - ends[0]) / h),
+                    "max_fill_speed_h_s": float(np.nanmax(v[1:])) if len(v) > 1 else 0.0,
+                },
             )
             decide(ev, Decision.AUTO_ACCEPT, source="auto")
             ev.applied = True
@@ -155,12 +185,18 @@ def fill_stage(
             k = int(np.argmax(shift))
             f = g["frame"].to_numpy(int)
             ev = Event.propose(
-                stage="fill", kind=EventKind.SMOOTH, tracks=[int(t)],
+                stage="fill",
+                kind=EventKind.SMOOTH,
+                tracks=[int(t)],
                 lineage=[lineage_of_rows(before[before["track"] == t])],
-                frames=(int(f.min()), int(f.max())), params={"n_rows": int((shift > 0).sum())},
+                frames=(int(f.min()), int(f.max())),
+                params={"n_rows": int((shift > 0).sum())},
                 algo_score=1.0,
-                signals={"mean_shift_px": float(shift.mean()), "max_shift_px": float(shift[k]),
-                         "max_shift_frame": int(f[k])},
+                signals={
+                    "mean_shift_px": float(shift.mean()),
+                    "max_shift_px": float(shift[k]),
+                    "max_shift_frame": int(f[k]),
+                },
             )
             decide(ev, Decision.AUTO_ACCEPT, source="auto")
             ev.applied = True
@@ -171,12 +207,17 @@ def fill_stage(
 class _Stages:
     """Runs stages 1-4 on a work table and collects their events (spec 3)."""
 
-    def __init__(self, cfg: RefineConfig, fps: float, frame_size, appearance, ctx_boxes,
-                 ctx_fmt, hints):
+    def __init__(
+        self, cfg: RefineConfig, fps: float, frame_size, appearance, ctx_boxes, ctx_fmt, hints
+    ):
         """Hold the per-run inputs."""
         self.cfg, self.fps, self.frame_size = cfg, fps, frame_size
         self.appearance, self.ctx_boxes, self.ctx_fmt, self.hints = (
-            appearance, ctx_boxes, ctx_fmt, hints)
+            appearance,
+            ctx_boxes,
+            ctx_fmt,
+            hints,
+        )
         self.seq: Counter = Counter()
         self.events: list[Event] = []
         self.orphan_deferred: list[int] = []
@@ -188,8 +229,9 @@ class _Stages:
             e.id = f"{stage}-r0-{self.seq[stage]:06d}"
         self.events.extend(evs)
 
-    def run(self, work: pd.DataFrame, tick: Callable[[str], None] | None = None
-            ) -> tuple[pd.DataFrame, list[Event]]:
+    def run(
+        self, work: pd.DataFrame, tick: Callable[[str], None] | None = None
+    ) -> tuple[pd.DataFrame, list[Event]]:
         """Run every enabled stage in the spec's order; ``tick(name)`` follows each stage."""
         tick = tick or (lambda _name: None)
         occluded = occlusion_flags(work, self.ctx_boxes, self.cfg.encoder.occlusion_iou)
@@ -241,8 +283,9 @@ class _Stages:
         cfg = self.cfg
         if not cfg.screen.enabled or work.empty:
             return work
-        sctx = ScreenContext(boxes=self.ctx_boxes, fmt=self.ctx_fmt, hints=self.hints,
-                             split_raw_ids=split_raw)
+        sctx = ScreenContext(
+            boxes=self.ctx_boxes, fmt=self.ctx_fmt, hints=self.hints, split_raw_ids=split_raw
+        )
         evs = propose_screen(work, cfg, self.fps, sctx, cuts)
         self._route(evs, Band.of(cfg.screen), "screen")
         for ev in evs:
@@ -256,9 +299,16 @@ class _Stages:
         if not cfg.link.enabled or work.empty:
             return work, {}, set(), set()
         band = Band.of(cfg.link)
-        res = run_link_stage(work, cfg, self.fps, appearance=self.appearance,
-                             context=self.ctx_boxes, frame_size=self.frame_size,
-                             occluded=occluded, route=lambda evs: self._route(evs, band, "link"))
+        res = run_link_stage(
+            work,
+            cfg,
+            self.fps,
+            appearance=self.appearance,
+            context=self.ctx_boxes,
+            frame_size=self.frame_size,
+            occluded=occluded,
+            route=lambda evs: self._route(evs, band, "link"),
+        )
         work, rep_of = merge_chains(work, res.accepted)
         protected: dict[int, list[tuple[int, int]]] = {}
         for ev in res.events:
@@ -272,8 +322,9 @@ class _Stages:
         cfg = self.cfg
         if not cfg.orphan.enabled or work.empty:
             return work
-        evs, self.orphan_deferred = propose_orphans(work, cfg, self.fps, linked_tracks=linked,
-                                                    pending_endpoints=pending)
+        evs, self.orphan_deferred = propose_orphans(
+            work, cfg, self.fps, linked_tracks=linked, pending_endpoints=pending
+        )
         self._route(evs, Band.of(cfg.orphan), "orphan")
         for ev in evs:
             if ev.decision in ACCEPTED:
@@ -358,33 +409,50 @@ class TrackRefiner:
             frame_size = None
         tin = io.read_tracks(track_file, fmt=fmt, class_id=cfg.class_ids[0])
         work = tin.work
-        if (vinfo and vinfo["frame_count"] > 0 and len(work)
-                and int(work["frame"].max()) > vinfo["frame_count"]):
+        if (
+            vinfo
+            and vinfo["frame_count"] > 0
+            and len(work)
+            and int(work["frame"].max()) > vinfo["frame_count"]
+        ):
             raise ValueError(
                 f"track frame {int(work['frame'].max())} exceeds the video's frame count "
                 f"{vinfo['frame_count']}; the track file does not belong to this video"
             )
-        ctx_boxes, ctx_fmt = (io.read_context(context_file, cfg.context.format)
-                              if context_file is not None else (None, None))
-        hint_map = (read_reclass_hints(reclass_file, set(work["raw_id"].unique().tolist()))
-                    if reclass_file is not None else {})
+        ctx_boxes, ctx_fmt = (
+            io.read_context(context_file, cfg.context.format)
+            if context_file is not None
+            else (None, None)
+        )
+        hint_map = (
+            read_reclass_hints(reclass_file, set(work["raw_id"].unique().tolist()))
+            if reclass_file is not None
+            else {}
+        )
         inputs = {
             "tracks": _file_record(track_file, track_sha, format=fmt),
-            "video": None if video_file is None else {
-                "path": str(video_file), "abs_path": str(Path(video_file).resolve()),
+            "video": None
+            if video_file is None
+            else {
+                "path": str(video_file),
+                "abs_path": str(Path(video_file).resolve()),
                 "fingerprint": io.video_fingerprint(video_file, vinfo["frame_count"]),
                 "frame_count": vinfo["frame_count"],
             },
-            "context": None if context_file is None else _file_record(
-                context_file, context_sha, format=ctx_fmt),
+            "context": None
+            if context_file is None
+            else _file_record(context_file, context_sha, format=ctx_fmt),
             "hints": None if reclass_file is None else {"reclass": _file_record(reclass_file)},
             "features": None,
         }
         before = table_summary(work, fps_val)
         appearance = self._appearance(work, video_file, ctx_boxes, fps_val)
         stages = _Stages(cfg, fps_val, frame_size, appearance, ctx_boxes, ctx_fmt, hint_map)
-        desc = ("Refining" if video_index is None or video_tot is None
-                else f"Refining {video_index} of {video_tot}")
+        desc = (
+            "Refining"
+            if video_index is None or video_tot is None
+            else f"Refining {video_index} of {video_tot}"
+        )
         if message:
             desc += f" {message}"
         with tqdm(total=5, desc=desc, unit=" stage", disable=not verbose) as pbar:
@@ -393,7 +461,8 @@ class TrackRefiner:
             )
         work, id_map = renumber(work)
         summary = {
-            "before": before, "after": table_summary(work, fps_val),
+            "before": before,
+            "after": table_summary(work, fps_val),
             "events": _event_counts(events),
             "vlm": {"calls": 0, "cache_hits": 0, "failures": 0},
             "orphan_deferred": sorted(id_map[t] for t in stages.orphan_deferred if t in id_map),
@@ -401,20 +470,32 @@ class TrackRefiner:
             "duplicate_input_rows_removed": tin.n_duplicates_removed,
         }
         header = {
-            "format": LEDGER_FORMAT, "dnt_version": __version__, "round": 0, "parent": None,
-            "config": cfg.to_dict(), "inputs": inputs, "fps": fps_val, "fps_source": fps_src,
+            "format": LEDGER_FORMAT,
+            "dnt_version": __version__,
+            "round": 0,
+            "parent": None,
+            "config": cfg.to_dict(),
+            "inputs": inputs,
+            "fps": fps_val,
+            "fps_source": fps_src,
             "frame_size": list(frame_size) if frame_size else None,
             "id_map": {str(k): v for k, v in id_map.items()},
             "n_filled_input_rows_removed": tin.n_filled_removed,
-            "smoothing": cfg.fill.smooth_existing, "summary": summary,
+            "smoothing": cfg.fill.smooth_existing,
+            "summary": summary,
         }
         # The ledger goes first and the track file last, so an existing output implies its ledger
         # (refine_batch skips existing outputs).
         Ledger(header, events).write(paths["ledger"])
         io.write_tracks(work, out)
         log.info("refined %s: %s", out, summary["events"])
-        self.last_result = RefineResult(tracks=work, ledger_path=paths["ledger"],
-                                        review_path=None, summary=summary, events=events)
+        self.last_result = RefineResult(
+            tracks=work,
+            ledger_path=paths["ledger"],
+            review_path=None,
+            summary=summary,
+            events=events,
+        )
         return work
 
     def refine_batch(
@@ -444,13 +525,19 @@ class TrackRefiner:
 
         """
         if output_path is None:
-            raise ValueError("refine_batch needs output_path: every run writes a ledger "
-                             "next to its output")
-        for name, seq in (("video_files", video_files), ("context_files", context_files),
-                          ("reclass_files", reclass_files)):
+            raise ValueError(
+                "refine_batch needs output_path: every run writes a ledger next to its output"
+            )
+        for name, seq in (
+            ("video_files", video_files),
+            ("context_files", context_files),
+            ("reclass_files", reclass_files),
+        ):
             if seq is not None and len(seq) != len(track_files):
-                raise ValueError(f"{name} has {len(seq)} entries for {len(track_files)} "
-                                 "track files; files are paired by position")
+                raise ValueError(
+                    f"{name} has {len(seq)} entries for {len(track_files)} "
+                    "track files; files are paired by position"
+                )
         out_dir = Path(output_path)
         out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -466,17 +553,26 @@ class TrackRefiner:
                 if is_report:
                     results.append(str(out))
                 continue
-            self.refine(track_file, out, video_file=pick(video_files, i),
-                        context_file=pick(context_files, i),
-                        reclass_file=pick(reclass_files, i), fps=fps, video_index=i + 1,
-                        video_tot=total, message=message, verbose=verbose)
+            self.refine(
+                track_file,
+                out,
+                video_file=pick(video_files, i),
+                context_file=pick(context_files, i),
+                reclass_file=pick(reclass_files, i),
+                fps=fps,
+                video_index=i + 1,
+                video_tot=total,
+                message=message,
+                verbose=verbose,
+            )
             results.append(str(out))
         return results
 
     def _appearance(self, work, video, context, fps) -> Appearance | None:
         if self.appearance_factory is not None:
-            return self.appearance_factory(work=work, video=video, context=context, fps=fps,
-                                           config=self.config)
+            return self.appearance_factory(
+                work=work, video=video, context=context, fps=fps, config=self.config
+            )
         if video is not None and self.config.encoder.kind != "none":
             log.warning("appearance encoders arrive in dnt.refine Plan 2; running motion-only")
         return None

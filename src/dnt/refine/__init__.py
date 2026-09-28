@@ -8,5 +8,10 @@ from .interpolate import interpolate_tracks_rts
 from .link import link_tracklets
 from .refiner import RefineResult, TrackRefiner
 
-__all__ = ["RefineConfig", "RefineResult", "TrackRefiner", "interpolate_tracks_rts",
-           "link_tracklets"]
+__all__ = [
+    "RefineConfig",
+    "RefineResult",
+    "TrackRefiner",
+    "interpolate_tracks_rts",
+    "link_tracklets",
+]

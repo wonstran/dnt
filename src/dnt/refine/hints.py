@@ -53,8 +53,9 @@ def read_reclass_hints(path, known_raw_ids) -> dict[int, ReclassHint]:
     if unknown:
         log.warning("%s: ignored %d hint row(s) for unknown track IDs", path, unknown)
     if repeated:
-        log.warning("%s: %d repeated hint row(s) for the same track; the last one is kept",
-                    path, repeated)
+        log.warning(
+            "%s: %d repeated hint row(s) for the same track; the last one is kept", path, repeated
+        )
     return out
 
 

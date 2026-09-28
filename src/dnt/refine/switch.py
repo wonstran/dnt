@@ -154,13 +154,19 @@ def _score_track(g, contact, cfg: RefineConfig, fps, appearance, lin, delta, w):
         return None
     if _covered_seconds(samples, fps, motion_only) < 2 * sc.min_side_seconds:
         return None
-    nis = kalman_nis(frames, boxes, process_var=mc.process_var, meas_var_pos=mc.meas_var_pos,
-                     meas_var_size=mc.meas_var_size)
+    nis = kalman_nis(
+        frames,
+        boxes,
+        process_var=mc.process_var,
+        meas_var_pos=mc.meas_var_pos,
+        meas_var_size=mc.meas_var_size,
+    )
     jump = np.zeros(n)
     ratio = np.maximum(boxes[1:, 2:4], 1e-6) / np.maximum(boxes[:-1, 2:4], 1e-6)
     jump[1:] = np.abs(np.log(ratio)).max(axis=1)
-    mot = np.maximum(np.nan_to_num(ramp(nis, sc.nis_hi / 2.0, sc.nis_hi)),
-                     ramp(jump, *sc.ramps["jump"]))
+    mot = np.maximum(
+        np.nan_to_num(ramp(nis, sc.nis_hi / 2.0, sc.nis_hi)), ramp(jump, *sc.ramps["jump"])
+    )
     gap = np.zeros(n, dtype=bool)
     gap[1:] = np.diff(frames) > 1
     change = np.zeros(n, dtype=bool)
@@ -201,9 +207,23 @@ def _score_track(g, contact, cfg: RefineConfig, fps, appearance, lin, delta, w):
     else:
         score = np.minimum(gate * mot, sc.motion_only_cap)
     score[0] = 0.0
-    return {"frames": frames, "S": score, "A": a_raw, "app": app, "z": z, "bim": bim,
-            "sil": sil, "mot": mot, "nis": nis, "jump": jump, "fired": fired,
-            "samples": samples, "motion_only": motion_only, "ef": ef, "emb": emb}
+    return {
+        "frames": frames,
+        "S": score,
+        "A": a_raw,
+        "app": app,
+        "z": z,
+        "bim": bim,
+        "sil": sil,
+        "mot": mot,
+        "nis": nis,
+        "jump": jump,
+        "fired": fired,
+        "samples": samples,
+        "motion_only": motion_only,
+        "ef": ef,
+        "emb": emb,
+    }
 
 
 def _candidates(info, fps, cfg: RefineConfig, nms: int) -> list[int]:
@@ -284,8 +304,9 @@ def propose_splits(
     for tid, g in work.groupby("track", sort=True):
         g = g.sort_values("frame")
         lin = lineage_of_rows(g)
-        info = _score_track(g, contact.loc[g.index].to_numpy(bool), cfg, fps, appearance, lin,
-                            delta, w)
+        info = _score_track(
+            g, contact.loc[g.index].to_numpy(bool), cfg, fps, appearance, lin, delta, w
+        )
         if info is None:
             continue
         idx = _candidates(info, fps, cfg, nms)
@@ -333,17 +354,29 @@ def propose_splits(
             t = int(info["frames"][i])
             if s >= sc.reject_below:
                 signals = {
-                    "app": float(info["app"][i]), "z_app": float(info["z"][i]),
-                    "bimodal": float(info["bim"][i]), "silhouette": info["sil"],
-                    "mot": float(info["mot"][i]), "nis": float(info["nis"][i]),
+                    "app": float(info["app"][i]),
+                    "z_app": float(info["z"][i]),
+                    "bimodal": float(info["bim"][i]),
+                    "silhouette": info["sil"],
+                    "mot": float(info["mot"][i]),
+                    "nis": float(info["nis"][i]),
                     "jump": float(info["jump"][i]),
                     "gate": [k for k, v in info["fired"].items() if v[i]],
-                    "motion_only": info["motion_only"], **extra,
+                    "motion_only": info["motion_only"],
+                    **extra,
                 }
-                result.events.append(Event.propose(
-                    stage=STAGE, kind=EventKind.SPLIT, tracks=[tid], lineage=[lin],
-                    frames=(t, t), params={"cut_frame": t}, algo_score=s, signals=signals,
-                ))
+                result.events.append(
+                    Event.propose(
+                        stage=STAGE,
+                        kind=EventKind.SPLIT,
+                        tracks=[tid],
+                        lineage=[lin],
+                        frames=(t, t),
+                        params={"cut_frame": t},
+                        algo_score=s,
+                        signals=signals,
+                    )
+                )
             elif s >= cfg.screen.segment_at:
                 result.weak_cuts.setdefault(tid, []).append(t)
     return result

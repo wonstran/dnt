@@ -94,9 +94,14 @@ class SwitchConfig:
     bimodal_purity: float = 0.9
     bimodal_silhouette_min: float = 0.25
     swap_boost: float = 0.2
-    ramps: dict[str, list[float]] = field(default_factory=lambda: {
-        "z_app": [2.0, 5.0], "silhouette": [0.25, 0.5], "jump": [0.15, 0.4], "cross": [0.0, 0.4],
-    })
+    ramps: dict[str, list[float]] = field(
+        default_factory=lambda: {
+            "z_app": [2.0, 5.0],
+            "silhouette": [0.25, 0.5],
+            "jump": [0.15, 0.4],
+            "cross": [0.0, 0.4],
+        }
+    )
 
 
 @dataclass(kw_only=True)
@@ -118,11 +123,20 @@ class ScreenConfig:
     duplicate_min_frames: int = 10
     hotspot_radius: float = 0.5
     persistence_iou: float = 0.5
-    ramps: dict[str, list[float]] = field(default_factory=lambda: {
-        "R": [0.3, 0.05], "J": [0.03, 0.005], "C": [0.6, 0.3], "T": [2.0, 10.0],
-        "H": [1.0, 4.0], "inside": [0.5, 0.9], "F": [0.3, 0.7], "S": [0.5, 0.9],
-        "K": [0.2, 0.6], "D": [0.5, 0.9],
-    })
+    ramps: dict[str, list[float]] = field(
+        default_factory=lambda: {
+            "R": [0.3, 0.05],
+            "J": [0.03, 0.005],
+            "C": [0.6, 0.3],
+            "T": [2.0, 10.0],
+            "H": [1.0, 4.0],
+            "inside": [0.5, 0.9],
+            "F": [0.3, 0.7],
+            "S": [0.5, 0.9],
+            "K": [0.2, 0.6],
+            "D": [0.5, 0.9],
+        }
+    )
 
 
 @dataclass(kw_only=True)
@@ -251,8 +265,9 @@ class RefineConfig:
         data = dict(copy.deepcopy(data) or {})
         cfg = cls.defaults(data.get("target", "person"))
         _overlay(cfg, data, "")
-        cfg.hints.reclass_class_map = {int(k): str(v)
-                                       for k, v in cfg.hints.reclass_class_map.items()}
+        cfg.hints.reclass_class_map = {
+            int(k): str(v) for k, v in cfg.hints.reclass_class_map.items()
+        }
         cfg.validate()
         return cfg
 
@@ -329,8 +344,7 @@ class RefineConfig:
                 p.append(f"{name} needs lo != hi")
         if self.fps is not None and self.fps <= 0:
             p.append("fps must be positive")
-        if self.frame_size is not None and (len(self.frame_size) != 2
-                                            or min(self.frame_size) <= 0):
+        if self.frame_size is not None and (len(self.frame_size) != 2 or min(self.frame_size) <= 0):
             p.append("frame_size must be [width, height] with positive values")
         if not self.class_ids:
             p.append("class_ids must not be empty")
@@ -367,7 +381,7 @@ def _check_type(path: str, value, hint) -> None:
             raise ValueError(f"config key '{path}' must be a string, not {type(value).__name__}")
         return
 
-    if origin is type(None) or (hasattr(hint, '__origin__') and hint.__origin__ is type(None)):
+    if origin is type(None) or (hasattr(hint, "__origin__") and hint.__origin__ is type(None)):
         return
 
     if origin is list:
@@ -386,7 +400,7 @@ def _check_type(path: str, value, hint) -> None:
                 _check_type(f"{path}.{k}", v, args[1])
         return
 
-    if hasattr(hint, '__args__'):
+    if hasattr(hint, "__args__"):
         hint_args = hint.__args__
         if type(None) in hint_args:
             if value is None:
@@ -437,8 +451,7 @@ def _overlay(obj, data: Mapping, path: str) -> None:
                         if len(v) != 2:
                             msg = f"config key '{full_path}.{k}' must be a list of "
                             raise ValueError(msg + "exactly 2 numbers")
-                        ok = all(isinstance(x, (int, float)) and not isinstance(x, bool)
-                                 for x in v)
+                        ok = all(isinstance(x, (int, float)) and not isinstance(x, bool) for x in v)
                         if not ok:
                             msg = f"config key '{full_path}.{k}' must be a list of "
                             raise ValueError(msg + "exactly 2 numbers")

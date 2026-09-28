@@ -220,10 +220,18 @@ def _legacy_descriptors(df: pd.DataFrame, vel_frames: int, pbar=None) -> dict[in
             "t_end": int(g_real["frame"].iloc[-1]),
             "start_c": (float(start_row["cx"]), float(start_row["cy"])),
             "end_c": (float(end_row["cx"]), float(end_row["cy"])),
-            "start_box": (float(start_row["x"]), float(start_row["y"]),
-                          float(start_row["w"]), float(start_row["h"])),
-            "end_box": (float(end_row["x"]), float(end_row["y"]),
-                        float(end_row["w"]), float(end_row["h"])),
+            "start_box": (
+                float(start_row["x"]),
+                float(start_row["y"]),
+                float(start_row["w"]),
+                float(start_row["h"]),
+            ),
+            "end_box": (
+                float(end_row["x"]),
+                float(end_row["y"]),
+                float(end_row["w"]),
+                float(end_row["h"]),
+            ),
             "area_end": max(float(end_row["area"]), 1.0),
             "vx": vx,
             "vy": vy,
@@ -232,8 +240,18 @@ def _legacy_descriptors(df: pd.DataFrame, vel_frames: int, pbar=None) -> dict[in
 
 
 def _legacy_gate_cost(
-    a: dict, b: dict, *, max_gap: int, size_ratio_max: float, dist_mult: float, iou_min: float,
-    w_d: float, w_iou: float, w_s: float, dist_growth: float = 0.03, check_class: bool = True,
+    a: dict,
+    b: dict,
+    *,
+    max_gap: int,
+    size_ratio_max: float,
+    dist_mult: float,
+    iou_min: float,
+    w_d: float,
+    w_iou: float,
+    w_s: float,
+    dist_growth: float = 0.03,
+    check_class: bool = True,
     detail: bool = False,
 ):
     """Return ``link_tracklets``'s cost for linking end ``a`` to start ``b``, or None if gated."""
@@ -451,8 +469,14 @@ def link_tracklets(
             out.to_csv(output_file, index=False, header=False)
         return out
     matches = _legacy_matches(
-        stitchable, max_gap=max_gap, size_ratio_max=size_ratio_max, dist_mult=dist_mult,
-        iou_min=iou_min, w_d=w_d, w_iou=w_iou, w_s=w_s,
+        stitchable,
+        max_gap=max_gap,
+        size_ratio_max=size_ratio_max,
+        dist_mult=dist_mult,
+        iou_min=iou_min,
+        w_d=w_d,
+        w_iou=w_iou,
+        w_s=w_s,
     )
     dsu = _DSU([int(d["track"]) for d in stitchable])
     for a_tid, b_tid, _ in matches:
@@ -532,12 +556,17 @@ class TrackDesc:
     def legacy(self) -> dict:
         """Return the descriptor dict ``_legacy_gate_cost`` expects."""
         return {
-            "track": self.track, "cls": self.cls_last, "t_start": self.t_s, "t_end": self.t_e,
-            "start_c": tuple(map(float, self.start_c)), "end_c": tuple(map(float, self.end_c)),
+            "track": self.track,
+            "cls": self.cls_last,
+            "t_start": self.t_s,
+            "t_end": self.t_e,
+            "start_c": tuple(map(float, self.start_c)),
+            "end_c": tuple(map(float, self.end_c)),
             "start_box": tuple(map(float, self.start_box)),
             "end_box": tuple(map(float, self.end_box)),
             "area_end": max(float(self.end_box[2] * self.end_box[3]), 1.0),
-            "vx": float(self.vel[0]), "vy": float(self.vel[1]),
+            "vx": float(self.vel[0]),
+            "vy": float(self.vel[1]),
         }
 
 
@@ -554,7 +583,10 @@ def describe_tracks(work, cfg: RefineConfig, fps: float, occluded) -> dict[int, 
         occ = occluded.reindex(g.index, fill_value=False).to_numpy(bool)
         clean = np.flatnonzero(~occ)
         out[int(t)] = TrackDesc(
-            track=int(t), frames=frames, boxes=boxes, cls_major=majority_class(g["cls"]),
+            track=int(t),
+            frames=frames,
+            boxes=boxes,
+            cls_major=majority_class(g["cls"]),
             cls_last=int(g["cls"].iloc[-1]),
             h_end=max(float(np.median(boxes[-hw:, 3])), 1.0),
             h_start=max(float(np.median(boxes[:hw, 3])), 1.0),
@@ -611,9 +643,11 @@ class _Occluders:
 def _iob_rows(hidden: np.ndarray, boxes: np.ndarray) -> np.ndarray:
     """Return ``iob_matrix(hidden[k], boxes[k])`` for every row ``k`` (both ``(N, 4)`` xywh)."""
     iw = np.minimum(hidden[:, 0] + hidden[:, 2], boxes[:, 0] + boxes[:, 2]) - np.maximum(
-        hidden[:, 0], boxes[:, 0])
+        hidden[:, 0], boxes[:, 0]
+    )
     ih = np.minimum(hidden[:, 1] + hidden[:, 3], boxes[:, 1] + boxes[:, 3]) - np.maximum(
-        hidden[:, 1], boxes[:, 1])
+        hidden[:, 1], boxes[:, 1]
+    )
     inter = np.maximum(0.0, iw) * np.maximum(0.0, ih)
     area = hidden[:, 2] * hidden[:, 3]
     return np.divide(inter, area, out=np.zeros_like(inter), where=area != 0)
@@ -696,10 +730,18 @@ def _gate(di: TrackDesc, dj: TrackDesc, g: int, cfg: RefineConfig, fps: float, g
         return None
     if g <= mg:
         res = _legacy_gate_cost(
-            di.legacy(), dj.legacy(), max_gap=mg, size_ratio_max=lc.size_ratio_max,
-            dist_mult=lc.dist_mult, iou_min=lc.iou_min, w_d=lc.legacy_weights["d"],
-            w_iou=lc.legacy_weights["iou"], w_s=lc.legacy_weights["s"],
-            dist_growth=lc.dist_growth, check_class=False, detail=True,
+            di.legacy(),
+            dj.legacy(),
+            max_gap=mg,
+            size_ratio_max=lc.size_ratio_max,
+            dist_mult=lc.dist_mult,
+            iou_min=lc.iou_min,
+            w_d=lc.legacy_weights["d"],
+            w_iou=lc.legacy_weights["iou"],
+            w_s=lc.legacy_weights["s"],
+            dist_growth=lc.dist_growth,
+            check_class=False,
+            detail=True,
         )
         if res is None:
             return None
@@ -733,16 +775,32 @@ def _gate(di: TrackDesc, dj: TrackDesc, g: int, cfg: RefineConfig, fps: float, g
         witness, ids = occl.witness(di, dj, lc.witness_iob)
         if witness < lc.witness_min:
             return None
-        c_mot = (0.5 * v_need / (lc.speed_factor * v_ref)
-                 + 0.5 * ((heading or 0.0) / lc.max_heading_change))
-        return "occluded", float(c_mot), {"witness": witness, "occluders": ids,
-                                          "v_need": v_need, "v_ref": v_ref, "heading": heading}
+        c_mot = 0.5 * v_need / (lc.speed_factor * v_ref) + 0.5 * (
+            (heading or 0.0) / lc.max_heading_change
+        )
+        return (
+            "occluded",
+            float(c_mot),
+            {
+                "witness": witness,
+                "occluders": ids,
+                "v_need": v_need,
+                "v_ref": v_ref,
+                "heading": heading,
+            },
+        )
     return None
 
 
 def score_candidates(
-    work, cfg: RefineConfig, fps: float, *, appearance: Appearance | None, context,
-    frame_size, occluded,
+    work,
+    cfg: RefineConfig,
+    fps: float,
+    *,
+    appearance: Appearance | None,
+    context,
+    frame_size,
+    occluded,
 ) -> tuple[list[Candidate], dict[int, TrackDesc]]:
     """Gate and score every end->start pair (spec 6.3)."""
     lc = cfg.link
@@ -759,8 +817,11 @@ def score_candidates(
     if len(descs) < 2:
         return [], descs
     occl = _Occluders(work, context)
-    gaps = (to_frames(lc.max_gap, fps), to_frames(lc.max_gap_static, fps),
-            to_frames(lc.max_gap_occluded, fps))
+    gaps = (
+        to_frames(lc.max_gap, fps),
+        to_frames(lc.max_gap_static, fps),
+        to_frames(lc.max_gap_occluded, fps),
+    )
     reach = max(gaps)  # each gate applies its own limit; the window only bounds the search
     order = sorted(descs.values(), key=lambda d: (d.t_s, d.track))
     starts = np.array([d.t_s for d in order])
@@ -784,18 +845,34 @@ def score_candidates(
                 w = {"mot": w["mot"] / total, "gap": w["gap"] / total, "app": 0.0}
             else:
                 c_app = _c_app(di, dj, appearance, lc.k_embed, cache)
-            limit = {"normal": gaps[0], "overlap": gaps[0], "static": gaps[1],
-                     "occluded": gaps[2]}[gate]
+            limit = {"normal": gaps[0], "overlap": gaps[0], "static": gaps[1], "occluded": gaps[2]}[
+                gate
+            ]
             c_gap = max(g, 0) / limit
             b = _prior(di, dj, frame_size, lc.border_margin)
             cost = w["mot"] * c_mot + w["gap"] * c_gap + w["app"] * (c_app or 0.0)
             s = float(np.clip((1.0 - cost) * (0.8 + 0.2 * b), 0.0, 1.0))
             if gate == "occluded":
                 s = min(s, lc.occluded_score_cap)
-            cands.append(Candidate(di.track, dj.track, gate, int(g), s, {
-                **sig, "gate": gate, "g": int(g), "c_mot": c_mot, "c_app": c_app,
-                "c_gap": c_gap, "b": b, "motion_only": motion_only,
-            }))
+            cands.append(
+                Candidate(
+                    di.track,
+                    dj.track,
+                    gate,
+                    int(g),
+                    s,
+                    {
+                        **sig,
+                        "gate": gate,
+                        "g": int(g),
+                        "c_mot": c_mot,
+                        "c_app": c_app,
+                        "c_gap": c_gap,
+                        "b": b,
+                        "motion_only": motion_only,
+                    },
+                )
+            )
     return cands, descs
 
 
@@ -805,26 +882,39 @@ def legacy_link_events(work, cfg: RefineConfig, fps: float) -> list[Event]:
     if work.empty:
         return []
     df = _prepare_legacy(work[LEGACY_COL_NAMES], LEGACY_COL_NAMES)
-    stitchable = [d for d in _legacy_descriptors(df, lc.vel_frames).values()
-                  if d.get("stitchable")]
+    stitchable = [d for d in _legacy_descriptors(df, lc.vel_frames).values() if d.get("stitchable")]
     if len(stitchable) <= 1:
         return []
     matches = _legacy_matches(
-        stitchable, max_gap=to_frames(lc.max_gap, fps), size_ratio_max=lc.size_ratio_max,
-        dist_mult=lc.dist_mult, iou_min=lc.iou_min, w_d=lc.legacy_weights["d"],
-        w_iou=lc.legacy_weights["iou"], w_s=lc.legacy_weights["s"], dist_growth=lc.dist_growth,
+        stitchable,
+        max_gap=to_frames(lc.max_gap, fps),
+        size_ratio_max=lc.size_ratio_max,
+        dist_mult=lc.dist_mult,
+        iou_min=lc.iou_min,
+        w_d=lc.legacy_weights["d"],
+        w_iou=lc.legacy_weights["iou"],
+        w_s=lc.legacy_weights["s"],
+        dist_growth=lc.dist_growth,
     )
     by = {d["track"]: d for d in stitchable}
     events = []
     for a, b, cost in matches:
         t_e, t_s = by[a]["t_end"], by[b]["t_start"]
-        events.append(Event.propose(
-            stage=STAGE, kind=EventKind.LINK, tracks=[a, b],
-            lineage=[lineage_of_rows(work[work["track"] == a]),
-                     lineage_of_rows(work[work["track"] == b])],
-            frames=(t_e, t_s), params={"gate": "legacy", "gap": [t_e, t_s]}, algo_score=1.0,
-            signals={"legacy_cost": cost, "pass": 1},
-        ))
+        events.append(
+            Event.propose(
+                stage=STAGE,
+                kind=EventKind.LINK,
+                tracks=[a, b],
+                lineage=[
+                    lineage_of_rows(work[work["track"] == a]),
+                    lineage_of_rows(work[work["track"] == b]),
+                ],
+                frames=(t_e, t_s),
+                params={"gate": "legacy", "gap": [t_e, t_s]},
+                algo_score=1.0,
+                signals={"legacy_cost": cost, "pass": 1},
+            )
+        )
     return events
 
 
@@ -876,7 +966,9 @@ def _hungarian(comp: list[tuple[int, int]], avail: dict) -> list[tuple[int, int]
 
 
 def assign_in_passes(
-    cands: list[Candidate], cfg: RefineConfig, *,
+    cands: list[Candidate],
+    cfg: RefineConfig,
+    *,
     make_event: Callable[[Candidate, float, dict], Event],
     route: Callable[[list[Event]], None],
 ) -> list[Event]:
@@ -891,8 +983,11 @@ def assign_in_passes(
         live = [e for e, ev in by_edge.items() if ev.decision not in REJECTED]
         busy_end = {e[0] for e in live}
         busy_start = {e[1] for e in live}
-        avail = {e: c for e, c in edges.items()
-                 if e not in by_edge and e[0] not in busy_end and e[1] not in busy_start}
+        avail = {
+            e: c
+            for e, c in edges.items()
+            if e not in by_edge and e[0] not in busy_end and e[1] not in busy_start
+        }
         if not avail:
             break
         chosen = [pair for comp in _components(sorted(avail)) for pair in _hungarian(comp, avail)]
@@ -901,13 +996,20 @@ def assign_in_passes(
         new: list[Event] = []
         for i, j in chosen:
             c = avail[(i, j)]
-            alts = sorted((a for e, a in avail.items() if e != (i, j) and (e[0] == i or e[1] == j)),
-                          key=lambda a: (-a.score, a.i, a.j))
+            alts = sorted(
+                (a for e, a in avail.items() if e != (i, j) and (e[0] == i or e[1] == j)),
+                key=lambda a: (-a.score, a.i, a.j),
+            )
             margin = c.score - alts[0].score if alts else c.score
             routed = c.score if margin >= lc.margin_min else min(c.score, lc.ambiguous_cap)
-            extra = {"S_link": c.score, "margin": margin, "pass": p,
-                     "alternatives": [{"i": a.i, "j": a.j, "score": a.score}
-                                      for a in alts[: lc.n_alternatives]]}
+            extra = {
+                "S_link": c.score,
+                "margin": margin,
+                "pass": p,
+                "alternatives": [
+                    {"i": a.i, "j": a.j, "score": a.score} for a in alts[: lc.n_alternatives]
+                ],
+            }
             freed_by = [ev for ev in (rej_end.get(i), rej_start.get(j)) if ev is not None]
             if freed_by:  # the stronger rejected competitor wins; a tie takes the end side
                 extra["replaces"] = max(freed_by, key=lambda ev: ev.signals["S_link"]).proposal_key
@@ -972,8 +1074,15 @@ def resolve_chains(
 
 
 def run_link_stage(
-    work, cfg: RefineConfig, fps: float, *, appearance: Appearance | None, context, frame_size,
-    occluded, route: Callable[[list[Event]], None],
+    work,
+    cfg: RefineConfig,
+    fps: float,
+    *,
+    appearance: Appearance | None,
+    context,
+    frame_size,
+    occluded,
+    route: Callable[[list[Event]], None],
 ) -> LinkStageResult:
     """Propose, route, and resolve LINK events for the current work table."""
     if cfg.link.mode == "legacy":
@@ -983,15 +1092,27 @@ def run_link_stage(
         for e in acc:
             e.applied = True
         return LinkStageResult(evs, [(int(e.tracks[0]), int(e.tracks[1])) for e in acc], set(), [])
-    cands, descs = score_candidates(work, cfg, fps, appearance=appearance, context=context,
-                                    frame_size=frame_size, occluded=occluded)
+    cands, descs = score_candidates(
+        work,
+        cfg,
+        fps,
+        appearance=appearance,
+        context=context,
+        frame_size=frame_size,
+        occluded=occluded,
+    )
 
     def make_event(c: Candidate, routed: float, extra: dict) -> Event:
         di, dj = descs[c.i], descs[c.j]
         return Event.propose(
-            stage=STAGE, kind=EventKind.LINK, tracks=[c.i, c.j], lineage=[di.lineage, dj.lineage],
-            frames=(di.t_e, dj.t_s), params={"gate": c.gate, "gap": [di.t_e, dj.t_s]},
-            algo_score=routed, signals={**c.signals, **extra},
+            stage=STAGE,
+            kind=EventKind.LINK,
+            tracks=[c.i, c.j],
+            lineage=[di.lineage, dj.lineage],
+            frames=(di.t_e, dj.t_s),
+            params={"gate": c.gate, "gap": [di.t_e, dj.t_s]},
+            algo_score=routed,
+            signals={**c.signals, **extra},
         )
 
     events = assign_in_passes(cands, cfg, make_event=make_event, route=route)

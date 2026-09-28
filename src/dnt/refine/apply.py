@@ -134,8 +134,9 @@ def apply_edit(work: pd.DataFrame, event: Event, *, new_id: int | None = None) -
     p = event.edit["params"]
     track = event.tracks[0]
     if kind is EventKind.SPLIT:
-        return split_track(work, track, int(p["cut_frame"]),
-                           next_track_id(work) if new_id is None else new_id)
+        return split_track(
+            work, track, int(p["cut_frame"]), next_track_id(work) if new_id is None else new_id
+        )
     if kind is EventKind.DROP:
         return drop_rows(work, track, p.get("spans"))
     if kind is EventKind.RECLASS:

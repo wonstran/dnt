@@ -15,7 +15,7 @@ def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="dnt-refine",
         description="Refine a track file: split ID switches, screen false tracks, link "
-                    "fragments, drop orphans, and fill gaps.",
+        "fragments, drop orphans, and fill gaps.",
     )
     sub = p.add_subparsers(dest="command", required=True)
     run = sub.add_parser("run", help="refine a track file")
@@ -41,15 +41,26 @@ def main(argv: list[str] | None = None) -> int:
     try:
         refiner = TrackRefiner(config_yaml=args.config)
         refiner.refine(
-            args.tracks, args.out, video_file=args.video, context_file=args.context,
-            reclass_file=args.reclass_hints, fps=args.fps, fmt=args.format, verbose=False,
+            args.tracks,
+            args.out,
+            video_file=args.video,
+            context_file=args.context,
+            reclass_file=args.reclass_hints,
+            fps=args.fps,
+            fmt=args.format,
+            verbose=False,
         )
         res = refiner.last_result
     except (ValueError, FileNotFoundError) as exc:
         print(f"dnt-refine: error: {exc}", file=sys.stderr)
         return 2
-    print(json.dumps({"out": args.out, "ledger": str(res.ledger_path),
-                      "summary": res.summary}, indent=2, default=str))
+    print(
+        json.dumps(
+            {"out": args.out, "ledger": str(res.ledger_path), "summary": res.summary},
+            indent=2,
+            default=str,
+        )
+    )
     return 0
 
 

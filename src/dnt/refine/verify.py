@@ -33,10 +33,14 @@ def band_route(score: float, band: Band) -> Decision | None:
 def decide(event: Event, decision: Decision, *, source: str, round: int = 0) -> None:
     """Record a decision; an accepted event's edit starts as its proposal (spec 4.1)."""
     event.decision = decision
-    event.decision_history.append({"decision": str(decision), "round": int(round),
-                                   "source": source})
-    event.edit = ({"kind": str(event.kind), "params": copy.deepcopy(event.params)}
-                  if decision in ACCEPTED else None)
+    event.decision_history.append(
+        {"decision": str(decision), "round": int(round), "source": source}
+    )
+    event.edit = (
+        {"kind": str(event.kind), "params": copy.deepcopy(event.params)}
+        if decision in ACCEPTED
+        else None
+    )
 
 
 def route_without_vlm(events: list[Event], band: Band, *, round: int = 0) -> None:
@@ -47,8 +51,11 @@ def route_without_vlm(events: list[Event], band: Band, *, round: int = 0) -> Non
     """
     for ev in events:
         d = band_route(ev.algo_score, band)
-        if (d is Decision.AUTO_ACCEPT and ev.kind is EventKind.RECLASS
-                and ev.params.get("new_cls") is None):
+        if (
+            d is Decision.AUTO_ACCEPT
+            and ev.kind is EventKind.RECLASS
+            and ev.params.get("new_cls") is None
+        ):
             ev.signals["needs_subtype"] = True
             d = Decision.HUMAN_PENDING
         decide(ev, Decision.HUMAN_PENDING if d is None else d, source="auto", round=round)

@@ -106,19 +106,21 @@ def to_work(df: pd.DataFrame, *, source: str = "tracks") -> TrackInput:
     if n_dup:
         log.warning("%s: %d duplicate (track, frame) rows; kept the first of each", source, n_dup)
     df = df.loc[~dup]
-    work = pd.DataFrame({
-        "frame": df["frame"].astype(int),
-        "track": df["track"].astype(int),
-        "x": df["x"].astype(float),
-        "y": df["y"].astype(float),
-        "w": df["w"].astype(float),
-        "h": df["h"].astype(float),
-        "score": pd.to_numeric(df["score"], errors="coerce").fillna(-1.0).astype(float),
-        "cls": pd.to_numeric(df["cls"], errors="coerce").fillna(-1).astype(int),
-        "interp": 0,
-        "r4": pd.to_numeric(df["r4"], errors="coerce").fillna(-1).astype(int),
-        "raw_id": df["track"].astype(int),
-    })
+    work = pd.DataFrame(
+        {
+            "frame": df["frame"].astype(int),
+            "track": df["track"].astype(int),
+            "x": df["x"].astype(float),
+            "y": df["y"].astype(float),
+            "w": df["w"].astype(float),
+            "h": df["h"].astype(float),
+            "score": pd.to_numeric(df["score"], errors="coerce").fillna(-1.0).astype(float),
+            "cls": pd.to_numeric(df["cls"], errors="coerce").fillna(-1).astype(int),
+            "interp": 0,
+            "r4": pd.to_numeric(df["r4"], errors="coerce").fillna(-1).astype(int),
+            "raw_id": df["track"].astype(int),
+        }
+    )
     work = work.sort_values(["track", "frame"]).reset_index(drop=True)
     return TrackInput(work=work, n_filled_removed=n_filled, n_duplicates_removed=n_dup)
 
@@ -135,10 +137,20 @@ def read_tracks(path, *, fmt: str = "dnt", class_id: int = 0) -> TrackInput:
     if fmt == "dnt":
         df = raw.iloc[:, : len(TRACK_COLUMNS)].copy()
     elif fmt == "mot":
-        df = pd.DataFrame({
-            "frame": raw[0], "track": raw[1], "x": raw[2], "y": raw[3], "w": raw[4], "h": raw[5],
-            "score": raw[6] if raw.shape[1] > 6 else -1.0, "cls": class_id, "r3": -1, "r4": -1,
-        })
+        df = pd.DataFrame(
+            {
+                "frame": raw[0],
+                "track": raw[1],
+                "x": raw[2],
+                "y": raw[3],
+                "w": raw[4],
+                "h": raw[5],
+                "score": raw[6] if raw.shape[1] > 6 else -1.0,
+                "cls": class_id,
+                "r3": -1,
+                "r4": -1,
+            }
+        )
     else:
         raise ValueError(f"unknown track format {fmt!r}; expected 'dnt' or 'mot'")
     return to_work(df, source=str(path))
@@ -163,15 +175,17 @@ def read_context(path, fmt: str = "auto") -> tuple[pd.DataFrame, str]:
         raise ValueError(f"unknown context format {fmt!r}; expected 'auto', 'tracks' or 'dets'")
     if ncol < 8:
         raise ValueError(f"{path}: context file has {ncol} columns; the class is column 8")
-    ctx = pd.DataFrame({
-        "frame": raw[0].astype(int),
-        "track": raw[1].astype(int) if fmt == "tracks" else -1,
-        "x": raw[2].astype(float),
-        "y": raw[3].astype(float),
-        "w": raw[4].astype(float),
-        "h": raw[5].astype(float),
-        "cls": raw[7].astype(int),
-    })
+    ctx = pd.DataFrame(
+        {
+            "frame": raw[0].astype(int),
+            "track": raw[1].astype(int) if fmt == "tracks" else -1,
+            "x": raw[2].astype(float),
+            "y": raw[3].astype(float),
+            "w": raw[4].astype(float),
+            "h": raw[5].astype(float),
+            "cls": raw[7].astype(int),
+        }
+    )
     return ctx, fmt
 
 
