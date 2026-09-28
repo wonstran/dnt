@@ -5,6 +5,7 @@ Moved from ``dnt.track.post_process`` (which re-exports it) in dnt 0.4.
 
 from __future__ import annotations
 
+from collections.abc import Iterable, Mapping
 from itertools import pairwise
 
 import numpy as np
@@ -111,6 +112,21 @@ def _rts_rows(
     return rows
 
 
+def _split_protected(g: pd.DataFrame, gaps: list[tuple[int, int]]) -> list[pd.DataFrame]:
+    """Cut a track between consecutive observed frames that lie inside a protected gap."""
+    if not gaps:
+        return [g]
+    frames = g["frame"].astype(int).to_numpy()
+    cuts = [
+        i
+        for i in range(1, len(frames))
+        if frames[i] - frames[i - 1] > 1
+        and any(a <= frames[i - 1] and frames[i] <= b for a, b in gaps)
+    ]
+    bounds = [0, *cuts, len(frames)]
+    return [g.iloc[s:e].reset_index(drop=True) for s, e in pairwise(bounds)]
+
+
 def interpolate_tracks_rts(
     tracks: pd.DataFrame | None = None,
     track_file: str | None = None,
@@ -128,6 +144,7 @@ def interpolate_tracks_rts(
     verbose: bool = True,
     video_index: int | None = None,
     video_tot: int | None = None,
+    protected_gaps: Mapping[int, Iterable[tuple[int, int]]] | None = None,
 ) -> pd.DataFrame:
     """Interpolate trajectory gaps in each track chain using RTS smoothing.
 
@@ -179,6 +196,11 @@ def interpolate_tracks_rts(
         Current video index for progress description. Default is None.
     video_tot : int, optional
         Total videos for progress description. Default is None.
+    protected_gaps : Mapping[int, Iterable[tuple[int, int]]], optional
+        Gaps that must never be filled, per track ID, each given as
+        ``(last observed frame before, first observed frame after)``. The track
+        is smoothed as independent segments at each one, so neither gap filling
+        nor ``smooth_existing`` crosses it. Default is None (no protected gaps).
 
     Returns
     -------
@@ -205,6 +227,14 @@ def interpolate_tracks_rts(
     Frame gaps within tracks are filled by interpolation. If a track has
     missing frames between observations, the filter predicts values for those
     frames based on velocity estimates from nearby observations.
+
+    Rows whose flag column (``interp_col``, or ``r3`` in the positional layout)
+    equals 1 are treated as previously filled rows, not as measurements. They are
+    estimated again like missing frames, or dropped when they lie outside a
+    fillable gap. Raw tracker output (flag ``-1``) is unaffected.
+
+    Tracks listed in ``protected_gaps`` are cut into independent filter-and-smoother
+    segments at each protected gap, so no state is carried across the gap.
 
     Examples
     --------
@@ -248,6 +278,20 @@ def interpolate_tracks_rts(
         work = df.copy()
         work.columns = col_names[: len(df.columns)]
     work = work.sort_values(["track", "frame"]).reset_index(drop=True)
+    flag_col = interp_col if interp_col in work.columns else None
+    if flag_col is None and "r3" in work.columns:
+        flag_col = "r3"
+    if flag_col is not None:
+        is_filled = pd.to_numeric(work[flag_col], errors="coerce") == 1
+        work = work.loc[~is_filled].reset_index(drop=True)
+    if work.empty:
+        out = tracks.iloc[0:0].copy()
+        if output_file:
+            out.to_csv(output_file, index=False, header=False)
+        return out
+    protected = {
+        int(k): [(int(a), int(b)) for a, b in v] for k, v in (protected_gaps or {}).items()
+    }
 
     output_rows: list[dict] = []
     grouped = list(work.groupby("track", sort=False))
@@ -275,7 +319,14 @@ def interpolate_tracks_rts(
                 _set_flag(r, g.columns, add_interp_flag, interp_col, 0)
             output_rows.extend(rows)
         else:
-            output_rows.extend(_rts_rows(g, track_id, **kw))
+            for seg in _split_protected(g, protected.get(int(track_id), [])):
+                if len(seg) < min_track_len:
+                    rows = seg.to_dict("records")
+                    for r in rows:
+                        _set_flag(r, seg.columns, add_interp_flag, interp_col, 0)
+                    output_rows.extend(rows)
+                else:
+                    output_rows.extend(_rts_rows(seg, track_id, **kw))
         pbar.update(1)
     pbar.close()
 
