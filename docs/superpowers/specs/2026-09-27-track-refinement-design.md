@@ -1,6 +1,6 @@
 # dnt.post: Track Refinement with Algorithmic Screening and VLM Verification
 
-- **Status:** written spec (rev. 2: reuse of existing dnt post-processing; no location-based filtering), awaiting review
+- **Status:** written spec (rev. 3: occlusion-witnessed linking, takeover gates, class groups; rev. 2: reuse of existing dnt post-processing, no location-based filtering), awaiting review
 - **Date:** 2026-09-27
 - **Baseline:** dnt 0.3.3 (`a290821`)
 - **Roadmap:** [`design/dnt-0.4-upgrade.md`](../../../design/dnt-0.4-upgrade.md). This work belongs to sub-project F (new capabilities). It adopts the `dnt/post/` location from §3 of the roadmap. It does not depend on sub-projects B–E, because its only inputs are a track file and a video.
@@ -30,6 +30,12 @@ Constraints agreed during brainstorming:
 9. **False-track definitions (vehicle file).**
    - **Drop:** non-vehicles (shadows, reflections, structure edges), and duplicate boxes on one vehicle (a trailer, or a bus split in two).
    - Parked vehicles are real and are kept.
+
+**Reference hard case.** The Miami left turn, #12 → #81 (`/home/wonstran/repos/miami/vehicle_tracking_analysis.md` §5), contains both of the hardest errors:
+- **A switch with no ID change.** A car tracked as #12 is covered by a truck that never had a track of its own. From frame 821, #12 follows the truck. Around that frame the car's label flickers 2 → 7 → 5, and the box width jumps from 56 to 103 px while the height barely changes.
+- **A long occluded fragment.** The car comes back 63 frames later (6.3 s) as #81, partway through its turn.
+
+The correct result: split #12 at about frame 821, give the truck part its own ID, link #12's car part to #81, and leave the 63-frame gap unfilled. §6.2 and §6.3 are designed so that this case works. §11 tests it with a synthetic replica and, optionally, on the real file.
 
 ## 1. Goal, scope, and success criteria
 
@@ -262,6 +268,7 @@ For each stage, `accept_above` and `reject_below`, with `reject_below < accept_a
 - **Static screen.** The static-object score is capped at `screen.static_score_cap` (default 0.80). Keep the cap below `screen.accept_above`, so static tracks never auto-drop (§6.1).
 - **Rider subtype.** A `RECLASS` whose rider score is `AUTO_ACCEPT` still needs one VLM call to choose the subtype, unless a ReClass hint has already settled it (§6.1). That call only picks the subtype and cannot overturn the rider decision. If the VLM answers with a non-rider option (for example `pedestrian`), the algorithm and the VLM disagree, and the event becomes `HUMAN_PENDING`. It also becomes `HUMAN_PENDING` if `params.new_cls` is still `None` after verification.
 - **Link margin.** For stage 3, the routed value is `algo_score × ramp(margin)` (§6.3), not the raw score.
+- **Occluded link.** A link through the occlusion-witness gate (§6.3) is capped at `link.occluded_score_cap` (default 0.75). Keep the cap below `link.accept_above`, so these links are never auto-accepted. Waiting in a queue also produces occlusion, so a witness makes a link plausible, not certain.
 
 ## 5. Shared primitives
 
@@ -405,10 +412,19 @@ For each observed frame t, three components are computed.
 - `app_t = max(ramp(z_A), bimodal_t · ramp(silhouette; 0.25 → 0.5))`
 
 **Motion break**
-- `mot_t = max(ramp(NIS_t; nis_hi/2 → nis_hi), ramp(|log(h_t / h_prev)|; 0.15 → 0.4))`
+- `mot_t = max(ramp(NIS_t; nis_hi/2 → nis_hi), ramp(jump_t; 0.15 → 0.4))`
+- `jump_t = max(|log(w_t / w_prev)|, |log(h_t / h_prev)|)`. It uses both dimensions because a takeover can change mostly the width. In the reference case the width goes from 56 to 103 px (jump 0.61), while the height goes from 59 to 68 px (0.14).
 
 **Opportunity gate**
-- `gate_t = 1` if, within ±δ frames (default `δ = 0.5 s`), another track in the same file has `IoU > 0.1` with this one, **or** the gap to the previous observed frame is greater than 1 frame. Otherwise `gate_t = 0`.
+`gate_t = 1` if any of the following holds within ±δ frames (default `δ = 0.5 s`). Otherwise `gate_t = 0`.
+  1. **Contact:** another track in the same file has `IoU > 0.1` with this one.
+  2. **Gap:** the gap to the previous observed frame is greater than 1 frame.
+  3. **Class change:** the per-row `cls` changes at least once (`switch.class_change_gate`, default on). Class groups (§6.3) don't apply here: a car ↔ truck flicker opens the gate too.
+  4. **Size jump:** `jump_t ≥ log(switch.size_gate)` for some observed frame, with default `size_gate = 1.5`. In the reference case the jump is 1.84× (width), so a 2× gate would miss it.
+
+Conditions 3 and 4 cover an object that takes over a track without ever having had a track of its own, like the truck in the reference case. In that situation, condition 1 never fires.
+
+A gate condition only makes a switch *possible*. The score still needs appearance or motion evidence, so a class flicker alone, with no change in appearance or motion, produces no event. `signals.gate` records which conditions fired.
 
 **Score**
 
@@ -435,17 +451,30 @@ In motion-only mode (no video), `app_t = 0` and `w_mot` is renormalized to 1. Wi
 
 ### 6.3 Stage 3: link (pairs of track end → track start)
 
-**Candidates** are pairs (i, j) of the same class, where i ends at `t_e`, j starts at `t_s`, and `g = t_s − t_e`.
+**Candidates** are pairs (i, j) that pass the class gate (gate 3), where i ends at `t_e`, j starts at `t_s`, and `g = t_s − t_e`.
+
+**Majority class.** A track's class for linking is the mode of `cls` over its observed rows. On a tie, the class of the latest observed row wins. Per-row `cls` values in the output are not rewritten.
 
 **Hard gates.** Gates 3–6 are `link_tracklets`'s gates, computed by the shared `_legacy_gate_cost` helper (§2.3).
 1. **Gap:**
    - `1 ≤ g ≤ link.max_gap` (default 1.0 s × fps), or
    - **static gate:** `g ≤ link.max_gap_static` (default 10 s × fps) when i's speed over its last 0.5 s is below 0.2 h/s. For static-gated pairs, gates 5 and 6 are replaced by `‖c_j(t_s) − c_i(t_e)‖ ≤ 0.5·h̃_i`. Otherwise the growth term in gate 5 would open a huge gate over a 10 s gap.
+   - **occlusion-witness gate:** `link.max_gap < g ≤ link.max_gap_occluded` (default 8 s × fps), for pairs that are not static-gated. Gates 5 and 6 are replaced by gates 7–9. Straight-line prediction over several seconds fails for turning objects, so these gates check feasibility instead.
 2. **Overlap:** a small negative gap, `−2 ≤ g ≤ 0`, is allowed only if the boxes have `IoU ≥ 0.5` on every overlapping frame. The overlapping rows from j are dropped on merge.
-3. **Class:** i and j have the same `cls`, after stage 1's reclassing.
-4. **Size:** `w_j / w_i` and `h_j / h_i` are each within `[1/size_ratio_max, size_ratio_max]` (default 2.0).
+3. **Class:** i's and j's majority classes, taken after stage 1's reclassing, are equal or share a group in `link.class_groups`. The default is `[]` for `person` and `[[2, 7]]` (car, truck) for `vehicle`, because detectors often label pickups and SUVs as trucks. Bus (5) stays in its own group.
+4. **Size:** `w_j / w_i` and `h_j / h_i` are each within `[1/size_ratio_max, size_ratio_max]` (default 2.0). For occlusion-witnessed pairs, the check compares i's last and j's first *unoccluded* boxes (§5.3), falling back to the raw end and start boxes. Boxes at the edge of an occlusion are often partial.
 5. **Position:** `dist = ‖c_j(t_s) − (c_i(t_e) + v_i·g)‖ < dist_mult · √area_i · (1 + dist_growth · g)`, with defaults `dist_mult = 2.5` and `dist_growth = 0.03` per frame. `v_i` is a first-order fit on i's last `vel_frames` observed frames.
 6. **Predicted-box IoU:** `IoU(i's end box shifted by v_i·g, j's start box) ≥ iou_min` (default 0.05).
+
+Gates 7–9 apply only to occlusion-witnessed pairs.
+
+7. **Witness:**
+   - For each gap frame, a *hidden box* `B_t` is linearly interpolated (center and size) between i's end box and j's start box.
+   - *Occluders* are the boxes, in that frame, of every other track in the file (after stages 1 and 2 have been applied) and of the context file, excluding i and j.
+   - `witness = fraction of gap frames in which some occluder has IoB(B_t, occluder) ≥ link.witness_iob`, where the default `witness_iob` is 0.5, and IoB is measured relative to `B_t`. Gap frames with no occluder boxes count as uncovered.
+   - Gate: `witness ≥ link.witness_min` (default 0.7).
+8. **Heading:** the angle between i's exit velocity `v_i` and the chord `c_j(t_s) − c_i(t_e)` is at most `link.max_heading_change` (default 120°). This rules out linking to an object moving the other way. If i was stopped (`‖v_i‖ < 0.2` h/s), the check is skipped.
+9. **Speed feasibility:** `v_need = ‖c_j(t_s) − c_i(t_e)‖ / (h̃_i · g/fps)` in h/s. Gate: `v_need ≤ link.speed_factor · v_ref` (default `speed_factor = 1.5`), where `v_ref = max(i's speed over its last 1 s, j's speed over its first 1 s, link.min_feasible_speed)` and `min_feasible_speed` defaults to 0.5 h/s.
 
 **Costs** (each in [0, 1])
 
@@ -453,7 +482,9 @@ In motion-only mode (no video), `app_t = 0` and `w_mot` is renormalized to 1. Wi
 |---|---|
 | `c_mot` | `ramp(legacy; 0 → link.legacy_cost_hi)` (default 3.0). `legacy` is `link_tracklets`'s own cost: `w_d·dist/√area_i + w_iou·(1 − IoU_pred) + w_s·(|log w_j/w_i| + |log h_j/h_i|)`, with `link.legacy_weights` defaults `{d: 1.0, iou: 1.0, s: 0.3}`. For static-gated pairs, `c_mot = ‖c_j − c_i‖ / (0.5·h̃_i)` |
 | `c_app` | `(1 − cos(mean of i's last K clean embeddings, mean of j's first K clean embeddings)) / 2`, with `K = 5`. `0.5` when either side has no clean embeddings |
-| `c_gap` | `g / max_gap`, using `max_gap_static` for static-gated pairs |
+| `c_gap` | `g / max_gap`, using `max_gap_static` for static-gated pairs and `max_gap_occluded` for occlusion-witnessed pairs |
+
+For occlusion-witnessed pairs, `c_mot = 0.5 · v_need / (speed_factor · v_ref) + 0.5 · heading / max_heading_change`, with the heading term 0 when the check was skipped. The pair is scored with `link.weights_occluded` (default `{mot: 0.25, app: 0.60, gap: 0.15}`), because after a long occlusion the motion evidence is weak and appearance carries the decision. `signals` records `witness`, the occluder track IDs, `v_need`, `v_ref`, and `heading`.
 
 **Birth/death prior**
 - `b = 1` if i ends and j starts inside the image: more than `0.5·h̃` from the image border. Otherwise `b = 0`.
@@ -466,7 +497,7 @@ In motion-only mode (no video), `app_t = 0` and `w_mot` is renormalized to 1. Wi
 S_link = (1 − (w_mot·c_mot + w_app·c_app + w_gap·c_gap)) · (0.8 + 0.2·b)
 ```
 
-Defaults are `w_mot = 0.45, w_app = 0.40, w_gap = 0.15`. Size consistency is already part of `c_mot` through the legacy cost. In motion-only mode `w_app = 0` and the others are renormalized.
+Defaults are `w_mot = 0.45, w_app = 0.40, w_gap = 0.15` (`weights_occluded` for occlusion-witnessed pairs). Size consistency is already part of `c_mot` through the legacy cost. In motion-only mode `w_app = 0` and the others are renormalized. For occlusion-witnessed pairs, `S_link` is then capped at `occluded_score_cap` (§4.3).
 
 **Assignment**
 - Build the bipartite graph of gated pairs whose `S_link ≥ reject_below`.
@@ -477,7 +508,7 @@ Defaults are `w_mot = 0.45, w_app = 0.40, w_gap = 0.15`. Size consistency is alr
 - After verification, union-find merges the accepted links into chains. A chain that would put two boxes of the same object on the same frame is rejected: its lowest-scoring link is set to `applied: false` with `skipped_reason: "overlap"`.
 
 **Legacy mode (`link.mode: legacy`).** In this mode stage 3 behaves exactly like `link_tracklets`:
-- gates 1 (without the static gate) and 3–6 only;
+- gate 1 without the static and occlusion-witness gates, then gates 3–6. Gate 3 uses `link_tracklets`'s rule: the `cls` of i's last row equals the `cls` of j's last row, with no groups. That is what `link_tracklets`'s per-track descriptors compare;
 - Hungarian assignment on the raw legacy cost over the full end × start matrix;
 - every assigned pair recorded as `AUTO_ACCEPT` (`algo_score` = 1, legacy cost in `signals`).
 
@@ -488,6 +519,8 @@ Legacy mode also shows the weakness that scored mode fixes: `link_tracklets` mer
 ### 6.4 Stage 4: fill
 
 `interpolate_tracks_rts(fill_gaps_only=True, max_gap=fill.max_gap)` runs on the final tracks. `fill.max_gap` defaults to `link.max_gap`, so a link across a long static gap is joined but not filled. This keeps a waiting pedestrian's invented positions out of conflict and speed analysis, since those analyses already exclude rows with `interp == 1`.
+
+**Gaps bridged by an occlusion-witnessed link are never filled, whatever `fill.max_gap` is.** Over a long occlusion, often during a turn, constant-velocity motion would draw a straight chord through the occluder and create false conflicts. Stage 4 reads these gap spans from the ledger's applied `LINK` events (`signals.gate == "occluded"`), so replay gives the same result.
 
 `fill.smooth_existing` (default `false`) passes `smooth_existing=True`. Observed rows are then replaced by their RTS-smoothed boxes, which gives steadier speed estimates. Those rows keep `interp = 0`, and the ledger header records that smoothing was applied, since observed positions were changed.
 
@@ -505,7 +538,7 @@ Each routed event gets **one composite JPEG**, built by `evidence.py`:
 |---|---|
 | DROP / RECLASS | 6 crops spread evenly across the track's observed frames, plus 1 context frame at mid-life |
 | SPLIT at t | Row A: 3 clean crops before t. Row B: 3 clean crops after t. Plus the context frame at t, with nearby tracks drawn |
-| LINK i→j | Row A: i's last 3 clean crops. Row B: j's first 3 clean crops. Plus context frames at `t_e` and `t_s` |
+| LINK i→j | Row A: i's last 3 clean crops. Row B: j's first 3 clean crops. Plus context frames at `t_e` and `t_s`. For occlusion-witnessed links, also a context frame at the middle of the gap, with the hidden box `B_t` drawn dashed and the occluder labeled |
 
 If `vlm.send_context_frames: false`, context frames are left out.
 
@@ -676,6 +709,8 @@ switch:
   w_app: 0.65
   w_mot: 0.35
   motion_only_cap: 0.70
+  class_change_gate: true
+  size_gate: 1.5
 link:
   enabled: true
   mode: scored               # scored | legacy (§6.3)
@@ -683,6 +718,15 @@ link:
   reject_below: 0.40
   max_gap: 1.0               # seconds
   max_gap_static: 10.0       # seconds
+  max_gap_occluded: 8.0      # seconds (§6.3 gates 7–9)
+  witness_iob: 0.5
+  witness_min: 0.7
+  max_heading_change: 120    # degrees
+  speed_factor: 1.5
+  min_feasible_speed: 0.5    # h/s
+  occluded_score_cap: 0.75
+  weights_occluded: {mot: 0.25, app: 0.60, gap: 0.15}
+  class_groups: []           # vehicle default: [[2, 7]]
   size_ratio_max: 2.0        # legacy gates (link_tracklets defaults)
   dist_mult: 2.5
   dist_growth: 0.03          # per frame
@@ -719,7 +763,10 @@ vlm:
 **Validation, run when the config loads**
 - `0 ≤ reject_below < accept_above ≤ 1` for every stage.
 - `static_score_cap < screen.accept_above`, so static tracks can never auto-drop (§6.1).
-- The link weights sum to 1.
+- `link.weights` and `link.weights_occluded` each sum to 1.
+- `link.occluded_score_cap < link.accept_above`, so occluded links can never auto-accept.
+- `link.max_gap < link.max_gap_occluded`.
+- No class appears in more than one `link.class_groups` group.
 - The chosen encoder's extra is installed.
 - `reid` with the `vehicle` target has `weights` set.
 - A non-`none` VLM backend has `model` set (except `anthropic`, which has a default), and its extra is installed.
@@ -763,6 +810,8 @@ All tests below run in the default suite (CPU, no network), except where a marke
   - an appearance drift with no gate → no event.
   - a position jump after a 5-frame gap → motion-only candidate, capped below accept.
   - a side shorter than 0.5 s → no event.
+  - **takeover by an untracked object** (reference case replica): a car box that, at t, widens 1.8× with little height change, whose row classes flicker 2 → 7 → 5, and whose embeddings change, with no other track nearby → the gate opens through class change and size jump, and `SPLIT` lands at t. With `class_change_gate: false`, the size jump alone still opens the gate.
+  - a class flicker alone, with unchanged embeddings and smooth motion → the gate opens but no event is written.
 - `test_link.py`:
   - **parity:** `link.mode: legacy` gives the same track-ID mapping as `link_tracklets` on the existing `test_post_process.py` fixtures and on a randomized set of 200 synthetic tracklets (fixed seed).
   - a pair that `link_tracklets` merges despite a high cost → `scored` mode sends it to `AUTO_REJECT` or the VLM band, not to `AUTO_ACCEPT`.
@@ -771,6 +820,9 @@ All tests below run in the default suite (CPU, no network), except where a marke
   - a stationary pedestrian with a 6 s gap at the same spot → linked through the static gate. With `max_gap_static` = 5 s → not linked.
   - a start near the border → prior lowers the score.
   - a chain producing overlap → lowest link skipped with `skipped_reason: "overlap"`.
+  - **occluded turn** (reference case replica): i ends heading north, a large box covers the linearly interpolated path for 63 frames at 10 fps, and j starts heading west with matching embeddings → an occlusion-witnessed `LINK` routed to the VLM band (never `AUTO_ACCEPT`).
+  - the same pair with no occluder → not linked. With the occluder covering only 50% of the gap → not linked. With j moving opposite to i's heading → not linked. With `v_need` above `speed_factor · v_ref` → not linked.
+  - car ↔ truck majority classes → linked with the vehicle default `class_groups`, not linked with `class_groups: []`.
 
 ### 11.2 Events, verify, apply, replay
 
@@ -795,6 +847,11 @@ All tests below run in the default suite (CPU, no network), except where a marke
 ### 11.4 Integration and compatibility
 
 - `test_refiner.py`: end-to-end `refine` on the synthetic video with the stub encoder and the fake VLM; motion-only mode; the empty file; the CLI `run` / `apply` via `subprocess`.
+- `test_reference_case.py`: the synthetic replica of #12 → #81 end to end. The fake VLM answers `different` for the split and `same_individual` for the link. Expected result:
+  - the car part of #12 and #81 share one ID;
+  - the truck part has its own ID;
+  - no rows are filled in the 63-frame gap, even with `fill.max_gap` raised to 100 frames.
+- `@pytest.mark.realdata` (new marker, excluded by default): the same checks on the real Miami track file and video, found through `DNT_REFINE_CASE_DIR`. That directory holds `tracks.txt`, `video.mp4`, and an `expected.yaml` listing the expected `SPLIT` and `LINK` events, with frame tolerance ±3.
 - `test_post_independence.py`: the §2.2 import rule.
 - The existing `tests/test_post_process.py` passes unchanged through the shim. The existing `tests/test_filter.py` passes with the retargeted `Filter.interpolate_tracks_rts` wrapper.
 - `test_primitives.py`: `cv_kalman` gives the same smoothed boxes as the pre-refactor `interpolate_tracks_rts` on the fixtures (the refactor is behavior-preserving), and NIS is χ²₄-distributed on simulated constant-velocity tracks (mean ≈ 4 within tolerance).
@@ -808,6 +865,7 @@ All tests below run in the default suite (CPU, no network), except where a marke
 - **`pyproject.toml`**
   - extras: `post-dino`, `post-reid`, `post-vlm`, and `post` (the union of those three).
   - `[project.scripts] dnt-refine`.
+  - a `realdata` pytest marker, added to the default `-m` exclusions in `addopts`.
   - No new required dependencies.
 - **Docs**
   - `docs/api/post.md`, pointing mkdocstrings at `dnt.post`, `dnt.post.config`, and `dnt.post.vlm`, plus a `mkdocs.yml` `nav` entry.
