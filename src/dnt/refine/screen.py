@@ -3,7 +3,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from itertools import pairwise
 
 import numpy as np
@@ -13,7 +13,7 @@ from .apply import lineage_of_rows
 from .config import RefineConfig
 from .events import Event, EventKind
 from .hints import ReclassHint
-from .primitives import box_centers, heading_smoothness, iob_matrix, iou_matrix, ramp, speeds_hps
+from .primitives import box_centers, heading_smoothness, iou_matrix, ramp, speeds_hps
 
 STAGE = "screen"
 ORPHAN_STAGE = "orphan"
@@ -40,6 +40,8 @@ class _Unit:
     vel: np.ndarray
     localized_hint: ReclassHint | None
     unlocalized_hint: ReclassHint | None
+    area: float = 0.0
+    unique_frames: bool = False
 
 
 def _pixel_velocity(frames: np.ndarray, boxes: np.ndarray) -> np.ndarray:
@@ -59,7 +61,23 @@ def _unit(track, rows: pd.DataFrame, cfg, fps, localized=None, unlocalized=None)
         hmed=max(float(np.median(boxes[:, 3])), 1.0),
         v=speeds_hps(frames, boxes, fps, cfg.motion.height_window),
         vel=_pixel_velocity(frames, boxes), localized_hint=localized, unlocalized_hint=unlocalized,
+        area=float(np.median(boxes[:, 2] * boxes[:, 3])),
+        unique_frames=bool(np.all(np.diff(frames) > 0)),
     )
+
+
+def _iob_rows(a: np.ndarray, b: np.ndarray) -> np.ndarray:
+    """Return IoB of each ``a`` box (its intersection over its own area) with each ``b`` box.
+
+    ``a`` is ``(N, 4)`` and ``b`` is ``(M, 4)`` in ``[left, top, width, height]``; the result
+    is ``(N, M)`` and equals ``primitives.iob_matrix(a, b)`` for boxes of non-negative size.
+    """
+    ax, ay = a[:, 0:1], a[:, 1:2]
+    iw = np.minimum(ax + a[:, 2:3], b[:, 0] + b[:, 2]) - np.maximum(ax, b[:, 0])
+    ih = np.minimum(ay + a[:, 3:4], b[:, 1] + b[:, 3]) - np.maximum(ay, b[:, 1])
+    inter = np.maximum(0, iw) * np.maximum(0, ih)
+    area = (a[:, 2] * a[:, 3])[:, None]
+    return np.divide(inter, area, out=np.zeros_like(inter), where=area != 0)
 
 
 class _ContextIndex:
@@ -69,7 +87,8 @@ class _ContextIndex:
         """Index ``sctx.boxes`` by frame."""
         self.fmt = sctx.fmt
         self.present = sctx.boxes is not None
-        self.by_frame: dict[int, tuple[np.ndarray, np.ndarray, np.ndarray]] = {}
+        self._by_frame: dict[int, tuple[np.ndarray, np.ndarray, np.ndarray]] = {}
+        self._views: dict[frozenset, dict[int, tuple[np.ndarray, np.ndarray]]] = {}
         if not self.present or not len(sctx.boxes):
             return
         b = sctx.boxes.sort_values(["track", "frame"]).reset_index(drop=True)
@@ -82,27 +101,41 @@ class _ContextIndex:
         cls = b["cls"].to_numpy(int)
         for f, g in b.groupby("frame"):
             idx = g.index.to_numpy()
-            self.by_frame[int(f)] = (boxes[idx], cls[idx], vel[idx])
+            self._by_frame[int(f)] = (boxes[idx], cls[idx], vel[idx])
 
-    def at(self, frame: int, classes) -> tuple[np.ndarray, np.ndarray]:
-        """Return ``(boxes, velocities)`` of context boxes of ``classes`` in ``frame``."""
-        entry = self.by_frame.get(int(frame))
-        if entry is None:
-            return np.empty((0, 4)), np.empty((0, 2))
-        boxes, cls, vel = entry
-        keep = np.isin(cls, list(classes))
-        return boxes[keep], vel[keep]
+    def view(self, classes) -> dict[int, tuple[np.ndarray, np.ndarray]]:
+        """Return ``{frame: (boxes, velocities)}`` of context boxes of ``classes``.
+
+        The per-class filtering happens once per class set; frames without a matching box are
+        absent from the result.
+        """
+        key = frozenset(int(c) for c in classes)
+        cached = self._views.get(key)
+        if cached is None:
+            wanted = list(key)
+            cached = {}
+            for f, (boxes, cls, vel) in self._by_frame.items():
+                keep = np.isin(cls, wanted)
+                if keep.any():
+                    cached[f] = (boxes[keep], vel[keep])
+            self._views[key] = cached
+        return cached
+
+
+_NO_BOXES = (np.empty((0, 4)), np.empty((0, 2)))
 
 
 def _context_fraction(u: _Unit, ctx: _ContextIndex, classes, overlap: str, thr: float,
                       cfg: RefineConfig, fps: float) -> float:
     """Fraction of rows where a context box of ``classes`` overlaps ``u`` and moves with it."""
-    overlap_fn = iob_matrix if overlap == "iob" else iou_matrix
+    overlap_fn = _iob_rows if overlap == "iob" else iou_matrix
+    view = ctx.view(classes)
     hits = np.zeros(len(u.frames), dtype=bool)
     for i, f in enumerate(u.frames):
-        boxes, vel = ctx.at(f, classes)
-        if not len(boxes):
+        entry = view.get(int(f))
+        if entry is None:
             continue
+        boxes, vel = entry
         ov = overlap_fn(u.boxes[i : i + 1], boxes)[0]
         ok = ov >= thr
         if not ok.any():
@@ -113,7 +146,7 @@ def _context_fraction(u: _Unit, ctx: _ContextIndex, classes, overlap: str, thr: 
         else:
             if i == 0 or not np.isfinite(u.v[i]) or u.v[i] < cfg.motion.moving_min:
                 continue
-            prev_boxes, _ = ctx.at(u.frames[i - 1], classes)
+            prev_boxes, _ = view.get(int(u.frames[i - 1]), _NO_BOXES)
             if not len(prev_boxes):
                 continue
             prev_ok = prev_boxes[overlap_fn(u.boxes[i - 1 : i], prev_boxes)[0] >= thr]
@@ -130,7 +163,7 @@ def _static_center(u: _Unit, cfg: RefineConfig) -> tuple[float, float, np.ndarra
     return r, float(ramp(r, *cfg.screen.ramps["R"])), med
 
 
-def _static(u: _Unit, cfg, fps, static_meds: dict[int, np.ndarray], cap: float):
+def _static(u: _Unit, cfg, fps, static_meds: tuple[np.ndarray, np.ndarray], cap: float):
     r = cfg.screen.ramps
     raw_r, r_ramp, med = _static_center(u, cfg)
     c = box_centers(u.boxes)
@@ -143,8 +176,8 @@ def _static(u: _Unit, cfg, fps, static_meds: dict[int, np.ndarray], cap: float):
     conf = float(valid.mean()) if len(valid) else None
     dur = (u.frames[-1] - u.frames[0] + 1) / fps
     radius = cfg.screen.hotspot_radius * u.hmed
-    near = sum(1 for t, m in static_meds.items()
-               if t != u.track and np.linalg.norm(m - med) <= radius)
+    ids, meds = static_meds
+    near = int(np.count_nonzero((ids != u.track) & (np.linalg.norm(meds - med, axis=1) <= radius)))
     hot = near + (1 if r_ramp >= 0.5 else 0)
     parts = [ramp(jit, *r["J"]), ramp(hot, *r["H"])]
     if conf is not None:
@@ -190,29 +223,49 @@ def _rider(u: _Unit, ctx: _ContextIndex, cfg: RefineConfig, fps):
     return score, signals, {"new_cls": new_cls}
 
 
-def _duplicate(u: _Unit, others: dict[int, _Unit], cfg: RefineConfig, fps):
+class _DupIndex:
+    """First frame, last frame and median area of every whole track, for candidate pruning."""
+
+    def __init__(self, units: dict[int, _Unit]):
+        """Stack the per-track ranges of ``units`` (ascending track order)."""
+        self.units = units
+        self.ids = np.array(list(units), dtype=int)
+        self.first = np.array([u.frames[0] for u in units.values()], dtype=int)
+        self.last = np.array([u.frames[-1] for u in units.values()], dtype=int)
+        self.area = np.array([u.area for u in units.values()], dtype=float)
+
+
+def _duplicate(u: _Unit, index: _DupIndex, cfg: RefineConfig, fps):
     sc = cfg.screen
-    area_u = float(np.median(u.boxes[:, 2] * u.boxes[:, 3]))
+    # Cheap vectorized pruning first: enough frame range in common, and u must be the smaller.
+    span = np.minimum(index.last, u.frames[-1]) - np.maximum(index.first, u.frames[0]) + 1
+    smaller = (u.area < index.area) | ((u.area == index.area) & (u.track > index.ids))
+    cand = np.flatnonzero((index.ids != u.track) & (span >= sc.duplicate_min_frames) & smaller)
     best = None
-    for tid, o in others.items():
-        if tid == u.track:
-            continue
-        common, iu, io_ = np.intersect1d(u.frames, o.frames, return_indices=True)
+    for k in cand:
+        tid = int(index.ids[k])
+        o = index.units[tid]
+        common, iu, io_ = np.intersect1d(u.frames, o.frames, assume_unique=(
+            u.unique_frames and o.unique_frames), return_indices=True)
         if len(common) < sc.duplicate_min_frames:
             continue
-        area_o = float(np.median(o.boxes[:, 2] * o.boxes[:, 3]))
-        if area_u > area_o or (area_u == area_o and u.track < tid):
-            continue
-        ok = 0
-        for a, b in zip(iu, io_, strict=True):
-            iob = iob_matrix(u.boxes[a : a + 1], o.boxes[b : b + 1])[0, 0]
-            dv = float(np.linalg.norm(u.vel[a] - o.vel[b]) / u.hmed * fps)
-            ok += int(iob >= sc.duplicate_iob and dv < sc.move_together)
-        frac = ok / len(common)
+        iob = _paired_iob(u.boxes[iu], o.boxes[io_])
+        dv = np.linalg.norm(u.vel[iu] - o.vel[io_], axis=1) / u.hmed * fps
+        frac = int(np.count_nonzero((iob >= sc.duplicate_iob) & (dv < sc.move_together))) / len(
+            common)
         s = ramp(frac, *sc.ramps["D"])
         if best is None or s > best[0]:
-            best = (s, {"D": frac}, {"reason": "duplicate", "of": int(tid)})
+            best = (s, {"D": frac}, {"reason": "duplicate", "of": tid})
     return best
+
+
+def _paired_iob(a: np.ndarray, b: np.ndarray) -> np.ndarray:
+    """Return the IoB of ``a[i]`` (over its own area) with ``b[i]`` for each row ``i``."""
+    iw = np.minimum(a[:, 0] + a[:, 2], b[:, 0] + b[:, 2]) - np.maximum(a[:, 0], b[:, 0])
+    ih = np.minimum(a[:, 1] + a[:, 3], b[:, 1] + b[:, 3]) - np.maximum(a[:, 1], b[:, 1])
+    inter = np.maximum(0, iw) * np.maximum(0, ih)
+    area = a[:, 2] * a[:, 3]
+    return np.divide(inter, area, out=np.zeros_like(inter), where=area != 0)
 
 
 def _segments(rows: pd.DataFrame, cuts: list[int]) -> list[pd.DataFrame]:
@@ -237,11 +290,13 @@ def propose_screen(
     cap = sc.vehicle_static_score_cap if cfg.target == "vehicle" else sc.static_score_cap
     tracks = {int(t): g.sort_values("frame") for t, g in work.groupby("track", sort=True)}
     wholes = {t: _unit(t, g, cfg, fps) for t, g in tracks.items()}
-    static_meds = {}
+    meds = {}
     for t, u in wholes.items():
         _, r_ramp, med = _static_center(u, cfg)
         if r_ramp >= 0.5:
-            static_meds[t] = med
+            meds[t] = med
+    static_meds = (np.array(list(meds), dtype=int), np.array(list(meds.values())).reshape(-1, 2))
+    dup_index = _DupIndex(wholes) if cfg.target != "person" else None
 
     def hyps(u):
         out = {"static": lambda: _static(u, cfg, fps, static_meds, cap)}
@@ -249,18 +304,17 @@ def propose_screen(
             out["in_vehicle"] = lambda: _in_vehicle(u, ctx, cfg, fps)
             out["rider"] = lambda: _rider(u, ctx, cfg, fps)
         else:
-            out["duplicate"] = lambda: _duplicate(u, wholes, cfg, fps)
+            out["duplicate"] = lambda: _duplicate(u, dup_index, cfg, fps)
         return out
 
     events: list[Event] = []
     for t, g in tracks.items():
-        lin = lineage_of_rows(g)
-        raw_ids = {r for r, _, _ in lin}
+        raw_ids = {int(r) for r in g["raw_id"].unique()}
         hint = sctx.hints.get(next(iter(raw_ids))) if len(raw_ids) == 1 else None
         segs = _segments(g, segment_cuts.get(t, []))
         localized = hint is not None and not segs and not (raw_ids & sctx.split_raw_ids)
-        whole = _unit(t, g, cfg, fps, localized=hint if localized else None,
-                      unlocalized=None if localized else hint)
+        whole = replace(wholes[t], localized_hint=hint if localized else None,
+                        unlocalized_hint=None if localized else hint)
         seg_units = [_unit(t, s, cfg, fps, unlocalized=hint) for s in segs]
         whole_h = hyps(whole)
         seg_h = [hyps(su) for su in seg_units]
@@ -295,8 +349,9 @@ def propose_screen(
         if best is None or best[1][0] < sc.reject_below:
             continue
         name, (score, signals, params, spans) = best
+        lin = lineage_of_rows(g)
         kind = EventKind.RECLASS if name == "rider" else EventKind.DROP
-        frames = ((spans[0][0], spans[-1][1]) if spans
+        frames = ((spans[0][0], spans[-1][1]) if spans is not None
                   else (int(g["frame"].iloc[0]), int(g["frame"].iloc[-1])))
         events.append(Event.propose(
             stage=STAGE, kind=kind, tracks=[t], lineage=[lin], frames=frames,
