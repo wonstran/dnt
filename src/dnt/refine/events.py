@@ -72,10 +72,27 @@ def _dumps(obj) -> str:
     return json.dumps(clean_json(obj), sort_keys=True, separators=(",", ":"), allow_nan=False)
 
 
+def _normalize_integral_floats(obj):
+    """Recursively convert integral floats (e.g., 821.0, np.float64(821.0)) to int."""
+    if isinstance(obj, dict):
+        return {k: _normalize_integral_floats(v) for k, v in obj.items()}
+    if isinstance(obj, list | tuple):
+        return [_normalize_integral_floats(v) for v in obj]
+    if isinstance(obj, np.floating):
+        v = float(obj)
+        return int(v) if v.is_integer() else v
+    if isinstance(obj, float):
+        return int(obj) if obj.is_integer() else obj
+    return obj
+
+
 def proposal_key(stage: str, kind, lineage, params: dict) -> str:
     """Return the immutable key of a proposal (spec 4.2)."""
     k = EventKind(kind)
     defining = {name: params.get(name) for name in DEFINING_PARAMS[k]}
+    # Normalize integral floats to ints for consistent hashing
+    defining = _normalize_integral_floats(defining)
+    lineage = _normalize_integral_floats(lineage)
     return hashlib.sha256(_dumps([stage, k.value, lineage, defining]).encode()).hexdigest()
 
 

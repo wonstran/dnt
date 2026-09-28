@@ -1,5 +1,7 @@
 import math
 
+import numpy as np
+
 from dnt.refine.events import Decision, Event, EventKind, Ledger, assign_ids, proposal_key
 
 
@@ -15,10 +17,19 @@ def test_key_ignores_track_numbering_but_not_the_cut():
 
 
 def test_key_ignores_score_signals_and_edit():
-    a = _split()
-    b = _split()
-    b.algo_score, b.signals, b.edit = 0.1, {"x": 1}, {"kind": "DROP", "params": {}}
+    # Build two events through Event.propose with different algo_score and signals
+    a = Event.propose(stage="switch", kind=EventKind.SPLIT, tracks=[4],
+                      lineage=[[list((12, 780, 900))]], frames=(821, 821),
+                      params={"cut_frame": 821}, algo_score=0.7, signals={"mot": 1.0})
+    b = Event.propose(stage="switch", kind=EventKind.SPLIT, tracks=[4],
+                      lineage=[[list((12, 780, 900))]], frames=(821, 821),
+                      params={"cut_frame": 821}, algo_score=0.1, signals={"x": 1})
     assert a.proposal_key == b.proposal_key
+    # Test the module-level function with an extra non-defining param
+    k1 = proposal_key("screen", "SPLIT", [[[1, 0, 9]]], {"cut_frame": 821, "note": "x"})
+    k2 = proposal_key("screen", "SPLIT", [[[1, 0, 9]]], {"cut_frame": 821, "note": "y"})
+    assert k1 == k2
+    # Verify that changing a defining param does change the key
     k = proposal_key("screen", "DROP", [[[1, 0, 9]]], {"reason": "static", "spans": None})
     assert k != proposal_key("screen", "DROP", [[[1, 0, 9]]], {"reason": "in_vehicle",
                                                                 "spans": None})
@@ -55,3 +66,18 @@ def test_assign_ids_continues_sequence():
     evs = [_split(), _split(cut=900)]
     assert assign_ids(evs, "switch", 1, start=5) == 7
     assert [e.id for e in evs] == ["switch-r1-000005", "switch-r1-000006"]
+
+
+def test_proposal_key_normalizes_integral_floats():
+    # int and integral float should produce the same key
+    k_int = proposal_key("switch", EventKind.SPLIT, [[]], {"cut_frame": 821})
+    k_float = proposal_key("switch", EventKind.SPLIT, [[]], {"cut_frame": 821.0})
+    k_np = proposal_key("switch", EventKind.SPLIT, [[]], {"cut_frame": np.float64(821.0)})
+    assert k_int == k_float == k_np
+    # Non-integral float should differ
+    k_nonint = proposal_key("switch", EventKind.SPLIT, [[]], {"cut_frame": 821.5})
+    assert k_int != k_nonint
+    # Test with lineage spans: int, float, and numpy float should match
+    k_int_lin = proposal_key("screen", EventKind.DROP, [[[12, 780, 900]]], {"reason": "x", "spans": None})
+    k_float_lin = proposal_key("screen", EventKind.DROP, [[[12, 780.0, 900.0]]], {"reason": "x", "spans": None})
+    assert k_int_lin == k_float_lin
