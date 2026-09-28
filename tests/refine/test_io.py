@@ -141,3 +141,17 @@ def test_read_tracks_only_blank_lines(tmp_path):
     (tmp_path / "blank_only.txt").write_text("\n\n\n")
     tin = io.read_tracks(tmp_path / "blank_only.txt")
     assert tin.work.empty and list(tin.work.columns) == io.WORK_COLUMNS
+
+
+def test_read_tracks_ragged_true_line_with_blanks_11_fields(tmp_path):
+    """Ragged row after blanks should report true file line number."""
+    (tmp_path / "ragged2.txt").write_text("\n\n0,1,1,1,1,1,0.9,0,-1,-1\n0,1,1,1,1,1,0.9,0,-1,-1,extra\n")
+    with pytest.raises(ValueError, match=r"ragged2\.txt.*line 4"):
+        io.read_tracks(tmp_path / "ragged2.txt")
+
+
+def test_read_tracks_ragged_true_line_with_blanks_short_first(tmp_path):
+    """Field count mismatch after blanks should report true file line number."""
+    (tmp_path / "ragged3.txt").write_text("\n\n0,1,1,1,1,1\n0,1,1,1,1,1,0.9,0,-1,-1\n")
+    with pytest.raises(ValueError, match=r"line 4"):
+        io.read_tracks(tmp_path / "ragged3.txt")

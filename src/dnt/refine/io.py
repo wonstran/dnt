@@ -40,12 +40,21 @@ def _read_numeric_csv(path, min_cols: int, check_cols: int | None = None) -> pd.
     path = Path(path)
     rows_list = []
     true_line_map = []
-    line_num = 0
-    with Path(path).open("r") as f:
+    first_field_count = None
+    with path.open("r", encoding="utf-8-sig") as f:
         for line_num, line in enumerate(f, start=1):
             line = line.rstrip("\n\r")
             if not line.strip():
                 continue
+            n_fields = line.count(",") + 1
+            if first_field_count is None:
+                first_field_count = n_fields
+            elif n_fields != first_field_count:
+                msg = (
+                    f"{path}: expected {first_field_count} fields, found {n_fields} on "
+                    f"line {line_num}: {line}"
+                )
+                raise ValueError(msg)
             rows_list.append(line)
             true_line_map.append(line_num)
     if not rows_list:
