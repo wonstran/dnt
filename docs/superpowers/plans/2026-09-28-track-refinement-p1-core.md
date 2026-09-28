@@ -64,7 +64,7 @@ These are the five inputs most likely to hurt a real user that the spec implies 
 These are reported at handoff.
 
 - **Dry run (2026-09-28).** The code blocks in this plan were assembled into a scratch copy of the repository and executed. The baselines were generated first, then every task was applied in order.
-  - The full default suite passes, including every new test: 431 passed, 12 xfailed (pre-existing). This was re-run after the `dnt.refine` rename, the Tracker-style API, and the fixes for review 2026-09-28 14:02.
+  - The full default suite passes, including every new test: 432 passed, 12 xfailed (pre-existing). This was re-run after the `dnt.refine` rename, the Tracker-style API, and the fixes for the 2026-09-28 reviews at 14:02 and 14:39.
   - `ruff check src tests` is clean.
   - `ruff format` reformats 13 of the new files. That is layout only, and Task 17 Step 5 runs it.
   - The two "verbatim" moves (Task 3's docstring, Task 5's nested helpers) were filled from the original source during the dry run.
@@ -1473,6 +1473,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 import hashlib
 import logging
 
+import pandas as pd
 import pytest
 
 from dnt.refine import io
@@ -1494,6 +1495,16 @@ def test_read_tracks_removes_filled_rows_and_builds_work_table(tmp_path):
     assert list(tin.work.columns) == io.WORK_COLUMNS
     assert tin.work["frame"].tolist() == [0, 1, 3, 4]
     assert (tin.work["raw_id"] == 7).all() and (tin.work["interp"] == 0).all()
+
+
+def test_to_work_recognizes_a_named_interp_column():
+    df = pd.DataFrame({
+        "frame": [0, 1, 2], "track": [4, 4, 4], "x": [1.0] * 3, "y": [1.0] * 3,
+        "w": [5.0] * 3, "h": [9.0] * 3, "score": [0.9] * 3, "cls": [0] * 3,
+        "interp": [0, 1, 0], "r4": [-1] * 3,
+    })  # the named layout refine and interpolate_tracks_rts write (no r3 column)
+    tin = io.to_work(df)
+    assert tin.n_filled_removed == 1 and tin.work["frame"].tolist() == [0, 2]
 
 
 def test_duplicate_track_frame_rows_keep_first(tmp_path, caplog):
@@ -1648,15 +1659,23 @@ def _read_numeric_csv(path, min_cols: int, check_cols: int | None = None) -> pd.
 
 
 def to_work(df: pd.DataFrame, *, source: str = "tracks") -> TrackInput:
-    """Build a work table from a raw 6-10 column track table (positional or named)."""
+    """Build a work table from a raw 6-10 column track table (positional or named).
+
+    A row is a filled (interpolated) row, and is removed, when its flag is 1. The flag is
+    column 8, named ``r3`` in the tracker layout and ``interp`` in interpolated output; a
+    named table may use either name (or both).
+    """
     df = df.copy()
     if not all(c in df.columns for c in ("frame", "track", "x", "y", "w", "h")):
         df = df.iloc[:, : len(TRACK_COLUMNS)]
         df.columns = TRACK_COLUMNS[: df.shape[1]]
-    for c, default in (("score", -1.0), ("cls", -1), ("r3", -1), ("r4", -1)):
+    for c, default in (("score", -1.0), ("cls", -1), ("r4", -1)):
         if c not in df.columns:
             df[c] = default
-    filled = pd.to_numeric(df["r3"], errors="coerce").fillna(-1) == 1
+    filled = np.zeros(len(df), dtype=bool)
+    for flag in ("r3", "interp"):
+        if flag in df.columns:
+            filled |= (pd.to_numeric(df[flag], errors="coerce").fillna(-1) == 1).to_numpy()
     n_filled = int(filled.sum())
     df = df.loc[~filled]
     dup = df.duplicated(["track", "frame"], keep="first")
