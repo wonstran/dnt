@@ -601,6 +601,13 @@ def describe_tracks(work, cfg: RefineConfig, fps: float, occluded) -> dict[int, 
     return out
 
 
+# A box farther than this (pixels) outside the end/start rectangle cannot touch a hidden box,
+# even with floating-point rounding in the interpolation; see ``_Occluders.witness``.
+_PRUNE_MARGIN = 1.0
+# Slack on the score bound that skips hopeless witness scans; see ``score_candidates``.
+_BOUND_SLACK = 1e-9
+
+
 class _Occluders:
     """Boxes from the work table (owner = track) and the context (owner = -1), sorted by frame."""
 
@@ -621,6 +628,10 @@ class _Occluders:
         first box; a frame is covered when another box has ``IoB >= iob_thr`` with it (the
         intersection over the hidden box's area). All gap frames are scanned in one vectorized
         pass because ``dnt.engine.iobs`` loops in Python over every pair.
+
+        Every hidden box lies inside the rectangle spanned by the end and start boxes, so a box
+        that misses that rectangle (by more than ``_PRUNE_MARGIN`` pixels) has IoB 0 with every
+        hidden box; such boxes are dropped before the IoB step when ``iob_thr > 0``.
         """
         n = dj.t_s - di.t_e - 1
         if n <= 0:
@@ -628,10 +639,18 @@ class _Occluders:
         lo = int(np.searchsorted(self.frames, di.t_e + 1, side="left"))
         hi = int(np.searchsorted(self.frames, dj.t_s, side="left"))
         owners = self.owners[lo:hi]
+        boxes = self.boxes[lo:hi]
         keep = (owners != di.track) & (owners != dj.track)
+        if iob_thr > 0:
+            ends = np.stack([di.end_box, dj.start_box])
+            edges = np.concatenate([ends[:, :2], ends[:, :2] + ends[:, 2:]])
+            r_lo = edges.min(axis=0) - _PRUNE_MARGIN
+            r_hi = edges.max(axis=0) + _PRUNE_MARGIN
+            keep &= (boxes[:, 0] <= r_hi[0]) & (boxes[:, 0] + boxes[:, 2] >= r_lo[0])
+            keep &= (boxes[:, 1] <= r_hi[1]) & (boxes[:, 1] + boxes[:, 3] >= r_lo[1])
         if not keep.any():
             return 0.0, []
-        boxes = self.boxes[lo:hi][keep]
+        boxes = boxes[keep]
         owners = owners[keep]
         step = self.frames[lo:hi][keep] - di.t_e  # 1..n
         a = (step / (dj.t_s - di.t_e))[:, None]
@@ -721,7 +740,7 @@ def _overlap_gate(di: TrackDesc, dj: TrackDesc, lc):
     return "overlap", float(1.0 - vals.mean()), {"overlap_iou": float(vals.mean())}
 
 
-def _gate(di: TrackDesc, dj: TrackDesc, g: int, cfg: RefineConfig, fps: float, gaps, occl):
+def _gate(di: TrackDesc, dj: TrackDesc, g: int, cfg: RefineConfig, fps: float, gaps):
     lc = cfg.link
     mg, mgs, mgo = gaps
     if -lc.overlap_frames <= g <= 0:
@@ -771,25 +790,24 @@ def _gate(di: TrackDesc, dj: TrackDesc, g: int, cfg: RefineConfig, fps: float, g
         v_ref = max(di.speed_end, dj.speed_start, lc.min_feasible_speed)
         if v_need > lc.speed_factor * v_ref:
             return None
-        # the witness scan is the costliest gate, so it runs after the cheap ones
-        witness, ids = occl.witness(di, dj, lc.witness_iob)
-        if witness < lc.witness_min:
-            return None
         c_mot = 0.5 * v_need / (lc.speed_factor * v_ref) + 0.5 * (
             (heading or 0.0) / lc.max_heading_change
         )
+        # The witness gate (7) is the costliest, so ``score_candidates`` runs it last, and only
+        # for pairs whose score can still reach ``link.reject_below``.
         return (
             "occluded",
             float(c_mot),
-            {
-                "witness": witness,
-                "occluders": ids,
-                "v_need": v_need,
-                "v_ref": v_ref,
-                "heading": heading,
-            },
+            {"v_need": v_need, "v_ref": v_ref, "heading": heading},
         )
     return None
+
+
+def _link_score(w: dict, c_mot: float, c_gap: float, c_app, b: int, cap) -> float:
+    """Return ``S_link`` (spec 6.3), capped at ``cap`` when it is not None."""
+    cost = w["mot"] * c_mot + w["gap"] * c_gap + w["app"] * (c_app or 0.0)
+    s = float(np.clip((1.0 - cost) * (0.8 + 0.2 * b), 0.0, 1.0))
+    return s if cap is None else min(s, cap)
 
 
 def score_candidates(
@@ -801,8 +819,14 @@ def score_candidates(
     context,
     frame_size,
     occluded,
+    min_score: float | None = None,
 ) -> tuple[list[Candidate], dict[int, TrackDesc]]:
-    """Gate and score every end->start pair (spec 6.3)."""
+    """Gate and score every end->start pair (spec 6.3).
+
+    With ``min_score``, occlusion-witnessed pairs that cannot score ``min_score`` are left out
+    before their witness scan; every other candidate is the same as without it. Stage 3 passes
+    ``link.reject_below``, below which a candidate never enters assignment.
+    """
     lc = cfg.link
     motion_only = appearance is None
     if motion_only:
@@ -834,26 +858,32 @@ def score_candidates(
             if dj.track == di.track or not _class_ok(di.cls_major, dj.cls_major, lc.class_groups):
                 continue
             g = dj.t_s - di.t_e
-            res = _gate(di, dj, g, cfg, fps, gaps, occl)
+            res = _gate(di, dj, g, cfg, fps, gaps)
             if res is None:
                 continue
             gate, c_mot, sig = res
             w = dict(lc.weights_occluded if gate == "occluded" else lc.weights)
-            c_app = None
             if motion_only:
                 total = w["mot"] + w["gap"]
                 w = {"mot": w["mot"] / total, "gap": w["gap"] / total, "app": 0.0}
-            else:
-                c_app = _c_app(di, dj, appearance, lc.k_embed, cache)
             limit = {"normal": gaps[0], "overlap": gaps[0], "static": gaps[1], "occluded": gaps[2]}[
                 gate
             ]
             c_gap = max(g, 0) / limit
             b = _prior(di, dj, frame_size, lc.border_margin)
-            cost = w["mot"] * c_mot + w["gap"] * c_gap + w["app"] * (c_app or 0.0)
-            s = float(np.clip((1.0 - cost) * (0.8 + 0.2 * b), 0.0, 1.0))
+            cap = lc.occluded_score_cap if gate == "occluded" else None
             if gate == "occluded":
-                s = min(s, lc.occluded_score_cap)
+                # c_app >= 0 only adds cost, so the score with c_app = 0 bounds it from above;
+                # the slack covers a c_app that rounding makes a hair below 0
+                bound = _link_score(w, c_mot, c_gap, None, b, cap)
+                if min_score is not None and bound + _BOUND_SLACK < min_score:
+                    continue
+                witness, ids = occl.witness(di, dj, lc.witness_iob)
+                if witness < lc.witness_min:
+                    continue
+                sig = {"witness": witness, "occluders": ids, **sig}
+            c_app = None if motion_only else _c_app(di, dj, appearance, lc.k_embed, cache)
+            s = _link_score(w, c_mot, c_gap, c_app, b, cap)
             cands.append(
                 Candidate(
                     di.track,
@@ -1100,6 +1130,7 @@ def run_link_stage(
         context=context,
         frame_size=frame_size,
         occluded=occluded,
+        min_score=cfg.link.reject_below,
     )
 
     def make_event(c: Candidate, routed: float, extra: dict) -> Event:

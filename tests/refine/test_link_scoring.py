@@ -1,4 +1,5 @@
 import numpy as np
+import pandas as pd
 import pytest
 
 from dnt.refine import io
@@ -659,3 +660,101 @@ def test_occluded_size_gate_compares_the_unoccluded_boxes():
     assert got[(1, 2)].gate == "occluded"
     occ, got = cands(None)  # no occlusion flags: the raw partial box is compared, and fails
     assert not occ[w["track"] == 1].any() and (1, 2) not in got
+
+
+# ---- final review I2: the witness scan's pruning never changes a result -----------------------
+
+
+def _witness_reference(occl, di, dj, iob_thr):
+    """The unpruned witness scan (the implementation before the I2 speed-up)."""
+    from dnt.refine.link import _iob_rows
+
+    n = dj.t_s - di.t_e - 1
+    if n <= 0:
+        return 0.0, []
+    lo = int(np.searchsorted(occl.frames, di.t_e + 1, side="left"))
+    hi = int(np.searchsorted(occl.frames, dj.t_s, side="left"))
+    owners = occl.owners[lo:hi]
+    keep = (owners != di.track) & (owners != dj.track)
+    if not keep.any():
+        return 0.0, []
+    boxes = occl.boxes[lo:hi][keep]
+    owners = owners[keep]
+    step = occl.frames[lo:hi][keep] - di.t_e
+    a = (step / (dj.t_s - di.t_e))[:, None]
+    hidden = (1.0 - a) * di.end_box + a * dj.start_box
+    hit = _iob_rows(hidden, boxes) >= iob_thr
+    return len(np.unique(step[hit])) / n, sorted(int(o) for o in np.unique(owners[hit]))
+
+
+@pytest.mark.parametrize("seed", range(6))
+def test_pruned_witness_equals_the_unpruned_scan(seed):
+    from types import SimpleNamespace
+
+    from dnt.refine.link import _Occluders
+
+    rng = np.random.default_rng(seed)
+    n = 3000
+    # integer coordinates make boxes that touch the end/start rectangle exactly common
+    work = io.to_work(table([
+        [int(rng.integers(0, 120)), int(rng.integers(1, 40)), int(rng.integers(0, 400)),
+         int(rng.integers(0, 300)), int(rng.integers(1, 120)), int(rng.integers(1, 120)),
+         0.9, 0, -1, -1] for _ in range(n)])).work
+    ctx = pd.DataFrame({"frame": rng.integers(0, 120, 500), "track": -1,
+                        "x": rng.uniform(0, 400, 500), "y": rng.uniform(0, 300, 500),
+                        "w": rng.uniform(1, 150, 500), "h": rng.uniform(1, 150, 500),
+                        "cls": 2})
+    occl = _Occluders(work, ctx)
+    nonzero = 0
+    for _ in range(150):
+        t_e = int(rng.integers(0, 100))
+        t_s = t_e + int(rng.integers(-1, 20))
+        ti, tj = (int(t) for t in rng.integers(1, 40, 2))
+        di = SimpleNamespace(track=ti, t_e=t_e, end_box=rng.integers(0, 300, 4).astype(float))
+        dj = SimpleNamespace(track=tj, t_s=t_s, start_box=rng.integers(0, 300, 4).astype(float))
+        for thr in (0.0, 1e-12, 0.3, 0.5, 0.9):
+            got = occl.witness(di, dj, thr)
+            assert got == _witness_reference(occl, di, dj, thr)
+            nonzero += got[0] > 0
+    assert nonzero > 100  # the scenes do have witnessed gaps
+
+
+def _occluded_scene(seed):
+    """Short random walkers behind three big boxes: many occlusion-witnessed pairs."""
+    rng = np.random.default_rng(seed)
+    rows = []
+    for t in range(1, 61):
+        f0, n = int(rng.integers(0, 300)), int(rng.integers(8, 30))
+        rows += box_rows(t, range(f0, f0 + n), rng.uniform(0, 800), rng.uniform(0, 500),
+                         vx=rng.uniform(-3, 3), vy=rng.uniform(-3, 3))
+    for t in (91, 92, 93):
+        rows += box_rows(t, range(330), rng.uniform(0, 400), rng.uniform(0, 200), w=500.0,
+                         h=400.0)
+    return _work(rows)
+
+
+@pytest.mark.parametrize("seed", [0, 1, 2])
+def test_min_score_only_leaves_out_candidates_below_it(seed):
+    work = _occluded_scene(seed)
+    cfg = RefineConfig.defaults()
+    occ = occlusion_flags(work, None, cfg.encoder.occlusion_iou)
+    kw = {"context": None, "frame_size": (1000, 700), "occluded": occ}
+    rng = np.random.default_rng(seed)
+    fr = work.groupby("track")["frame"].apply(list)
+    app = ArrayAppearance({int(t): (f, np.tile(rng.normal(size=8), (len(f), 1)))
+                           for t, f in fr.items()})
+    for appearance in (None, app):
+        full, _ = score_candidates(work, cfg, 10.0, appearance=appearance, **kw)
+        pruned, _ = score_candidates(work, cfg, 10.0, appearance=appearance,
+                                     min_score=cfg.link.reject_below, **kw)
+        def rows(cands):
+            return [(c.i, c.j, c.gate, c.score, c.signals) for c in cands]
+
+        # the pruned list is the full list minus occluded pairs that score below min_score
+        # (with appearance, some of those survive the bound and are still listed)
+        left_out = [r for r in rows(full) if r not in rows(pruned)]
+        assert [r for r in rows(full) if r not in left_out] == rows(pruned)
+        assert all(r[2] == "occluded" and r[3] < cfg.link.reject_below for r in left_out)
+        if appearance is None:
+            assert left_out  # the scene has occluded pairs below reject_below
+        assert any(r[2] == "occluded" and r[3] >= cfg.link.reject_below for r in rows(pruned))
