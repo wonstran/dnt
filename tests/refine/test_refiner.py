@@ -1245,3 +1245,24 @@ def test_an_applied_split_records_its_tail_track_so_output_rows_trace_back(tmp_p
         tail = out[out[1] == id_map[str(ev.signals["new_track"])]]  # output rows of the tail
         assert tail[0].tolist() == list(range(cut, end + 1))
     assert out[out[1] == id_map["1"]][0].tolist() == list(range(50))  # the head keeps raw ID 1
+
+
+@pytest.mark.parametrize("fill", [True, False])
+def test_the_returned_table_is_the_written_file(tmp_path, fill):
+    # final review M6: no extra raw_id column, and integer boxes even when fill is off
+    rng = np.random.default_rng(1)
+    rows = box_rows(1, range(0, 10), 10.3, 20.6, vx=2.7) + box_rows(1, range(15, 25), 50.2,
+                                                                     20.6, vx=2.7)
+    for r in rows:
+        r[6] = round(float(rng.uniform(0.3, 0.95)), 3)
+    cfg = RefineConfig.defaults()
+    cfg.fill.enabled = fill
+    refiner = TrackRefiner(cfg)
+    got = refiner.refine(_write(tmp_path, table(rows)), tmp_path / "o.txt", fps=10,
+                         verbose=False)
+    assert got is refiner.last_result.tracks
+    written = pd.read_csv(tmp_path / "o.txt", header=None, names=io.OUT_COLUMNS,
+                          float_precision="round_trip")
+    pd.testing.assert_frame_equal(got, written)
+    assert list(got.columns) == io.OUT_COLUMNS and "raw_id" not in got
+    assert int(got["interp"].sum()) == (5 if fill else 0)

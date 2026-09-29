@@ -201,13 +201,22 @@ def read_context(path, fmt: str = "auto") -> tuple[pd.DataFrame, str]:
     return ctx, fmt
 
 
-def write_tracks(work: pd.DataFrame, path) -> None:
-    """Write a work table as a headerless 10-column dnt track file sorted by frame, track."""
+def output_table(work: pd.DataFrame) -> pd.DataFrame:
+    """Return the table ``write_tracks`` writes.
+
+    It has the 10 dnt columns with integer boxes and classes, sorted by frame then track, and a
+    fresh index.
+    """
     out = work.reindex(columns=OUT_COLUMNS).copy()
     for c in _INT_OUT:
         out[c] = pd.to_numeric(out[c]).fillna(-1).round().astype(int)
     out["score"] = pd.to_numeric(out["score"]).fillna(-1.0).astype(float)
-    out = out.sort_values(["frame", "track"], kind="mergesort")
+    return out.sort_values(["frame", "track"], kind="mergesort").reset_index(drop=True)
+
+
+def write_tracks(work: pd.DataFrame, path) -> None:
+    """Write a work table as a headerless 10-column dnt track file sorted by frame, track."""
+    out = output_table(work)
     Path(path).parent.mkdir(parents=True, exist_ok=True)
     out.to_csv(path, index=False, header=False)
 

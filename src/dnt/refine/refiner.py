@@ -414,8 +414,17 @@ class TrackRefiner:
     ) -> pd.DataFrame:
         """Refine one track file into ``out_file`` and write its ledger (spec 2.4, 2.5).
 
-        Returns the refined track table, like ``Tracker.track()``; ``self.last_result`` holds
-        the ledger path, summary, and events.
+        Returns the refined track table, like ``Tracker.track()``: the same rows and values as
+        ``out_file`` (columns ``frame, track, x, y, w, h, score, cls, interp, r4`` with integer
+        boxes, sorted by frame then track). ``self.last_result`` holds the same table plus the
+        ledger path, summary, and events.
+
+        Raises
+        ------
+        ValueError
+            If ``out_file``, or the ledger, review or feature-cache path next to it, is one of
+            the input files; if no frame rate is known; or if an input is malformed.
+
         """
         cfg = self.config
         out = Path(out_file)
@@ -530,14 +539,15 @@ class TrackRefiner:
         Ledger(header, events).write(paths["ledger"])
         io.write_tracks(work, out)
         log.info("refined %s: %s", out, summary["events"])
+        tracks = io.output_table(work)  # exactly the rows and values written to out_file
         self.last_result = RefineResult(
-            tracks=work,
+            tracks=tracks,
             ledger_path=paths["ledger"],
             review_path=None,
             summary=summary,
             events=events,
         )
-        return work
+        return tracks
 
     def refine_batch(
         self,
