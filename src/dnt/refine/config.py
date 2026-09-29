@@ -228,7 +228,18 @@ class VLMConfig:
 
 @dataclass(kw_only=True)
 class RefineConfig:
-    """All refinement settings for one target (person or vehicle)."""
+    """All refinement settings for one target (person or vehicle).
+
+    Attributes
+    ----------
+    class_ids : list of int
+        The target's class IDs (``[0]`` for person, ``[2, 5, 7]`` for vehicle). In this
+        release only ``class_ids[0]`` is used: it becomes the class of every row read from a
+        MOTChallenge file, which has no class column. Rows are not filtered by class: every
+        row of the track file is screened, linked and orphan-checked as the target, so pass a
+        file that holds the target's tracks only.
+
+    """
 
     target: str = "person"
     class_ids: list[int] = field(default_factory=lambda: [0])
