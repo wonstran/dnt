@@ -92,3 +92,30 @@ def test_occlusion_flags_use_same_frame_boxes_and_context():
     flags = P.occlusion_flags(work, ctx, 0.3)
     assert flags.tolist() == [True, True, True]
     assert P.occlusion_flags(work, None, 0.3).tolist() == [True, True, False]
+
+
+def test_a_same_run_detection_context_does_not_flag_the_rows_own_boxes():
+    # final-review I3 / R22: two pedestrians far apart, and a detection file of the same run
+    # (their own boxes, jittered by a pixel) as context -> no row is occluded
+    rng = np.random.default_rng(0)
+    n = 40
+    work = pd.DataFrame({"frame": np.repeat(np.arange(n), 2), "track": np.tile([1, 2], n),
+                         "x": np.tile([100.0, 600.0], n) + np.repeat(np.arange(n), 2) * 2.0,
+                         "y": 200.0, "w": 30.0, "h": 60.0})
+    dets = work.assign(track=-1, cls=0, x=work["x"] + rng.uniform(-1, 1, len(work)),
+                       y=work["y"] + rng.uniform(-1, 1, len(work)))
+    ious = [P.iou_matrix(a, b)[0, 0] for a, b in zip(
+        work[["x", "y", "w", "h"]].to_numpy()[:, None], dets[["x", "y", "w", "h"]].to_numpy()[:, None],
+        strict=True)]
+    assert min(ious) >= P.CONTEXT_DUPLICATE_IOU  # every detection duplicates its row
+    assert not P.occlusion_flags(work, dets, 0.3).any()  # 0% occluded (was 100%)
+    assert P.context_duplicates(work, dets).all()
+    assert P.drop_context_duplicates(work, dets).empty
+    # a genuine occluder (a different box, IoU below 0.9) still flags the row it covers
+    other = pd.DataFrame({"frame": [5], "track": [-1], "x": [100.0 + 10.0 + 8.0], "y": [200.0],
+                          "w": [30.0], "h": [60.0], "cls": [0]})
+    assert 0.3 <= P.iou_matrix(work.loc[10, ["x", "y", "w", "h"]].to_numpy(float),
+                               other[["x", "y", "w", "h"]].to_numpy(float))[0, 0] < 0.9
+    flags = P.occlusion_flags(work, pd.concat([dets, other], ignore_index=True), 0.3)
+    assert flags[flags].index.tolist() == [10]
+    assert P.context_duplicates(work, other).tolist() == [False]

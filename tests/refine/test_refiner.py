@@ -1136,3 +1136,48 @@ def test_fill_max_gap_null_falls_back_to_link_max_gap(tmp_path):
     d = tmp_path / "long"
     res = _refine(_write(d, table(rows)), d / "o.txt", cfg=cfg, fps=10)
     assert res.tracks["frame"].between(50, 79).sum() == 30
+
+
+# ---- final review I3 (R22): a same-run detection file as context -----------------------------
+
+
+def _beside_the_path(tmp_path, shift):
+    """Tracks 1 and 2 are one pedestrian with a 30-frame gap; pedestrian 3 walks beside the path.
+
+    Track 3's box covers 48% of each hidden box of the gap, below ``link.witness_iob``. The
+    context is a detection file of the same run: every row's box, with track 3's detections
+    ``shift`` px closer to the path.
+    """
+    t = table(box_rows(1, range(60, 101), 20.0, 100.0, vx=2.0, w=50.0, h=50.0)
+              + box_rows(2, range(131, 170), 162.0, 100.0, vx=2.0, w=50.0, h=50.0)
+              + box_rows(3, range(60, 171), 46.0, 100.0, vx=2.0, w=50.0, h=50.0))
+    dets = pd.DataFrame({"frame": t.frame, "res": -1, "x": t.x + (t.track == 3) * shift,
+                         "y": t.y, "w": t.w, "h": t.h, "conf": 0.9, "cls": t.cls})
+    d = tmp_path / f"shift{-shift:g}"
+    return _refine(_write(d, t), d / "o.txt", fps=10, context_file=_write(d, dets, "dets.txt"))
+
+
+def test_own_detections_in_the_context_do_not_witness_an_occlusion(tmp_path):
+    # 2 px closer: IoU 0.92 with track 3's own box, so it is track 3's detection, not an
+    # occluder, though it would cover 52% of each hidden box
+    res = _beside_the_path(tmp_path, -2.0)
+    assert Ledger.read(res.ledger_path).header["inputs"]["context"]["format"] == "dets"
+    assert _by(res, "link") == []
+    assert res.tracks["track"].nunique() == 3
+    # 8 px closer: IoU 0.73, a different box (a genuine occluder) -> the gap is witnessed
+    res = _beside_the_path(tmp_path, -8.0)
+    (link,) = _by(res, "link")
+    assert link.tracks == [1, 2] and link.params["gate"] == "occluded"
+    assert link.signals["witness"] == pytest.approx(1.0) and link.signals["occluders"] == [-1]
+    assert link.decision is Decision.HUMAN_PENDING
+
+
+def test_screening_cues_still_see_context_boxes_that_duplicate_a_row(tmp_path):
+    # R22 applies to the occlusion mask and the witness only: a two-wheeler box (tracks
+    # context) on the person's own box, moving with it, is the rider cue K
+    ped = table(box_rows(1, range(50), 100.0, 110.0, vx=1.0, w=20.0, h=40.0))
+    bike = table(box_rows(9, range(50), 100.0, 110.0, vx=1.0, w=20.0, h=40.0, cls=3))
+    res = _refine(_write(tmp_path, ped), tmp_path / "o.txt", fps=10,
+                  context_file=_write(tmp_path, bike, "bike.txt"))
+    (ev,) = _by(res, "screen")
+    assert ev.kind is EventKind.RECLASS and ev.signals["K"] == 1.0

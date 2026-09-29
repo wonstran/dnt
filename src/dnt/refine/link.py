@@ -16,7 +16,14 @@ from .apply import lineage_of_rows
 from .config import RefineConfig, to_frames
 from .events import ACCEPTED, REJECTED, Decision, Event, EventKind
 from .features import Appearance, track_embeddings
-from .primitives import box_centers, iou_matrix, majority_class, ramp, span_speed
+from .primitives import (
+    box_centers,
+    drop_context_duplicates,
+    iou_matrix,
+    majority_class,
+    ramp,
+    span_speed,
+)
 
 LEGACY_COL_NAMES = ["frame", "track", "x", "y", "w", "h", "score", "cls", "interp", "r4"]
 
@@ -609,10 +616,15 @@ _BOUND_SLACK = 1e-9
 
 
 class _Occluders:
-    """Boxes from the work table (owner = track) and the context (owner = -1), sorted by frame."""
+    """Boxes from the work table (owner = track) and the context (owner = -1), sorted by frame.
+
+    Context boxes that duplicate a work box of their frame (``primitives.context_duplicates``)
+    are the rows' own detections, not occluders, and are left out.
+    """
 
     def __init__(self, work, context):
         """Index boxes by frame."""
+        context = drop_context_duplicates(work, context)
         parts = [work[["frame", "x", "y", "w", "h"]].assign(owner=work["track"].astype(int))]
         if context is not None and len(context):
             parts.append(context[["frame", "x", "y", "w", "h"]].assign(owner=-1))

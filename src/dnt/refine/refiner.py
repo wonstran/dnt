@@ -22,7 +22,14 @@ from .features import Appearance
 from .hints import read_reclass_hints
 from .interpolate import interpolate_tracks_rts
 from .link import run_link_stage
-from .primitives import box_centers, frame_runs, majority_class, occlusion_flags, speeds_hps
+from .primitives import (
+    box_centers,
+    drop_context_duplicates,
+    frame_runs,
+    majority_class,
+    occlusion_flags,
+    speeds_hps,
+)
 from .screen import ScreenContext, propose_orphans, propose_screen
 from .switch import propose_splits
 from .verify import Band, decide, route_without_vlm
@@ -218,6 +225,7 @@ class _Stages:
             ctx_fmt,
             hints,
         )
+        self.link_ctx = ctx_boxes
         self.seq: Counter = Counter()
         self.events: list[Event] = []
         self.orphan_deferred: list[int] = []
@@ -235,6 +243,8 @@ class _Stages:
         """Run every enabled stage in the spec's order; ``tick(name)`` follows each stage."""
         tick = tick or (lambda _name: None)
         occluded = occlusion_flags(work, self.ctx_boxes, self.cfg.encoder.occlusion_iou)
+        # own detections are judged against the input rows, before any stage edits them
+        self.link_ctx = drop_context_duplicates(work, self.ctx_boxes)
         work, split_raw, cuts = self._switch(work)
         tick("switch")
         work = self._screen(work, split_raw, cuts)
@@ -304,7 +314,7 @@ class _Stages:
             cfg,
             self.fps,
             appearance=self.appearance,
-            context=self.ctx_boxes,
+            context=self.link_ctx,
             frame_size=self.frame_size,
             occluded=occluded,
             route=lambda evs: self._route(evs, band, "link"),

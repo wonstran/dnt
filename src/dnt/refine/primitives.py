@@ -181,8 +181,48 @@ def frame_runs(frames) -> list[tuple[int, int]]:
     return [(int(r[0]), int(r[-1])) for r in cluster_by_gap(f, 1)]
 
 
+#: A context box whose IoU with a work box of the same frame reaches this is taken to be that
+#: row's own detection (for example, a detection file from the same run passed as context), not
+#: another object. Such boxes are left out of the occlusion mask and of stage 3's witness
+#: occluders (final-review ruling R22); the stage 2 context cues still see them.
+CONTEXT_DUPLICATE_IOU = 0.9
+
+
+def context_duplicates(
+    work: pd.DataFrame, context: pd.DataFrame | None, thr: float = CONTEXT_DUPLICATE_IOU
+) -> np.ndarray:
+    """Return, per context row, whether its box has IoU >= ``thr`` with a work box that frame."""
+    if context is None or not len(context):
+        return np.zeros(0 if context is None else len(context), dtype=bool)
+    dup = np.zeros(len(context), dtype=bool)
+    frames = context["frame"].to_numpy(int)
+    ctx_boxes = context[["x", "y", "w", "h"]].to_numpy(float)
+    by_frame = {int(f): g[["x", "y", "w", "h"]].to_numpy(float) for f, g in work.groupby("frame")}
+    order = np.argsort(frames, kind="stable")
+    bounds = np.flatnonzero(np.diff(frames[order])) + 1
+    for idx in np.split(order, bounds):
+        own = by_frame.get(int(frames[idx[0]]))
+        if own is not None:
+            dup[idx] = iou_matrix(ctx_boxes[idx], own).max(axis=1) >= thr
+    return dup
+
+
+def drop_context_duplicates(
+    work: pd.DataFrame, context: pd.DataFrame | None, thr: float = CONTEXT_DUPLICATE_IOU
+) -> pd.DataFrame | None:
+    """Return ``context`` without the boxes ``context_duplicates`` finds."""
+    if context is None or not len(context):
+        return context
+    return context.loc[~context_duplicates(work, context, thr)]
+
+
 def occlusion_flags(work: pd.DataFrame, context: pd.DataFrame | None, thr: float) -> pd.Series:
-    """Return True where a row's box has IoU >= ``thr`` with another box in its frame (spec 5.3)."""
+    """Return True where a row's box has IoU >= ``thr`` with another box in its frame (spec 5.3).
+
+    The other boxes are the frame's other work rows and its context boxes, except context boxes
+    that duplicate a work box (IoU >= ``CONTEXT_DUPLICATE_IOU``): those are the rows' own
+    detections, so a detection file of the same run does not flag every row.
+    """
     flags = pd.Series(False, index=work.index)
     ctx: dict[int, np.ndarray] = {}
     if context is not None and len(context):
@@ -196,6 +236,8 @@ def occlusion_flags(work: pd.DataFrame, context: pd.DataFrame | None, thr: float
             best = m.max(axis=1)
         others = ctx.get(int(f))
         if others is not None and len(others):
-            best = np.maximum(best, iou_matrix(boxes, others).max(axis=1))
+            m = iou_matrix(boxes, others)
+            m[:, m.max(axis=0) >= CONTEXT_DUPLICATE_IOU] = 0.0  # the rows' own detections
+            best = np.maximum(best, m.max(axis=1))
         flags.loc[g.index] = best >= thr
     return flags
