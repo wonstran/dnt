@@ -36,7 +36,14 @@ def empty_work() -> pd.DataFrame:
     return pd.DataFrame({c: pd.Series(dtype=float if c in floats else int) for c in WORK_COLUMNS})
 
 
-def _read_numeric_csv(path, min_cols: int, check_cols: int | None = None) -> pd.DataFrame:
+def _read_numeric_csv(
+    path, min_cols: int, check_cols: int | None = None, int_cols: tuple[int, ...] = ()
+) -> pd.DataFrame:
+    """Read a headerless numeric CSV; name the file and line of the first bad value.
+
+    The first ``check_cols`` columns (default ``min_cols``) must be finite numbers, and the
+    columns in ``int_cols`` (such as frame and track) must hold whole numbers.
+    """
     path = Path(path)
     rows_list = []
     true_line_map = []
@@ -71,12 +78,17 @@ def _read_numeric_csv(path, min_cols: int, check_cols: int | None = None) -> pd.
         raise ValueError(f"{path}: expected at least {min_cols} columns, found {raw.shape[1]}")
     num = raw.apply(pd.to_numeric, errors="coerce")
     n_check = min(raw.shape[1], check_cols or min_cols)
-    bad = num.iloc[:, :n_check].isna().any(axis=1).to_numpy()
-    if bad.any():
-        i = int(np.flatnonzero(bad)[0])
-        text = ",".join(raw.iloc[i].fillna("").tolist())
-        true_line = true_line_map[i]
-        raise ValueError(f"{path}: non-numeric value on line {true_line}: {text}")
+    checked = num.iloc[:, :n_check].to_numpy(float)
+    ints = num.iloc[:, [c for c in int_cols if c < raw.shape[1]]].to_numpy(float)
+    for what, bad in (
+        ("non-numeric", np.isnan(checked).any(axis=1)),
+        ("non-finite", ~np.isfinite(checked).all(axis=1)),
+        ("non-integer frame or track", (ints != np.round(ints)).any(axis=1)),
+    ):
+        if bad.any():
+            i = int(np.flatnonzero(bad)[0])
+            text = ",".join(raw.iloc[i].fillna("").tolist())
+            raise ValueError(f"{path}: {what} value on line {true_line_map[i]}: {text}")
     num = num.reset_index(drop=True)
     return num
 
@@ -131,7 +143,7 @@ def read_tracks(path, *, fmt: str = "dnt", class_id: int = 0) -> TrackInput:
     Every column the format uses must be numeric: all ten for dnt (so a bad score, class, or
     filled-row flag is an error, not a silent -1), the first seven for MOT.
     """
-    raw = _read_numeric_csv(path, min_cols=6, check_cols=10 if fmt == "dnt" else 7)
+    raw = _read_numeric_csv(path, min_cols=6, check_cols=10 if fmt == "dnt" else 7, int_cols=(0, 1))
     if raw.empty:
         return TrackInput(work=empty_work(), n_filled_removed=0, n_duplicates_removed=0)
     if fmt == "dnt":
@@ -158,7 +170,7 @@ def read_tracks(path, *, fmt: str = "dnt", class_id: int = 0) -> TrackInput:
 
 def read_context(path, fmt: str = "auto") -> tuple[pd.DataFrame, str]:
     """Read a context file (dnt tracks or detections) as boxes with classes (spec 2.5)."""
-    raw = _read_numeric_csv(path, min_cols=6, check_cols=8)
+    raw = _read_numeric_csv(path, min_cols=6, check_cols=8, int_cols=(0,))
     if raw.empty:
         return pd.DataFrame(columns=CONTEXT_COLUMNS), ("tracks" if fmt == "auto" else fmt)
     ncol = raw.shape[1]

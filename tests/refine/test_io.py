@@ -155,3 +155,52 @@ def test_read_tracks_ragged_true_line_with_blanks_short_first(tmp_path):
     (tmp_path / "ragged3.txt").write_text("\n\n0,1,1,1,1,1\n0,1,1,1,1,1,0.9,0,-1,-1\n")
     with pytest.raises(ValueError, match=r"line 4"):
         io.read_tracks(tmp_path / "ragged3.txt")
+
+
+# ---- final review M1: non-finite and non-integral values are rejected with file and line -------
+
+
+@pytest.mark.parametrize(("col", "bad"), [(0, "inf"), (1, "-inf"), (2, "inf"), (5, "nan"),
+                                          (6, "inf"), (7, "NaN"), (8, "inf"), (9, "-inf")])
+def test_read_tracks_rejects_non_finite_values(tmp_path, col, bad):
+    fields = ["2", "1", "1", "1", "1", "1", "0.9", "0", "-1", "-1"]
+    fields[col] = bad
+    rows = ["0,1,1,1,1,1,0.9,0,-1,-1", "", "1,1,1,1,1,1,0.9,0,-1,-1", ",".join(fields)]
+    path = tmp_path / "t.txt"
+    path.write_text("\n".join(rows) + "\n")
+    with pytest.raises(ValueError, match=r"t\.txt: non-(finite|numeric) value on line 4"):
+        io.read_tracks(path)
+
+
+@pytest.mark.parametrize("fmt", ["dnt", "mot"])
+@pytest.mark.parametrize(("col", "bad"), [(0, "2.5"), (1, "1.5")])
+def test_read_tracks_rejects_non_integer_frame_and_track(tmp_path, fmt, col, bad):
+    # truncating 2.5 to 2 would re-create the (track, frame) duplicate removed before it
+    fields = ["2", "1", "1", "1", "1", "1", "0.9", "0", "-1", "-1"]
+    fields[col] = bad
+    rows = ["2,1,1,1,1,1,0.9,0,-1,-1", ",".join(fields)]
+    path = tmp_path / "t.txt"
+    path.write_text("\n".join(rows) + "\n")
+    with pytest.raises(ValueError, match=r"t\.txt: non-integer frame or track value on line 2"):
+        io.read_tracks(path, fmt=fmt)
+    fields[col] = "3.0"  # an integral float is fine
+    path.write_text("\n".join([rows[0], ",".join(fields)]) + "\n")
+    assert len(io.read_tracks(path, fmt=fmt).work) == 2
+
+
+def test_read_context_rejects_non_finite_and_non_integer_frames(tmp_path):
+    for text, what in (("0,-1,1,2,inf,4,0.9,2\n", "non-finite"),
+                       ("0.5,-1,1,2,3,4,0.9,2\n", "non-integer frame")):
+        (tmp_path / "d.txt").write_text(text)
+        with pytest.raises(ValueError, match=rf"d\.txt: {what}.* line 1"):
+            io.read_context(tmp_path / "d.txt")
+
+
+def test_refine_rejects_an_inf_box_before_writing_anything(tmp_path):
+    from dnt.refine import TrackRefiner
+
+    path = tmp_path / "t.txt"
+    path.write_text("0,1,1,1,1,1,0.9,0,-1,-1\n1,1,1,1,inf,1,0.9,0,-1,-1\n")
+    with pytest.raises(ValueError, match="non-finite value on line 2"):
+        TrackRefiner().refine(path, tmp_path / "o.txt", fps=10, verbose=False)
+    assert not (tmp_path / "o.txt").exists() and not (tmp_path / "o.ledger.jsonl").exists()
