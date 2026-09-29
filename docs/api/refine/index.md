@@ -23,8 +23,11 @@ Command line: `dnt-refine run TRACKS --fps 10 --config refine.yaml --out clean.c
     with a clear assignment margin, orphan drops, and gap filling. Other edits are proposed but
     never applied yet, because their scores are capped below auto-accept: ID-switch splits
     found from motion alone, links across occlusions, links with an ambiguous assignment
-    margin, and false-track drops of static objects or of mixed tracks. They appear in the
-    ledger as `HUMAN_PENDING` and leave the tracks unchanged. VLM verification and applying
-    review decisions follow in later releases.
+    margin, and false-track drops of static objects or of mixed tracks. Rider reclasses whose
+    subtype no ReClass hint settles are pending too, however high they score, because only a
+    hint can choose the subtype in this release. They appear in the ledger as
+    `HUMAN_PENDING` and leave the tracks unchanged. In-vehicle drops need a context file with
+    the vehicles' boxes (`context_file=`, or `--context`); without one the in-vehicle cue is
+    skipped. VLM verification and applying review decisions follow in later releases.
 
 ::: dnt.refine

@@ -308,5 +308,10 @@ def test_docs_and_changelog_state_the_limitation_accurately():
             assert word in note, (where, word)
         assert "static objects" in note and "mixed tracks" in note, where
         assert "ID-switch splits" in note and "ambiguous assignment margin" in note, where
+        # final review M9: hint-less rider reclasses stay pending; in-vehicle needs context
+        assert "Rider reclasses whose subtype no ReClass hint settles are pending too" in note
+        assert "In-vehicle drops need a context file" in note and "`--context`" in note, where
     assert "dnt-refine run" in index and "dnt-refine run" in unreleased
     assert log.index("## Unreleased") < log.index("## 0.3.3")
+    # final review M8: the root CHANGELOG.md mirrors docs/changelog.md
+    assert (ROOT / "CHANGELOG.md").read_text() == log

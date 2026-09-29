@@ -12,9 +12,12 @@
   across short gaps and static waits with a clear assignment margin, orphan drops, and filling.
   Other edits are capped below auto-accept, recorded as `HUMAN_PENDING`, and not applied yet:
   ID-switch splits found from motion alone, links across occlusions, links with an ambiguous
-  assignment margin, and false-track drops of static objects or of mixed tracks. Appearance
-  encoders, VLM verification, review pages, and applying review decisions follow in later
-  releases.
+  assignment margin, and false-track drops of static objects or of mixed tracks. Rider
+  reclasses whose subtype no ReClass hint settles are pending too, however high they score,
+  because only a hint can choose the subtype in this release. In-vehicle drops need a context
+  file with the vehicles' boxes (`context_file=`, or `--context`); without one the in-vehicle
+  cue is skipped. Appearance encoders, VLM verification, review pages, and applying review
+  decisions follow in later releases.
 
 ### Changed
 - `interpolate_tracks_rts` and `link_tracklets` moved to `dnt.refine`. `dnt.track.post_process`
