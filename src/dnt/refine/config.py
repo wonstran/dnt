@@ -342,6 +342,24 @@ class RefineConfig:
                 continue
             if lo == hi:
                 p.append(f"{name} needs lo != hi")
+        durations = {
+            "switch.window": self.switch.window,
+            "switch.delta": self.switch.delta,
+            "switch.nms_seconds": self.switch.nms_seconds,
+            "switch.min_side_seconds": self.switch.min_side_seconds,
+            "link.max_gap": lc.max_gap,
+            "link.max_gap_static": lc.max_gap_static,
+            "link.max_gap_occluded": lc.max_gap_occluded,
+            "link.static_seconds": lc.static_seconds,
+            "link.speed_seconds": lc.speed_seconds,
+        }
+        if self.fill.max_gap is not None:
+            durations["fill.max_gap"] = self.fill.max_gap
+        for name, v in durations.items():
+            if isinstance(v, int | float) and not v > 0:
+                p.append(f"{name} must be a positive number of seconds, not {v}")
+        if isinstance(lc.max_passes, int) and lc.max_passes < 1:
+            p.append(f"link.max_passes must be at least 1, not {lc.max_passes}")
         if self.fps is not None and self.fps <= 0:
             p.append("fps must be positive")
         if self.frame_size is not None and (len(self.frame_size) != 2 or min(self.frame_size) <= 0):

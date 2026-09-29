@@ -1,3 +1,5 @@
+import re
+
 import pytest
 import yaml
 
@@ -124,3 +126,30 @@ def test_direct_ramp_assignment_validated():
     cfg.orphan.ramp = [0.5]
     with pytest.raises(ValueError, match=r"orphan\.ramp"):
         cfg.validate()
+
+
+# ---- final review M4: durations must be positive, and at least one link pass ------------------
+
+
+@pytest.mark.parametrize("key", ["switch.window", "switch.delta", "switch.nms_seconds",
+                                 "switch.min_side_seconds", "link.max_gap",
+                                 "link.max_gap_static", "link.max_gap_occluded",
+                                 "link.static_seconds", "link.speed_seconds", "fill.max_gap"])
+@pytest.mark.parametrize("value", [0, 0.0, -1.0])
+def test_durations_must_be_positive(key, value):
+    # to_frames would clamp them to one frame: fill.max_gap 0 would still fill 1-frame gaps
+    section, name = key.split(".")
+    with pytest.raises(ValueError, match=rf"{re.escape(key)} must be a positive number of seconds"):
+        RefineConfig.from_dict({section: {name: value}})
+
+
+@pytest.mark.parametrize("value", [0, -2])
+def test_link_needs_at_least_one_pass(value):
+    with pytest.raises(ValueError, match=r"link\.max_passes must be at least 1"):
+        RefineConfig.from_dict({"link": {"max_passes": value}})
+
+
+def test_a_null_fill_max_gap_and_small_positive_durations_are_valid():
+    cfg = RefineConfig.from_dict({"fill": {"max_gap": None}, "link": {"max_passes": 1},
+                                  "switch": {"min_side_seconds": 0.1}})
+    assert cfg.fill.max_gap is None and cfg.link.max_passes == 1
