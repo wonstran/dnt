@@ -38,6 +38,13 @@ nav:
           - Tracker: api/track/tracker.md
           - Post Processing: api/track/post_process.md
           - Re-classification: api/track/re_class.md
+      - Track Refinement:
+          - api/refine/index.md
+          - Refiner: api/refine/refiner.md
+          - Configuration: api/refine/config.md
+          - Events and Ledger: api/refine/events.md
+          - Interpolation: api/refine/interpolate.md
+          - Linking: api/refine/link.md
       - Engine:
           - api/engine/index.md
           - BBox IoU: api/engine/bbox_iou.md

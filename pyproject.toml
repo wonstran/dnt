@@ -48,6 +48,9 @@ dependencies = [
 dev = ["pytest", "pytest-cov", "ruff", "build"]
 docs = ["mkdocs-material", "mkdocstrings[python]", "mkdocs-with-pdf", "qrcode"]
 
+[project.scripts]
+dnt-refine = "dnt.refine.cli:main"
+
 [project.urls]
 Homepage = "https://github.com/wonstran/dnt"
 
@@ -94,7 +97,6 @@ select = ["E", "F", "I", "UP", "B", "SIM", "RUF", "D"]
 "src/dnt/shared/synhcro.py" = [
   "D100", "D200", "D205", "D212", "D410", "D411", "D413", "E501", "RUF002", "UP006", "UP035", "UP045",
 ]
-"src/dnt/track/post_process.py" = ["E501"]
 "src/dnt/track/re_class.py" = ["E501"]
 
 [tool.ruff.format]
