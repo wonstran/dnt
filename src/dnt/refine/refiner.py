@@ -299,8 +299,11 @@ class _Stages:
         for ev in sorted(accepted, key=lambda e: -int(e.params["cut_frame"])):
             t = ev.tracks[0]
             split_raw |= set(work.loc[work["track"] == t, "raw_id"].astype(int).tolist())
-            work = apply_edit(work, ev, new_id=next_track_id(work))
+            new_id = next_track_id(work)
+            work = apply_edit(work, ev, new_id=new_id)
             ev.applied = True
+            # the tail's work ID; the header's id_map maps it to its output ID (spec 4.2)
+            ev.signals["new_track"] = new_id
         cuts: dict[int, list[int]] = {}
         for raw, c in cut_points:
             rows = work.loc[(work["raw_id"] == raw) & (work["frame"] == c), "track"]

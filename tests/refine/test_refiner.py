@@ -1077,7 +1077,8 @@ def test_an_unresolved_stage1_cut_makes_screening_partial_and_keeps_the_pedestri
     assert _frames_of(res, 1) == list(range(100))
 
 
-def test_two_accepted_splits_on_one_track_both_take_effect(tmp_path):
+def _two_splits(tmp_path):
+    """Raw track 1 changes object (appearance, size, position) at frames 50 and 100."""
     e = np.eye(8)
     rows = (box_rows(1, range(0, 50), 100.0, 110.0, vx=3.0, w=20.0, h=40.0)
             + box_rows(1, range(50, 100), 500.0, 400.0, vx=3.0, w=32.0, h=64.0)
@@ -1087,7 +1088,11 @@ def test_two_accepted_splits_on_one_track_both_take_effect(tmp_path):
                                                  for f in frames]))})
     refiner = TrackRefiner(appearance_factory=lambda **_kw: app)
     refiner.refine(_write(tmp_path, table(rows)), tmp_path / "o.txt", fps=10, verbose=False)
-    res = refiner.last_result
+    return refiner.last_result
+
+
+def test_two_accepted_splits_on_one_track_both_take_effect(tmp_path):
+    res = _two_splits(tmp_path)
     splits = sorted(_by(res, "switch"), key=lambda ev: ev.params["cut_frame"])
     assert [s.params["cut_frame"] for s in splits] == [50, 100]
     for s in splits:
@@ -1224,3 +1229,19 @@ def test_refine_batch_rejects_two_inputs_with_the_same_output_name(tmp_path):
     assert not out_dir.exists()  # checked before any work starts
     got = TrackRefiner().refine_batch([a, other], output_path=out_dir, fps=10, verbose=False)
     assert got == [str(out_dir / "day1_refined.txt"), str(out_dir / "day2_refined.txt")]
+
+
+def test_an_applied_split_records_its_tail_track_so_output_rows_trace_back(tmp_path):
+    # final review M5: the tail's new ID is in the ledger, and id_map maps it to the output
+    _two_splits(tmp_path)
+    ledger = Ledger.read(tmp_path / "o.ledger.jsonl")
+    id_map = ledger.header["id_map"]
+    out = pd.read_csv(tmp_path / "o.txt", header=None)
+    splits = {e.params["cut_frame"]: e for e in ledger.events if e.kind is EventKind.SPLIT}
+    # splits apply latest cut first: the tail from 100 gets work ID 2, the one from 50 gets 3
+    assert {c: e.signals["new_track"] for c, e in splits.items()} == {100: 2, 50: 3}
+    for (cut, ev), end in zip(sorted(splits.items()), (99, 149), strict=True):
+        assert ev.applied and ev.lineage == [[[1, 0, 149]]]
+        tail = out[out[1] == id_map[str(ev.signals["new_track"])]]  # output rows of the tail
+        assert tail[0].tolist() == list(range(cut, end + 1))
+    assert out[out[1] == id_map["1"]][0].tolist() == list(range(50))  # the head keeps raw ID 1
