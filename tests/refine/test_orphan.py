@@ -144,3 +144,13 @@ def test_empty_work_returns_empty():
     evs, deferred = propose_orphans(w, RefineConfig.defaults(), 10.0, linked_tracks=set(),
                                     pending_endpoints=set())
     assert evs == [] and deferred == []
+
+
+def test_orphan_counts_observed_frames_not_the_frame_span():
+    # 3 rows spread over frames 0..20: observed 0.3 s (an orphan), though the span is 2.1 s
+    w = _work(box_rows(1, [0, 10, 20], 0.0, 0.0))
+    evs, _ = propose_orphans(w, RefineConfig.defaults(), 10.0, linked_tracks=set(),
+                             pending_endpoints=set())
+    (ev,) = evs
+    assert ev.signals["observed_seconds"] == pytest.approx(0.3)
+    assert ev.algo_score == pytest.approx(0.5) and ev.frames == (0, 20)

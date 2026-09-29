@@ -632,3 +632,30 @@ def test_zero_occluded_motion_weights_are_rejected_in_motion_only_mode():
     cfg.link.weights_occluded = dict(_ZERO_MOTION)
     with pytest.raises(ValueError, match=r"link\.weights_occluded.*positive"):
         _cands(_collinear(), cfg=cfg)
+
+
+def test_occluded_size_gate_compares_the_unoccluded_boxes():
+    # i's last two boxes are partial (20x20 instead of 50x50) and overlap a context box with
+    # IoU 0.48, so they are occluded (spec 5.3); the size gate uses i's last clean box
+    ends = [[f, 1, 215.0, 500.0 - 5.0 * (f - 780) + 15.0, 20.0, 20.0, 0.9, 0, -1, -1]
+            for f in (819, 820)]
+    w = _work(box_rows(1, range(780, 819), 200.0, 500.0, vy=-5.0, w=50.0, h=50.0), ends,
+              box_rows(2, range(883, 900), 160.0, 240.0, w=50.0, h=50.0),
+              box_rows(99, range(821, 900), 100.0, 150.0, vx=0.5, w=300.0, h=300.0))
+    ctx_rows = table([[f, 7, 222.0, 500.0 - 5.0 * (f - 780) + 15.0, 20.0, 20.0, 0.9, 9, -1, -1]
+                      for f in (819, 820)])
+    ctx = ctx_rows[["frame", "track", "x", "y", "w", "h", "cls"]]
+    cfg = RefineConfig.defaults()
+    assert cfg.link.size_ratio_max < 50.0 / 20.0  # the raw end box alone fails the size gate
+
+    def cands(context):
+        occ = occlusion_flags(w, context, cfg.encoder.occlusion_iou)
+        got, _ = score_candidates(w, cfg, 10.0, appearance=None, context=context,
+                                  frame_size=None, occluded=occ)
+        return occ, {(c.i, c.j): c for c in got}
+
+    occ, got = cands(ctx)
+    assert occ[w["frame"].isin([819, 820]) & (w["track"] == 1)].all()
+    assert got[(1, 2)].gate == "occluded"
+    occ, got = cands(None)  # no occlusion flags: the raw partial box is compared, and fails
+    assert not occ[w["track"] == 1].any() and (1, 2) not in got

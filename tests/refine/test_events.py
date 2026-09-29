@@ -81,3 +81,13 @@ def test_proposal_key_normalizes_integral_floats():
     k_int_lin = proposal_key("screen", EventKind.DROP, [[[12, 780, 900]]], {"reason": "x", "spans": None})
     k_float_lin = proposal_key("screen", EventKind.DROP, [[[12, 780.0, 900.0]]], {"reason": "x", "spans": None})
     assert k_int_lin == k_float_lin
+
+
+def test_spans_alone_change_the_drop_and_reclass_keys():
+    # a partial DROP / RECLASS and the whole-track one of the same track and reason differ
+    lin = [[[12, 780, 900]]]
+    for kind, base in ((EventKind.DROP, {"reason": "in_vehicle", "of": None}),
+                       (EventKind.RECLASS, {"new_cls": None})):
+        keys = {proposal_key("screen", kind, lin, {**base, "spans": spans})
+                for spans in (None, [[850, 900]], [[851, 900]], [[780, 820], [850, 900]])}
+        assert len(keys) == 4, kind

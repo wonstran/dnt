@@ -1035,3 +1035,104 @@ def test_the_fps_error_explains_both_ways_to_get_a_frame_rate(tmp_path):
         assert "frame rate is needed" in msg and "fps=" in msg
         assert "no video is given" in msg and "no usable frame rate" in msg
     assert "ValueError" in TrackRefiner.refine_batch.__doc__
+
+
+# ---- final review I1: stage 1 -> stage 2 cut wiring, split order, fill fallback ---------------
+
+
+def _ped_then_passenger(d):
+    """Raw track 1: a pedestrian (frames 0-9), then a passenger in context car 9 (10-99).
+
+    The box shrinks 2x at frame 10, so stage 1 finds a motion-only cut there (S = 0.70,
+    capped below accept). As a whole track the in-vehicle cue holds on 90% of the rows, which
+    would auto-drop the track, pedestrian rows included.
+    """
+    rows = (box_rows(1, range(0, 10), 100.0, 300.0, vx=3.0, w=30.0, h=60.0)
+            + box_rows(1, range(10, 100), 140.0, 330.0, vx=3.0, w=15.0, h=30.0))
+    car = box_rows(9, range(10, 100), 120.0, 310.0, vx=3.0, w=80.0, h=60.0, cls=2)
+    return _write(d, table(rows)), _write(d, table(car), "c.txt")
+
+
+@pytest.mark.parametrize("cut", ["pending", "weak"])
+def test_an_unresolved_stage1_cut_makes_screening_partial_and_keeps_the_pedestrian(tmp_path,
+                                                                                   cut):
+    src, ctx = _ped_then_passenger(tmp_path)
+    cfg = RefineConfig.defaults()
+    if cut == "weak":  # the 0.70 candidate now lands in [screen.segment_at, switch.reject_below)
+        cfg.switch.reject_below = 0.75
+    res = _refine(src, tmp_path / "o.txt", cfg=cfg, context_file=ctx, fps=10)
+    splits = _by(res, "switch")
+    if cut == "pending":
+        (split,) = splits
+        assert split.params["cut_frame"] == 10 and split.algo_score == pytest.approx(0.70)
+        assert split.decision is Decision.HUMAN_PENDING and not split.applied
+    else:
+        assert splits == []  # below reject_below: no event, only a weak cut for screening
+    (drop,) = _by(res, "screen")
+    assert drop.kind is EventKind.DROP and drop.params["reason"] == "in_vehicle"
+    assert drop.params["spans"] == [[10, 99]] and drop.signals["partial"] is True
+    assert drop.algo_score == pytest.approx(0.75)  # screen.mixed_score_cap
+    assert drop.decision is Decision.HUMAN_PENDING and not drop.applied
+    # nothing was auto-dropped: the pedestrian rows (and, pending review, the rest) are kept
+    assert _frames_of(res, 1) == list(range(100))
+
+
+def test_two_accepted_splits_on_one_track_both_take_effect(tmp_path):
+    e = np.eye(8)
+    rows = (box_rows(1, range(0, 50), 100.0, 110.0, vx=3.0, w=20.0, h=40.0)
+            + box_rows(1, range(50, 100), 500.0, 400.0, vx=3.0, w=32.0, h=64.0)
+            + box_rows(1, range(100, 150), 900.0, 110.0, vx=3.0, w=20.0, h=40.0))
+    frames = list(range(150))
+    app = ArrayAppearance({1: (frames, np.array([e[0] if f < 50 else e[1] if f < 100 else e[2]
+                                                 for f in frames]))})
+    refiner = TrackRefiner(appearance_factory=lambda **_kw: app)
+    refiner.refine(_write(tmp_path, table(rows)), tmp_path / "o.txt", fps=10, verbose=False)
+    res = refiner.last_result
+    splits = sorted(_by(res, "switch"), key=lambda ev: ev.params["cut_frame"])
+    assert [s.params["cut_frame"] for s in splits] == [50, 100]
+    for s in splits:
+        assert s.decision is Decision.AUTO_ACCEPT and s.applied
+    assert len(res.tracks) == 150  # every row is kept
+    spans = res.tracks.groupby("track")["frame"].agg(["min", "max", "count"])
+    assert spans.values.tolist() == [[0, 49, 50], [50, 99, 50], [100, 149, 50]]
+
+
+def test_a_pending_split_leaves_a_raw_hint_unlocalized_for_every_segment(tmp_path):
+    # spec 11.1: a mixed pedestrian/rider track with a strong raw hint, split pending
+    rows = (box_rows(1, range(0, 50), 100.0, 110.0, vx=3.0, w=20.0, h=40.0)
+            + box_rows(1, range(50, 100), 250.0, 110.0, vx=12.0, w=32.0, h=64.0))
+    src = _write(tmp_path, table(rows))
+    res = _refine(src, tmp_path / "o.txt", fps=10, reclass_file=_hints(tmp_path, (1, 3, 0.95)))
+    (split,) = _by(res, "switch")
+    assert split.params["cut_frame"] == 50 and split.decision is Decision.HUMAN_PENDING
+    (ev,) = _by(res, "screen")
+    assert ev.kind is EventKind.RECLASS and ev.params["spans"] == [[50, 99]]  # the rider only
+    assert ev.params["new_cls"] is None and "subtype_source" not in ev.signals
+    assert ev.signals["hint_unlocalized"] == {"cls": 3, "avg_score": 0.95}
+    assert ev.signals["P"] is None  # the hint is not a cue either
+    assert ev.decision is Decision.HUMAN_PENDING and not ev.applied
+    assert set(res.tracks["cls"]) == {0}
+
+
+def test_fill_max_gap_null_falls_back_to_link_max_gap(tmp_path):
+    # a pedestrian waits 3.1 s off camera at one spot: a static-gate link (spec 6.4). The gap
+    # is joined but not filled, because fill.max_gap null means link.max_gap (1 s); a 5-frame
+    # gap of the same track is filled.
+    rows = (box_rows(1, range(0, 20), 300.0, 200.0) + box_rows(1, range(25, 50), 300.0, 200.0)
+            + box_rows(2, range(80, 130), 301.0, 200.0))
+    cfg = RefineConfig.defaults()
+    assert cfg.fill.max_gap is None and cfg.link.max_gap == 1.0
+    res = _refine(_write(tmp_path, table(rows)), tmp_path / "o.txt", cfg=cfg, fps=10)
+    (link,) = _by(res, "link")
+    assert link.params == {"gate": "static", "gap": [49, 80]} and link.applied
+    assert res.tracks["track"].nunique() == 1
+    (fill,) = _by(res, "fill", EventKind.FILL)
+    assert fill.params == {"gap": [19, 25], "n_rows": 5}
+    t = res.tracks
+    assert t.loc[t["interp"] == 1, "frame"].tolist() == [20, 21, 22, 23, 24]
+    assert not t["frame"].between(50, 79).any()  # the 3 s wait stays empty
+    # an explicit fill.max_gap above the wait fills it
+    cfg.fill.max_gap = 4.0
+    d = tmp_path / "long"
+    res = _refine(_write(d, table(rows)), d / "o.txt", cfg=cfg, fps=10)
+    assert res.tracks["frame"].between(50, 79).sum() == 30
