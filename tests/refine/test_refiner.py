@@ -1181,3 +1181,46 @@ def test_screening_cues_still_see_context_boxes_that_duplicate_a_row(tmp_path):
                   context_file=_write(tmp_path, bike, "bike.txt"))
     (ev,) = _by(res, "screen")
     assert ev.kind is EventKind.RECLASS and ev.signals["K"] == 1.0
+
+
+# ---- final review M2 / M3: outputs never overwrite inputs or each other -----------------------
+
+
+def test_refining_a_file_into_one_of_its_inputs_is_rejected(tmp_path):
+    src = _write(tmp_path, table(box_rows(1, range(30), 0.0, 0.0, vx=2.0)), "t.txt")
+    ctx = _write(tmp_path, table(box_rows(9, range(30), 500.0, 0.0, cls=2)), "c.txt")
+    hints = _hints(tmp_path, (1, 3, 0.95))
+    before = {p: p.read_bytes() for p in (src, ctx, hints)}
+    cases = [
+        ({}, src, r"out_file .* is track_file"),
+        ({}, tmp_path / "sub" / ".." / "t.txt", r"out_file .* is track_file"),  # same file
+        ({"context_file": ctx}, ctx, r"out_file .* is context_file"),
+        ({"reclass_file": hints}, hints, r"out_file .* is reclass_file"),
+        # the ledger written next to o.txt would replace the context file
+        ({"context_file": tmp_path / "o.ledger.jsonl"}, tmp_path / "o.txt",
+         r"the ledger file .* is context_file"),
+    ]
+    (tmp_path / "sub").mkdir()
+    shutil.copy(ctx, tmp_path / "o.ledger.jsonl")
+    for kw, out, match in cases:
+        with pytest.raises(ValueError, match=match):
+            TrackRefiner().refine(src, out, fps=10, verbose=False, **kw)
+    assert {p: p.read_bytes() for p in before} == before  # nothing was overwritten
+    assert not (tmp_path / "o.txt").exists()
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["c.txt", "hints.csv",
+                                                          "o.ledger.jsonl", "sub", "t.txt"]
+
+
+def test_refine_batch_rejects_two_inputs_with_the_same_output_name(tmp_path):
+    rows = table(box_rows(1, range(30), 0.0, 0.0, vx=2.0))
+    a = _write(tmp_path / "a", rows, "day1_track.txt")
+    b = _write(tmp_path / "b", rows, "day1_track.txt")
+    c = _write(tmp_path / "c", rows, "day1.txt")  # "_track" is stripped: also day1_refined
+    other = _write(tmp_path / "a", rows, "day2_track.txt")
+    out_dir = tmp_path / "out"
+    for files in ([a, b], [other, a, c]):
+        with pytest.raises(ValueError, match=r"day1_refined\.txt"):
+            TrackRefiner().refine_batch(files, output_path=out_dir, fps=10, verbose=False)
+    assert not out_dir.exists()  # checked before any work starts
+    got = TrackRefiner().refine_batch([a, other], output_path=out_dir, fps=10, verbose=False)
+    assert got == [str(out_dir / "day1_refined.txt"), str(out_dir / "day2_refined.txt")]

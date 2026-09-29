@@ -84,6 +84,25 @@ def resolve_fps(arg, cfg_fps, video_fps) -> tuple[float, str]:
     )
 
 
+def check_output_paths(out, inputs: dict) -> None:
+    """Raise ValueError when ``out`` or a file written next to it is one of the ``inputs``.
+
+    ``inputs`` maps argument names to paths (or None). Refining a file into itself would
+    overwrite the input that the ledger records by its SHA-256, so it could never be replayed.
+    """
+    written = {"out_file": Path(out), **{f"the {k} file": v for k, v in output_paths(out).items()}}
+    for in_name, in_path in inputs.items():
+        if in_path is None:
+            continue
+        src = Path(in_path).resolve()
+        for out_name, out_path in written.items():
+            if out_path.resolve() == src:
+                raise ValueError(
+                    f"{out_name} ({out_path}) is {in_name} ({in_path}); refine would overwrite "
+                    "its input. Write the output to another path."
+                )
+
+
 def _file_record(path, sha256: str | None = None, **extra) -> dict:
     p = Path(path)
     return {
@@ -397,6 +416,15 @@ class TrackRefiner:
         """
         cfg = self.config
         out = Path(out_file)
+        check_output_paths(
+            out,
+            {
+                "track_file": track_file,
+                "video_file": video_file,
+                "context_file": context_file,
+                "reclass_file": reclass_file,
+            },
+        )
         paths = output_paths(out)
         track_sha = io.sha256_file(track_file)
         context_sha = None
@@ -530,8 +558,9 @@ class TrackRefiner:
         Raises
         ------
         ValueError
-            If ``output_path`` is missing, or if ``video_files``, ``context_files`` or
-            ``reclass_files`` is given with a length different from ``track_files``.
+            If ``output_path`` is missing, if ``video_files``, ``context_files`` or
+            ``reclass_files`` is given with a length different from ``track_files``, or if
+            two track files map to the same output name (checked before any work starts).
 
         """
         if output_path is None:
@@ -549,6 +578,17 @@ class TrackRefiner:
                     "track files; files are paired by position"
                 )
         out_dir = Path(output_path)
+        outs = [
+            out_dir / f"{re.sub(r'_track$', '', Path(t).stem)}_refined.txt" for t in track_files
+        ]
+        clash = {o for o, n in Counter(outs).items() if n > 1}
+        if clash:
+            same = [str(t) for t, o in zip(track_files, outs, strict=True) if o in clash]
+            raise ValueError(
+                f"track files {same} map to the same output name(s) "
+                f"{sorted(o.name for o in clash)} in {out_dir}; rename them or refine them into "
+                "different output paths"
+            )
         out_dir.mkdir(parents=True, exist_ok=True)
 
         def pick(seq, i):
@@ -556,9 +596,7 @@ class TrackRefiner:
 
         results: list[str] = []
         total = len(track_files)
-        for i, track_file in enumerate(track_files):
-            base = re.sub(r"_track$", "", Path(track_file).stem)
-            out = out_dir / f"{base}_refined.txt"
+        for i, (track_file, out) in enumerate(zip(track_files, outs, strict=True)):
             if out.exists() and not is_overwrite:
                 if is_report:
                     results.append(str(out))
