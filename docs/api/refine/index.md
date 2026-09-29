@@ -18,11 +18,13 @@ Command line: `dnt-refine run TRACKS --fps 10 --config refine.yaml --out clean.c
 
 !!! note "Current limitations"
     This release scores with motion only, and cannot yet apply decisions made in review.
-    Edits it is sure of are applied: false-track drops and reclasses, links across short gaps
-    and static waits, orphan drops, and gap filling. Two kinds of edit are proposed but never
-    applied yet, because their scores are capped below auto-accept: ID-switch splits found
-    from motion alone, and links across occlusions. Both appear in the ledger as
-    `HUMAN_PENDING` and leave the tracks unchanged. VLM verification and applying review
-    decisions follow in later releases.
+    Edits it is sure of are applied: in-vehicle and duplicate false-track drops, rider
+    reclasses whose subtype a ReClass hint settles, links across short gaps and static waits
+    with a clear assignment margin, orphan drops, and gap filling. Other edits are proposed but
+    never applied yet, because their scores are capped below auto-accept: ID-switch splits
+    found from motion alone, links across occlusions, links with an ambiguous assignment
+    margin, and false-track drops of static objects or of mixed tracks. They appear in the
+    ledger as `HUMAN_PENDING` and leave the tracks unchanged. VLM verification and applying
+    review decisions follow in later releases.
 
 ::: dnt.refine

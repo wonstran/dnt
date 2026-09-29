@@ -282,14 +282,31 @@ def test_docs_pages_exist_and_are_in_the_nav():
     assert "::: dnt.refine.interpolate.interpolate_tracks_rts" in post
 
 
+def _note_block(text, start_marker):
+    """Return the lines of the block that begins at ``start_marker`` and is indented after it."""
+    lines = text.splitlines()
+    first = next(i for i, ln in enumerate(lines) if ln.startswith(start_marker))
+    block = [lines[first]]
+    for ln in lines[first + 1 :]:
+        if not ln.startswith("  "):  # a blank line, heading, directive or next bullet ends it
+            break
+        block.append(ln)
+    return " ".join(" ".join(block).split())
+
+
 def test_docs_and_changelog_state_the_limitation_accurately():
     index = (ROOT / "docs/api/refine/index.md").read_text()
     log = (ROOT / "docs/changelog.md").read_text()
     unreleased = log.split("## Unreleased", 1)[1].split("\n## ", 1)[0]
-    for text in (index, unreleased):
-        flat = " ".join(text.split())
-        assert "HUMAN_PENDING" in flat
-        assert "motion" in flat and "occlusion" in flat
-        assert "not applied yet" in flat or "never applied yet" in flat
+    notes = {
+        "index.md": _note_block(index, '!!! note "Current limitations"'),
+        "changelog": _note_block(unreleased, "- This release scores with motion only"),
+    }
+    for where, note in notes.items():
+        for word in ("HUMAN_PENDING", "motion", "occlusion", "ambiguous", "static",
+                     "not applied yet" if where == "changelog" else "never applied yet"):
+            assert word in note, (where, word)
+        assert "static objects" in note and "mixed tracks" in note, where
+        assert "ID-switch splits" in note and "ambiguous assignment margin" in note, where
     assert "dnt-refine run" in index and "dnt-refine run" in unreleased
     assert log.index("## Unreleased") < log.index("## 0.3.3")

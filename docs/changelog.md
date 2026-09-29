@@ -7,11 +7,14 @@
   and `dnt-refine run`. They propose ID-switch splits, false-track drops and reclasses, and
   fragment links, drop orphans, and fill gaps. Every proposal is recorded in a JSONL ledger
   next to the output.
-- This release scores with motion only and applies only the edits it is sure of: false-track
-  drops and reclasses, links across short gaps and static waits, orphan drops, and filling.
-  ID-switch splits found from motion alone and links across occlusions are capped below
-  auto-accept. They are recorded as `HUMAN_PENDING` and not applied yet. Appearance encoders,
-  VLM verification, review pages, and applying review decisions follow in later releases.
+- This release scores with motion only and applies only the edits it is sure of: in-vehicle
+  and duplicate false-track drops, rider reclasses whose subtype a ReClass hint settles, links
+  across short gaps and static waits with a clear assignment margin, orphan drops, and filling.
+  Other edits are capped below auto-accept, recorded as `HUMAN_PENDING`, and not applied yet:
+  ID-switch splits found from motion alone, links across occlusions, links with an ambiguous
+  assignment margin, and false-track drops of static objects or of mixed tracks. Appearance
+  encoders, VLM verification, review pages, and applying review decisions follow in later
+  releases.
 
 ### Changed
 - `interpolate_tracks_rts` and `link_tracklets` moved to `dnt.refine`. `dnt.track.post_process`
