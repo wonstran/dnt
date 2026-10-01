@@ -74,6 +74,31 @@ def _patch_boxmot_requirements_installer() -> None:
     setattr(RequirementsChecker, install_fn_name, _install_packages_with_pip_fallback)
 
 
+class _FrameDetections:
+    """Detection rows grouped by frame, so a per-frame lookup does not scan the whole table."""
+
+    def __init__(self, detections: np.ndarray) -> None:
+        """Sort `detections` by frame, keeping the file order of rows within a frame."""
+        frames = detections[:, 0]
+        if np.any(frames[1:] < frames[:-1]):
+            detections = detections[np.argsort(frames, kind="stable")]
+        self._detections = detections
+        # contiguous copy: searchsorted would otherwise copy the strided column on every call
+        self._frames = np.ascontiguousarray(detections[:, 0])
+
+    def xyxy(self, frame_id: int) -> np.ndarray:
+        """Return the rows of `frame_id` in BoxMOT layout.
+
+        Input:  [frame_id, _, x, y, w, h, score, class_id]
+        Output: [x1, y1, x2, y2, score, class_id]
+        """
+        start = np.searchsorted(self._frames, frame_id, side="left")
+        stop = np.searchsorted(self._frames, frame_id, side="right")
+        dets = self._detections[start:stop, 2:8].astype(float)
+        dets[:, 2:4] += dets[:, :2]
+        return dets
+
+
 class MOTModels(StrEnum):
     """Supported tracker backends exposed by BoxMOT.
 
@@ -1288,6 +1313,7 @@ class Tracker:
         start_frame = int(detections[:, 0].min())
         end_frame = int(detections[:, 0].max())
         total_frames = max(end_frame - start_frame + 1, 0)
+        frame_detections = _FrameDetections(detections)
 
         cap = cv2.VideoCapture(video_file)
         if not cap.isOpened():
@@ -1322,17 +1348,8 @@ class Tracker:
             if not ret or frame_id > end_frame:
                 break
 
-            frame_dets = detections[detections[:, 0] == frame_id]
-            if frame_dets.size > 0:
-                # Convert detection format: (x, y, w, h) -> (x1, y1, x2, y2)
-                # Input:  [frame_id, _, x, y, w, h, score, class_id]
-                # Output: [x1, y1, x2, y2, score, class_id]
-                dets = np.array(
-                    [[d[2], d[3], d[2] + d[4], d[3] + d[5], d[6], d[7]] for d in frame_dets],
-                    dtype=float,
-                )
-            else:
-                dets = np.empty((0, 6), dtype=float)
+            # Convert detection format: (x, y, w, h) -> (x1, y1, x2, y2)
+            dets = frame_detections.xyxy(frame_id)
 
             try:
                 outputs = tracker.update(dets, frame)
