@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.3.4 — 2026-10-01
 
 ### New
 - `dnt.refine` track refinement: `TrackRefiner` (`refine`, `refine_batch`, used like `Tracker`)
@@ -22,6 +22,9 @@
 ### Changed
 - `interpolate_tracks_rts` and `link_tracklets` moved to `dnt.refine`. `dnt.track.post_process`
   re-exports them, and `Filter.interpolate_tracks_rts` now calls `dnt.refine.interpolate`.
+- `Tracker.track` finds each frame's detections with a sorted index instead of scanning the whole
+  detection table every frame. The per-frame cost no longer grows with the length of the video
+  (about 5 ms/frame on a 24 h file with 3M detection rows); track output is unchanged.
 - `interpolate_tracks_rts` no longer uses rows flagged as filled (`interp`/`r3` equal to 1) as
   measurements, and accepts `protected_gaps`. Output for raw tracker files is unchanged.
 
