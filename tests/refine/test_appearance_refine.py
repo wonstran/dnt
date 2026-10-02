@@ -234,9 +234,13 @@ def test_refine_batch_builds_the_encoder_once(tmp_path):
     assert all((tmp_path / "out" / f"{n}_refined.features.npz").is_file() for n in ("a", "b"))
 
 
-def test_an_empty_valid_cache_is_still_a_cache_hit_and_is_recorded(tmp_path, monkeypatch):
-    from dnt.refine import video_appearance
+def test_an_empty_valid_cache_is_saved_recorded_and_loadable(tmp_path):
+    """Pin what an empty cache can prove.
 
+    The scene has no clean crops, so the encoder and the video are untouched with or without
+    a cache hit; a hit cannot be told from a miss here. What can be shown is that an empty
+    store is still saved, recorded in the header, and loads as a valid store with that key.
+    """
     rows = box_rows(1, range(60), 100.0, 100.0, vx=1.0, w=30.0, h=60.0) + box_rows(
         2, range(60), 100.0, 100.0, vx=1.0, w=30.0, h=60.0
     )
@@ -244,29 +248,79 @@ def test_an_empty_valid_cache_is_still_a_cache_hit_and_is_recorded(tmp_path, mon
     src = tmp_path / "t.txt"
     table(rows).to_csv(src, index=False, header=False)
     feats = tmp_path / "o.features.npz"
-    r1 = _run(src, tmp_path / "o.txt", video, ColorEncoder())
-    rec = _header(r1)["inputs"]["features"]  # an empty store is still saved and recorded
-    assert feats.is_file() and rec["sha256"] == io.sha256_file(feats)
-    assert len(FeatureStore.load(feats, rec["cache_key"])) == 0
-
-    opened, loaded = [], []
-    real_reader, real_load = video_appearance.FrameReader, FeatureStore.load
-
-    def spy_reader(*a, **k):
-        opened.append(a)
-        return real_reader(*a, **k)
-
-    def spy_load(path, key, dim=None):
-        loaded.append(real_load(path, key, dim))
-        return loaded[-1]
-
-    monkeypatch.setattr(video_appearance, "FrameReader", spy_reader)
-    monkeypatch.setattr(FeatureStore, "load", staticmethod(spy_load))
     enc = ColorEncoder()
-    r2 = _run(src, tmp_path / "o.txt", video, enc)
-    assert enc.calls == 0 and not opened
-    assert len(loaded) == 1 and loaded[0] is not None and len(loaded[0]) == 0
-    assert _header(r2)["inputs"]["features"] == rec
+    res = _run(src, tmp_path / "o.txt", video, enc)
+    rec = _header(res)["inputs"]["features"]
+    assert enc.calls == 0 and feats.is_file()
+    assert rec["sha256"] == io.sha256_file(feats) and rec["path"] == str(feats)
+    store = FeatureStore.load(feats, rec["cache_key"], dim=enc.dim)
+    assert store is not None and store.key == rec["cache_key"] and len(store) == 0
+    assert FeatureStore.load(feats, "0" * 64) is None
+
+
+def _stored_frames(feats, raw_id=1):
+    import numpy as np
+
+    with np.load(feats) as z:
+        return set(z["frame"][z["raw_id"] == raw_id].tolist())
+
+
+def _overlap_context(tmp_path, src, frames, name="ctx.txt"):
+    """A detection file of another object: shifted 8 px from the track's box, IoU about 0.43."""
+    raw = pd.read_csv(src, header=None)
+    raw = raw[raw[0].isin(list(frames))]
+    det = pd.DataFrame(
+        {"f": raw[0], "res": -1, "x": raw[2] + 8.0, "y": raw[3], "w": raw[4], "h": raw[5],
+         "conf": 0.9, "cls": 0}
+    )
+    ctx = tmp_path / name
+    det.to_csv(ctx, index=False, header=False)
+    return ctx
+
+
+def test_context_boxes_occlude_crops_and_the_context_changes_the_cache_key(tmp_path):
+    src, video = _scene(tmp_path)
+    ctx = _overlap_context(tmp_path, src, range(30, 60))
+    with_ctx = _run(src, tmp_path / "a.txt", video, ColorEncoder(), context=ctx)
+    frames = _stored_frames(tmp_path / "a.features.npz")
+    assert any(f < 30 for f in frames) and any(f >= 60 for f in frames)
+    assert not any(30 <= f < 60 for f in frames)  # occluded by the other object
+
+    without = _run(src, tmp_path / "b.txt", video, ColorEncoder())
+    assert any(30 <= f < 60 for f in _stored_frames(tmp_path / "b.features.npz"))
+    key_ctx = _header(with_ctx)["inputs"]["features"]["cache_key"]
+    assert _header(without)["inputs"]["features"]["cache_key"] != key_ctx
+
+
+def test_the_occlusion_threshold_is_part_of_the_cache_key(tmp_path):
+    src, video = _scene(tmp_path)
+    r1 = _run(src, tmp_path / "o.txt", video, ColorEncoder())
+    key1 = _header(r1)["inputs"]["features"]["cache_key"]
+    cfg = _cfg()
+    cfg.encoder.occlusion_iou = 0.5
+    r2 = _run(src, tmp_path / "o.txt", video, ColorEncoder(), cfg=cfg)
+    assert _header(r2)["inputs"]["features"]["cache_key"] != key1
+
+
+def test_a_changed_device_rebuilds_the_encoder_but_the_same_settings_do_not(tmp_path):
+    src, video = _scene(tmp_path)
+    built = []
+
+    def factory(cfg, target):
+        built.append(cfg.device)
+        return ColorEncoder()
+
+    refiner = TrackRefiner(_cfg(device="cpu"), encoder_factory=factory)
+
+    def run():
+        refiner.refine(src, tmp_path / "o.txt", video_file=video, verbose=False)
+
+    run()
+    run()
+    assert built == ["cpu"]
+    refiner.config.encoder.device = "cuda"
+    run()
+    assert built == ["cpu", "cuda"]
 
 
 def test_a_failed_cache_save_leaves_no_ledger_and_no_output(tmp_path, monkeypatch):
