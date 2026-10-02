@@ -353,3 +353,40 @@ def test_events_without_an_evidence_image_are_counted(tmp_path, monkeypatch):
         "calls": 0, "retries": 0, "cache_hits": 0, "failures": 0, "budget_skipped": 0,
         "no_evidence": 1,
     }
+
+
+def test_the_review_snippet_names_the_output_file_by_its_absolute_path(tmp_path, monkeypatch):
+    import html as html_mod
+
+    src, video = takeover_scene(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    refiner = TrackRefiner(cfg_for(tmp_path), vlm_backend_factory=lambda c: FakeBackend(
+        {"SPLIT": reply("unsure")}))
+    refiner.refine(src, "o.txt", video_file=video, verbose=False)
+    page = html_mod.unescape(refiner.last_result.review_path.read_text())
+    assert f"track_file={str((tmp_path / 'o.txt').resolve())!r}" in page
+    assert "track_file='o.txt'" not in page
+
+
+def test_the_runner_is_made_only_after_the_inputs_are_read_and_is_closed(tmp_path, monkeypatch):
+    from dnt.refine import refiner as refiner_mod
+
+    made = []
+
+    class Recording(VLMRunner):
+        def __init__(self, *a, **k):
+            made.append(self)
+            super().__init__(*a, **k)
+
+    monkeypatch.setattr(refiner_mod, "VLMRunner", Recording)
+    src, video = takeover_scene(tmp_path)
+    bad = tmp_path / "bad.txt"
+    bad.write_text("this is not a track file\n")
+    built = []
+    refiner = TrackRefiner(cfg_for(tmp_path), vlm_backend_factory=lambda c: built.append(c) or
+                           FakeBackend({"SPLIT": reply("different")}))
+    with pytest.raises(ValueError):
+        refiner.refine(bad, tmp_path / "o.txt", video_file=video, verbose=False)
+    assert len(built) == 1 and made == []  # the backend is checked first; no runner was made
+    refiner.refine(src, tmp_path / "o.txt", video_file=video, verbose=False)
+    assert len(made) == 1 and made[0]._closed

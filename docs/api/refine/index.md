@@ -118,7 +118,11 @@ pip install 'dnt[refine-vlm]'   # openai and anthropic
 
 Set the backend in the `vlm` block of the config file (`--config`, or `config_yaml=`), or in
 `cfg.vlm` in code. A local server that speaks the OpenAI chat API (vLLM, Ollama, ...) needs
-`base_url` and `model`. Its key is optional (`vlm.api_key_env` names the variable; `OPENAI_API_KEY` by default):
+`base_url` and `model`. Its key is optional (`vlm.api_key_env` names the variable;
+`OPENAI_API_KEY` by default; it must be a variable name, never the key itself). The
+`openai_compat` request sends `max_tokens=300` and `temperature`, which suits vLLM, Ollama, and
+GPT-4-class chat models; reasoning models that reject `max_tokens` or `temperature=0` are not
+supported by this backend:
 
 ```yaml
 vlm:
@@ -174,26 +178,29 @@ votes, or an error leaves the event `HUMAN_PENDING`.
 An answer can redirect the edit: for a proposed static drop, `cyclist` applies a reclass
 instead. The event keeps its proposal; only its `edit` changes.
 
-**Budget.** `vlm.max_calls` (500 by default) is a hard limit on requests to the backend:
-the `calls` and `retries` counts never add up to more. A question is asked only if all its
-uncached votes fit in what is left; a question that does not fit stays `HUMAN_PENDING` with
-`vlm.error: "budget"`, and a later one that fits still runs. Questions are admitted in order of
-how close the event's score is to the middle of its band, but only within each routing batch:
-the switch stage, the screen stage, and each link pass, which run in that order, so earlier
-stages spend first. The `max_calls` cap holds for the whole run, but the closest-first order
-does not: later stages only exist after earlier stages' edits are applied, so one run-wide
-order is not possible. If the budget runs out before the later stages, raise `vlm.max_calls`
-instead of expecting global ordering (with `max_calls: 200` and 250 uncertain splits, every
-link question is skipped, however close to its band middle). A retry (after a timeout, HTTP 429 or 5xx, or an invalid reply)
-uses what admission left over; with nothing left, the event stays pending with the same error.
+**Budget.** `vlm.max_calls` (500 by default) is a hard limit on requests to the backend in each
+`refine()` call: the `calls` and `retries` counts never add up to more. Under `refine_batch` it
+is a budget per video (each video gets its own runner; the answer cache is shared). A question
+is asked only if all its uncached votes fit in what is left; a question that does not fit stays
+`HUMAN_PENDING` with `vlm.error: "budget"`, and a later one that fits still runs. Questions are
+admitted in order of how close the event's score is to the middle of its band, but only within
+each routing batch: the switch stage, the screen stage, and each link pass, which run in that
+order, so earlier stages spend first. The `max_calls` cap holds for the whole run, but the
+closest-first order does not: later stages only exist after earlier stages' edits are applied,
+so one run-wide order is not possible. If the budget runs out before the later stages, raise
+`vlm.max_calls` instead of expecting global ordering (with `max_calls: 200` and 250 uncertain
+splits, every link question is skipped, however close to its band middle). A retry (after a
+timeout, HTTP 429 or 5xx, or an invalid reply) uses what admission left over; with nothing left,
+the event stays pending with the same error.
 `refiner.last_result.summary["vlm"]` reports `calls`, `retries`, `cache_hits`, `failures`,
 `budget_skipped`, and `no_evidence` (events not asked because no evidence image could be made).
 
 **Cache.** Each answer is stored under `vlm.cache_dir` (`~/.cache/dnt/vlm` by default), keyed
-by the image, prompt, options, backend, model, temperature, and vote number. A rerun on the same
-inputs does not ask again the questions that were answered, and costs no budget for them; a
-question that failed, got an invalid reply, or ended in a vote tie is not cached and is asked
-again. A damaged entry is ignored.
+by the image, prompt, options, backend, model, temperature, and vote number. Every vote is
+cached on its own, so a rerun on the same inputs answers them from the cache and costs no budget
+for them; a vote tie is reproduced from the cached votes and stays `HUMAN_PENDING`. Only a vote
+that failed or got an invalid reply is not cached, and only that vote is asked again. A damaged
+entry is ignored.
 
 **Votes.** With `vlm.votes` above 1, each question is asked that many times at
 `vlm.vote_temperature` (at the default temperature for the newer Claude models; see above). The majority answer wins, its confidence is the share of votes it got
@@ -215,8 +222,8 @@ out of the image.
 
 **Review page.** Events left `HUMAN_PENDING` (except fills and smoothing) are collected on
 `OUT.review.html`, whether or not a backend was used (with `vlm.backend: none` too), with their images in `OUT.review/`. One card per event shows the evidence
-image, the signals, the VLM's answer and reason, and accept and reject choices (with a class
-picker for reclasses). Cards can be filtered by stage and sorted by score. A copy button gives
+image, the event's tracks with their output track ids, the signals, the VLM's answer and
+reason, and accept and reject choices (with a class picker for reclasses). Cards can be filtered by stage and sorted by score. A copy button gives
 a `Labeler.draw_track_clips(...)` snippet that cuts one clip per track of the event, each from
 the track's first to last frame plus 2 s on each side (it is left out when there is no video).
 The page makes no network requests and keeps your choices in the browser, namespaced by run.

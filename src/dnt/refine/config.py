@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import math
+import re
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass, field, fields, is_dataclass
 from pathlib import Path
@@ -14,6 +15,7 @@ import yaml
 TARGETS = ("person", "vehicle")
 ENCODERS = ("dino", "reid", "none")
 BACKENDS = ("none", "openai_compat", "anthropic")
+_ENV_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 _FIXED_KEY_DICTS = {"ramps", "weights", "weights_occluded", "legacy_weights", "reclass_map"}
 _RAMP_DICTS = {"ramps", "ramp", "reclass_ramp"}
 _RAMP_FIELDS = {"orphan.ramp", "hints.reclass_ramp"}
@@ -308,6 +310,8 @@ class RefineConfig:
         """
         if isinstance(self.encoder.weights, str) and not self.encoder.weights.strip():
             self.encoder.weights = None
+        if isinstance(self.vlm.api_key_env, str) and not self.vlm.api_key_env.strip():
+            self.vlm.api_key_env = None  # "" from YAML: the backend's default variable
         p: list[str] = []
         if self.target not in TARGETS:
             p.append(f"target must be one of {TARGETS}")
@@ -381,6 +385,14 @@ class RefineConfig:
             p.append("vlm.vote_temperature must be a number >= 0")
         if not (isinstance(vl.cache_dir, str) and vl.cache_dir.strip()):
             p.append("vlm.cache_dir must be a non-empty string")
+        if vl.api_key_env is not None and not (
+            isinstance(vl.api_key_env, str) and _ENV_NAME.fullmatch(vl.api_key_env)
+        ):
+            # never echo the value: a key pasted here would land in the message and the ledger
+            p.append(
+                "vlm.api_key_env must be the name of an environment variable (letters, digits "
+                "and underscores, not starting with a digit), not the key itself"
+            )
         ramps = {f"switch.ramps.{k}": v for k, v in self.switch.ramps.items()}
         ramps |= {f"screen.ramps.{k}": v for k, v in sc.ramps.items()}
         ramps |= {"orphan.ramp": self.orphan.ramp, "hints.reclass_ramp": self.hints.reclass_ramp}

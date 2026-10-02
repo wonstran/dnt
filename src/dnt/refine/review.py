@@ -128,10 +128,15 @@ def _reason(ev: Event) -> str:
     return str(ev.params.get("reason") or ev.signals.get("hypothesis") or ev.kind)
 
 
+def _output_ids(ev: Event, id_map: dict) -> list:
+    """Return the output ids of the event's tracks; a track gone from the output has none."""
+    return [i for i in (id_map.get(t, id_map.get(str(t))) for t in ev.tracks) if i is not None]
+
+
 def _snippet(ev: Event, id_map: dict, fps: float, video_file, track_file) -> str:
     if video_file is None:
         return ""  # without a video there is nothing to cut a clip from
-    ids = [i for i in (id_map.get(t, id_map.get(str(t))) for t in ev.tracks) if i is not None]
+    ids = _output_ids(ev, id_map)
     margin = round(2.0 * fps)
     # draw_track_clips writes one clip per track id; each runs from that track's first frame to
     # its last, widened by these offsets (frames), so every clip has 2 s of margin on each side
@@ -185,14 +190,20 @@ def _snippet_html(snippet: str) -> str:
     return f'<button class="copy" type="button">copy clip snippet</button><pre>{_e(snippet)}</pre>'
 
 
-def _card(ev: Event, img_rel: str | None, snippet: str, reclass_map: dict) -> str:
-    image = f'<img src="{_e(img_rel)}" alt="evidence">' if img_rel else "<div>no image</div>"
+def _card(ev: Event, img_rel: str | None, snippet: str, reclass_map: dict, id_map: dict) -> str:
+    image = (
+        f'<img src="{_e(img_rel)}" alt="evidence" loading="lazy">'
+        if img_rel
+        else "<div>no image</div>"
+    )
+    out_ids = ", ".join(str(i) for i in _output_ids(ev, id_map)) or "none"
     name = _e(ev.id)
     return (
         f'<div class="card" data-id="{name}" data-key="{_e(ev.proposal_key)}" '
         f'data-stage="{_e(ev.stage)}" data-score="{ev.algo_score:.3f}">'
         f'{image}<div class="meta"><span><b>{_e(ev.kind)}</b> {_e(_reason(ev))}</span>'
-        f"<span>tracks {_e(ev.tracks)}</span><span>frames {_e(ev.frames[0])}-{_e(ev.frames[1])}"
+        f"<span>tracks {_e(ev.tracks)}</span><span>output id(s): {_e(out_ids)}</span>"
+        f"<span>frames {_e(ev.frames[0])}-{_e(ev.frames[1])}"
         f"</span><span>score {ev.algo_score:.3f}</span></div>"
         f'<div class="sig">{_e(" ".join(_top_signals(ev.signals)))}</div>'
         f"{_vlm_block(ev)}{_extras(ev)}"
@@ -309,7 +320,7 @@ def write_review(
             if ev.vlm:
                 ev.vlm["evidence"] = rel
         snippet = _snippet(ev, id_map, fps, video_file, track_file)
-        cards.append(_card(ev, None if rel is None else quote(rel), snippet, reclass_map))
+        cards.append(_card(ev, None if rel is None else quote(rel), snippet, reclass_map, id_map))
     _remove_listed(img_dir, keep=set(written))  # images of events that are gone
     if written:
         (img_dir / _MANIFEST).write_text(json.dumps({"images": written}))

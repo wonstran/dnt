@@ -588,7 +588,7 @@ class TrackRefiner:
             and self.encoder_factory is None
         ):
             check_encoder_dependencies(cfg.encoder)  # before any processing (spec 5.5)
-        runner = None
+        backend = None
         if cfg.vlm.backend != "none" and video_file is None:
             log.warning(
                 "vlm.backend %r is ignored without a video (no evidence images can be made); "
@@ -598,8 +598,8 @@ class TrackRefiner:
         elif cfg.vlm.backend != "none":
             if self.vlm_backend_factory is None:
                 check_vlm_dependencies(cfg.vlm)  # before any processing (spec 5.5)
+            # a missing API key fails here, before any file is read
             backend = (self.vlm_backend_factory or make_backend)(cfg.vlm)
-            runner = VLMRunner(cfg.vlm, backend, AnswerCache(cfg.vlm.cache_dir))
         track_sha = io.sha256_file(track_file)
         context_sha = None
         if context_file is not None:
@@ -612,7 +612,7 @@ class TrackRefiner:
                     "run as context."
                 )
         vinfo = io.video_info(video_file) if video_file is not None else None
-        if runner is not None and vinfo["frame_count"] <= 0:
+        if backend is not None and vinfo["frame_count"] <= 0:
             log.warning(
                 "frame count unknown; evidence frames are not range-checked (%s)", video_file
             )
@@ -692,6 +692,10 @@ class TrackRefiner:
         )
         if message:
             desc += f" {message}"
+        # the runner (and its loop thread) exists only for the stage run that closes it
+        runner = (
+            None if backend is None else VLMRunner(cfg.vlm, backend, AnswerCache(cfg.vlm.cache_dir))
+        )
         try:
             if store is not None:
                 appearance.prefetch_coarse()
@@ -730,7 +734,7 @@ class TrackRefiner:
             id_map=id_map,
             fps=fps_val,
             video_file=None if video_file is None else str(Path(video_file).resolve()),
-            track_file=out,
+            track_file=str(out.resolve()),
             reclass_map=cfg.reclass_map,
             title=out.stem,
             run_key=run_key,

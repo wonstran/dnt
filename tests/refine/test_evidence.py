@@ -312,3 +312,31 @@ def test_the_lazy_index_matches_the_rows_and_keeps_the_last_duplicate(tmp_path):
     w.loc[w.frame == 5, "x"] = -1.0
     b2.plan(ev)
     assert b2._box[(1, 5)][0] != -1.0
+
+
+def test_chunks_are_cut_after_sorting_the_events_by_their_first_frame(tmp_path, monkeypatch):
+    from dnt.refine import evidence
+
+    w = _work(_walker(1, range(0, 20)), _walker(2, range(90, 110), x0=150.0))
+    b = _builder(tmp_path, w, {1: RED, 2: BLUE}, send_context_frames=False)
+    evs = []
+    for i, raw in enumerate([2, 1, 2, 1]):  # late, early, late, early
+        f0 = 0 if raw == 1 else 90
+        e = _ev(EventKind.DROP, "screen", [raw], [[[raw, f0, f0 + 19]]], (f0, f0 + 19),
+                reason="static", spans=None)
+        e.id = f"screen-r0-{i:06d}"
+        evs.append(e)
+    ranges = []
+    real = evidence.FrameReader
+
+    class Recording(real):
+        def frames(self, wanted):
+            wanted = list(wanted)
+            ranges.append((min(wanted), max(wanted)))
+            return super().frames(wanted)
+
+    monkeypatch.setattr(evidence, "FrameReader", Recording)
+    monkeypatch.setattr(evidence, "CHUNK", 2)
+    out = b.build_many(evs)
+    assert set(out) == {e.id for e in evs} and all(v is not None for v in out.values())
+    assert ranges == [(0, 19), (90, 109)]  # each chunk reads one compact range

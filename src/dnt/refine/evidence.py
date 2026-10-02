@@ -253,11 +253,23 @@ class EvidenceBuilder:
         return self.build_many([event]).get(event.id)
 
     def build_many(self, events: list[Event]) -> dict[str, bytes | None]:
-        """Return ``{event.id: JPEG or None}``; frames are read once per chunk, in order."""
+        """Return ``{event.id: JPEG or None}``; frames are read once per chunk, in order.
+
+        Events are sorted by the first frame they need before they are cut into chunks, so each
+        chunk reads a compact range of the video.
+        """
         out: dict[str, bytes | None] = {}
-        for i in range(0, len(events), CHUNK):
-            chunk = events[i : i + CHUNK]
-            plans = {e.id: self.plan(e) for e in chunk}
+        all_plans = {e.id: self.plan(e) for e in events}
+
+        def first_frame(e: Event) -> int:
+            p = all_plans[e.id]
+            frames = [f for _, tiles in p.rows for _, f in tiles] + [c.frame for c in p.contexts]
+            return min(frames, default=-1)
+
+        ordered = sorted(events, key=first_frame)  # stable: ties keep the caller's order
+        for i in range(0, len(ordered), CHUNK):
+            chunk = ordered[i : i + CHUNK]
+            plans = {e.id: all_plans[e.id] for e in chunk}
             parts: dict[tuple, np.ndarray] = {}
             requests: dict[int, list[tuple]] = {}
             for e in chunk:

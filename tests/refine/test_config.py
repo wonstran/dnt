@@ -238,6 +238,28 @@ def test_vlm_settings_are_validated(key, value):
         cfg.validate()
 
 
+@pytest.mark.parametrize(
+    "value", ["sk-abc123-xyz", "sk-ant-api03-AbC_dEf", "1KEY", "MY KEY", "KEY=x", 7]
+)
+def test_api_key_env_must_be_a_variable_name_and_is_never_echoed(value):
+    cfg = RefineConfig.defaults()
+    cfg.vlm.backend, cfg.vlm.model, cfg.vlm.api_key_env = "openai_compat", "m", value
+    with pytest.raises(ValueError, match=re.escape("vlm.api_key_env")) as err:
+        cfg.validate()
+    assert str(value) not in str(err.value)
+
+
+@pytest.mark.parametrize("value", [None, "OPENAI_API_KEY", "_my_key2", "A"])
+def test_good_api_key_env_names_validate(value):
+    cfg = RefineConfig.defaults()
+    cfg.vlm.api_key_env = value
+    cfg.validate()
+    blank = RefineConfig.defaults()
+    blank.vlm.api_key_env = "  "
+    blank.validate()
+    assert blank.vlm.api_key_env is None  # "" from YAML means the backend's default
+
+
 def test_good_vlm_settings_validate_and_round_trip(tmp_path):
     cfg = RefineConfig.defaults()
     cfg.vlm.backend, cfg.vlm.model = "openai_compat", "qwen"

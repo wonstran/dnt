@@ -55,12 +55,17 @@
 - With a VLM backend and a video, the edits that stay capped below auto-accept without one
   (motion-only ID-switch splits, links across occlusions or with an ambiguous margin, static
   and mixed false-track drops, and rider reclasses without a subtype) are decided by the VLM
-  when it is sure; the rest stay `HUMAN_PENDING`. With `vlm.backend: none` (the default),
-  nothing changes. The `refine` extra now also installs `openai` and `anthropic`; the new
-  `refine-vlm` extra installs just those two.
+  when it is sure; the rest stay `HUMAN_PENDING`. With `vlm.backend: none` (the default), no
+  decision changes, but `refine` now writes the review page (`OUT.review.html`) for the pending
+  events, with their evidence images in `OUT.review/` when a video is given (the video is
+  decoded for those images). `vlm.max_calls` applies to each `refine()` call, so under
+  `refine_batch` it is a budget per video (each video gets its own runner; the answer cache is
+  shared). The `refine` extra now also installs `openai` and `anthropic`; the new `refine-vlm`
+  extra installs just those two.
 - Config validation now rejects bad `vlm` settings: `votes` below 1, `min_conf` outside [0, 1],
   a negative `max_calls`, `max_concurrency` below 1, `timeout_s` or `vote_temperature` out of
-  range, and an empty `cache_dir`.
+  range, an empty `cache_dir`, and an `api_key_env` that is not an environment variable name
+  (a pasted key; the message never repeats the value).
 - The `refine-reid` and `refine` extras now also install `tensorboard`, which PyPI torchreid
   imports but does not declare.
 - `refine` with a video now needs the encoder's package (`pip install 'dnt[refine-dino]'`) or

@@ -787,6 +787,7 @@ class VLMBackend(Protocol):
   - API key from `vlm.api_key_env` (default `OPENAI_API_KEY`, optional for local servers).
   - Sends the image as a base64 data URL.
   - Requests `response_format={"type": "json_object"}` when `vlm.json_mode: true` (the default), and falls back to parsing JSON from the text.
+  - Sends `max_tokens=300` and `temperature`. It targets vLLM, Ollama, and GPT-4-class chat models; reasoning models that reject `max_tokens` or `temperature=0` are not supported by this backend.
   - Extra: `dnt[refine-vlm] = ["openai>=1.40", "anthropic>=0.40"]`.
 - **`anthropic`**
   - Anthropic Messages API, sending the image as a base64 image block.
@@ -799,7 +800,7 @@ class VLMBackend(Protocol):
 
 ### 7.4 Budget, concurrency, caching, failures
 
-- **Budget.** `vlm.max_calls` (default 500) is a hard limit on backend invocations per `refine` run: `calls` + `retries` never exceed it. Each vote that is sent counts one call, and each retry (after a transient failure, or after an invalid reply) counts one retry; cache hits cost nothing.
+- **Budget.** `vlm.max_calls` (default 500) is a hard limit on backend invocations per `refine` run: `calls` + `retries` never exceed it. `refine_batch` calls `refine` once per video, each with its own runner, so there it is a budget per video (the answer cache is shared). Each vote that is sent counts one call, and each retry (after a transient failure, or after an invalid reply) counts one retry; cache hits cost nothing.
   - Whole questions are admitted in priority order, before anything is sent, but within each routing batch, not across the run: the switch stage, the screen stage, and each link pass are routed separately, in that order, and each batch orders its uncertain events by `|algo_score − band midpoint|`, closest first, and admits them against what earlier batches left. This deviates from the original "closest first overall": later stages only exist after earlier stages' edits are applied, so a run-wide order is not possible. With `max_calls: 200` and 250 uncertain switch events, the link questions are all skipped with `budget`, even when closer to their band midpoint. `max_calls` (calls + retries) still holds for the whole run; raise it rather than expect global ordering. Rider-subtype calls come out of the same budget. A question is admitted only if all its uncached votes fit in what is left. A question that does not fit is skipped with `vlm.error: "budget"` and stays `HUMAN_PENDING`; a later question that does fit still runs.
   - Retries draw from the allowance left after admission. When none is left, the event stays `HUMAN_PENDING` with `vlm.error: "budget"`.
   - The summary reports `calls`, `retries`, `budget_skipped`, and `no_evidence` (§8.3).
@@ -817,7 +818,7 @@ class VLMBackend(Protocol):
 
 `OUT.review.html` is a static page, with images in `OUT.review/`. It has one card per `HUMAN_PENDING` event, showing:
 - the evidence image,
-- the kind, reason, tracks, and frames,
+- the kind, reason, tracks (stage-time ids and the output track ids), and frames,
 - `algo_score` and the top signals,
 - the VLM's answer and reason, if there was one,
 - for `LINK` events, the recorded next-best alternatives,

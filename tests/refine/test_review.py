@@ -182,8 +182,7 @@ def test_the_export_button_writes_each_cards_proposal_key_and_the_pages_run_key(
         {"id": b.id, "key": b.proposal_key, "choice": "accept", "cls": "36"},
         {"id": c.id, "key": c.proposal_key, "choice": None, "cls": None},
     ]
-    dom = """
-    var CARDS = %s, exported = [];
+    dom = "var CARDS = " + json.dumps(cards) + """, exported = [];
     function card(d) {
       return {dataset: {id: d.id, key: d.key, stage: "s", score: "0.5"}, style: {},
         querySelector: function (sel) {
@@ -205,7 +204,7 @@ def test_the_export_button_writes_each_cards_proposal_key_and_the_pages_run_key(
     globalThis.localStorage = {getItem: function () { return null; }, setItem: function () {}};
     globalThis.Blob = function (parts) { exported.push(parts.join("")); };
     globalThis.URL = {createObjectURL: function () { return "blob:x"; }};
-    """ % json.dumps(cards)
+    """
     out = subprocess.run(
         [NODE, "-e", dom + script + "\nels.export.onclick(); console.log(exported[0]);"],
         capture_output=True, text=True,
@@ -468,3 +467,12 @@ def test_sorting_can_return_to_the_document_order_and_never_mutates_its_input():
     got = run_node(body)
     assert got == {"desc": ["b", "a", "c"], "asc": ["a", "c", "b"],
                    "order": ["a", "b", "c"], "same": ["a", "b", "c"]}
+
+
+def test_cards_show_the_output_track_ids_and_load_images_lazily(tmp_path):
+    ev = pending(EventKind.LINK, "link", 1, tracks=(1, 2), gap=[50, 60], gate="normal")
+    page = write(tmp_path, [ev], id_map={1: 7, 2: 9}).read_text()
+    assert "output id(s): 7, 9" in page and "tracks [1, 2]" in page
+    assert 'loading="lazy"' in page and re.search(r'<img [^>]*loading="lazy"', page)
+    assert "output id(s): 9<" in write(tmp_path, [ev], id_map={"2": 9}).read_text()
+    assert "output id(s): none" in write(tmp_path, [ev], id_map={}).read_text()
