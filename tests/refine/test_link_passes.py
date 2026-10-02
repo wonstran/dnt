@@ -72,7 +72,7 @@ def test_ambiguous_pair_is_capped_and_lists_its_alternative():
                            route=lambda e: route_without_vlm(e, Band.of(cfg.link)))
     assert len(evs) == 1
     ev = evs[0]
-    assert ev.algo_score == pytest.approx(0.75) and ev.decision is Decision.HUMAN_PENDING
+    assert ev.algo_score == pytest.approx(0.60) and ev.decision is Decision.HUMAN_PENDING
     assert ev.signals["margin"] == pytest.approx(0.0)
     assert len(ev.signals["alternatives"]) == 1
 
@@ -250,13 +250,13 @@ def test_ambiguity_cap_is_applied_just_below_margin_min():
 
 def test_ambiguity_cap_never_raises_a_low_score():
     cap = RefineConfig.defaults().link.ambiguous_cap
-    (ev,) = _assign([_c(1, 2, 0.6), _c(1, 3, 0.58)])
-    assert ev.algo_score == pytest.approx(0.6) and cap > 0.6
+    (ev,) = _assign([_c(1, 2, 0.5), _c(1, 3, 0.48)])
+    assert ev.algo_score == pytest.approx(0.5) and cap > 0.5
 
 
 def test_start_side_competitor_also_makes_a_pair_ambiguous():
     (ev,) = _assign([_c(1, 2, 0.9), _c(3, 2, 0.88)])
-    assert ev.tracks == [1, 2] and ev.algo_score == pytest.approx(0.75)
+    assert ev.tracks == [1, 2] and ev.algo_score == pytest.approx(0.60)
 
 
 def test_alternatives_are_sorted_and_limited_to_n_alternatives():
@@ -609,3 +609,44 @@ def test_legacy_mode_does_not_apply_rejected_matches():
                          occluded=occlusion_flags(w, None, 0.3), route=route)
     assert len(res.events) == n and res.accepted == []
     assert not any(e.applied for e in res.events)
+
+
+# ---- link defaults: accept_above 0.62, ambiguous_cap and occluded_score_cap 0.60 -----------
+
+
+def _plain_pair():
+    """Two fragments of one walker whose link scores about 0.70 (motion only)."""
+    return io.to_work(table(box_rows(1, range(40), 100.0, 100.0),
+                            box_rows(2, range(45, 85), 114.0, 100.0))).work
+
+
+def _routed_stage(w, cfg):
+    return run_link_stage(w, cfg, 25.0, appearance=None, context=None, frame_size=None,
+                          occluded=occlusion_flags(w, None, 0.3),
+                          route=lambda e: route_without_vlm(e, Band.of(cfg.link)))
+
+
+def test_a_plain_link_scoring_between_062_and_080_is_auto_accepted():
+    w = _plain_pair()
+    res = _routed_stage(w, RefineConfig.defaults())
+    (ev,) = res.events
+    assert 0.62 <= ev.algo_score < 0.80 and ev.signals["motion_only"] is True
+    assert ev.decision is Decision.AUTO_ACCEPT and ev.applied and res.accepted == [(1, 2)]
+    old = RefineConfig.defaults()
+    old.link.accept_above, old.link.ambiguous_cap, old.link.occluded_score_cap = 0.80, 0.75, 0.75
+    (ev_old,) = _routed_stage(w, old).events
+    assert ev_old.algo_score == pytest.approx(ev.algo_score)
+    assert ev_old.decision is Decision.HUMAN_PENDING
+
+
+def test_an_ambiguous_link_between_062_and_080_stays_pending():
+    cfg = RefineConfig.defaults()
+    evs = assign_in_passes([_c(1, 2, 0.72), _c(1, 3, 0.70)], cfg, make_event=_make_event,
+                           route=lambda e: route_without_vlm(e, Band.of(cfg.link)))
+    (ev,) = evs
+    assert ev.signals["S_link"] == pytest.approx(0.72) and ev.algo_score == pytest.approx(0.60)
+    assert ev.decision is Decision.HUMAN_PENDING
+    cfg.link.margin_min = 0.0  # the same pair, not ambiguous: auto-accepted
+    (ev,) = assign_in_passes([_c(1, 2, 0.72), _c(1, 3, 0.70)], cfg, make_event=_make_event,
+                             route=lambda e: route_without_vlm(e, Band.of(cfg.link)))
+    assert ev.decision is Decision.AUTO_ACCEPT

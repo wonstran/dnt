@@ -146,7 +146,7 @@ class LinkConfig:
 
     enabled: bool = True
     mode: str = "scored"
-    accept_above: float = 0.80
+    accept_above: float = 0.62
     reject_below: float = 0.40
     max_gap: float = 1.0
     max_gap_static: float = 10.0
@@ -156,9 +156,9 @@ class LinkConfig:
     max_heading_change: float = 120.0
     speed_factor: float = 1.5
     min_feasible_speed: float = 0.5
-    occluded_score_cap: float = 0.75
+    occluded_score_cap: float = 0.60
     margin_min: float = 0.10
-    ambiguous_cap: float = 0.75
+    ambiguous_cap: float = 0.60
     max_passes: int = 3
     weights_occluded: dict[str, float] = field(
         default_factory=lambda: {"mot": 0.25, "app": 0.60, "gap": 0.15}

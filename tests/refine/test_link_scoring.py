@@ -47,7 +47,7 @@ def test_high_cost_pair_merged_by_link_tracklets_is_not_auto_accepted():
     raw = table(box_rows(1, range(40), 100.0, 100.0), box_rows(2, range(45, 85), 125.0, 100.0))
     assert link_tracklets(raw.copy(), verbose=False)["track"].nunique() == 1
     c = _cands(io.to_work(raw).work)[(1, 2)]
-    assert 0.40 <= c.score < 0.80
+    assert 0.40 <= c.score < RefineConfig.defaults().link.accept_above
 
 
 def test_static_gate_links_a_waiting_pedestrian():
@@ -79,7 +79,7 @@ def _turn(truck_frames=range(821, 883), j_start=(160.0, 240.0), j_v=(-5.0, 0.0),
 
 def test_occluded_turn_is_witnessed_and_capped():
     c = _turn()[(1, 2)]
-    assert c.gate == "occluded" and c.score == pytest.approx(0.75)
+    assert c.gate == "occluded" and c.score == pytest.approx(0.60)
     assert c.signals["witness"] == pytest.approx(1.0) and c.signals["occluders"] == [99]
     assert c.signals["heading"] == pytest.approx(33.69, abs=0.1)
 
@@ -367,7 +367,7 @@ def test_occluded_score_cap_and_uncapped_score():
     assert raw.score == pytest.approx(1.0 - cost) and raw.score > 0.75
     assert raw.signals["v_need"] == pytest.approx(72.111 / (50.0 * 6.3), abs=1e-3)
     assert raw.signals["v_ref"] == pytest.approx(1.0)
-    assert _turn()[(1, 2)].score == pytest.approx(0.75)  # default cap
+    assert _turn()[(1, 2)].score == pytest.approx(0.60)  # default cap
     cfg.link.occluded_score_cap = 0.5
     assert _turn_cfg(cfg)[(1, 2)].score == pytest.approx(0.5)
 
@@ -759,3 +759,38 @@ def test_min_score_only_leaves_out_candidates_below_it(seed):
         if appearance is None:
             assert left_out  # the scene has occluded pairs below reject_below
         assert any(r[2] == "occluded" and r[3] >= cfg.link.reject_below for r in rows(pruned))
+
+
+def test_an_occluded_link_between_062_and_080_stays_pending():
+    from dnt.refine.events import Decision
+    from dnt.refine.link import run_link_stage
+    from dnt.refine.verify import Band, route_without_vlm
+
+    rows = [box_rows(1, range(780, 821), 200.0, 500.0, vy=-5.0, w=50.0, h=50.0),
+            box_rows(2, range(883, 921), 160.0, 240.0, vx=-5.0, w=50.0, h=50.0),
+            box_rows(99, range(821, 883), 100.0, 150.0, vx=0.5, w=300.0, h=300.0)]
+    b = 0.7 * A_ + np.sqrt(0.51) * np.eye(8)[1]  # cosine 0.7 with A_: c_app 0.15
+    app = ArrayAppearance({1: (list(range(780, 821)), np.tile(A_, (41, 1))),
+                           2: (list(range(883, 921)), np.tile(b, (38, 1)))})
+    w = _work(*rows)
+
+    def stage(cfg):
+        res = run_link_stage(w, cfg, 10.0, appearance=app, context=None, frame_size=None,
+                             occluded=occlusion_flags(w, None, 0.3),
+                             route=lambda e: route_without_vlm(e, Band.of(cfg.link)))
+        return next(e for e in res.events if e.tracks == [1, 2])
+
+    uncapped = RefineConfig.defaults()
+    uncapped.link.occluded_score_cap = 0.61  # still valid: below accept_above
+    raw = _cands(w, cfg=_no_cap(), fps=10.0, app=app)[(1, 2)].score
+    assert 0.62 <= raw < 0.80
+    ev = stage(RefineConfig.defaults())
+    assert ev.params["gate"] == "occluded" and ev.signals["c_app"] == pytest.approx(0.15)
+    assert ev.algo_score == pytest.approx(0.60) and ev.decision is Decision.HUMAN_PENDING
+    assert stage(uncapped).algo_score == pytest.approx(0.61)
+
+
+def _no_cap():
+    cfg = RefineConfig.defaults()
+    cfg.link.occluded_score_cap = 1.0
+    return cfg

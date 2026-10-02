@@ -35,6 +35,13 @@ Command line: `dnt-refine run TRACKS --fps 10 --config refine.yaml --out clean.c
     file with the vehicles' boxes (`context_file=`, or `--context`); without one the in-vehicle
     cue is skipped. VLM verification and applying review decisions follow in later releases.
 
+## Link band
+
+A link is applied when its score reaches `link.accept_above` (0.62 by default, in motion-only
+mode too). Links across occlusions and links with an ambiguous assignment margin are capped at
+`link.occluded_score_cap` and `link.ambiguous_cap` (0.60 by default), so they stay pending.
+Raise `link.accept_above` to apply fewer links; config validation keeps both caps below it.
+
 ## Appearance
 
 With a video, `refine` also compares what tracks look like. It crops each box, skips crops that

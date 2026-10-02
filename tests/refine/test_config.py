@@ -192,3 +192,24 @@ def test_a_directly_assigned_min_crop_px_is_validated(stage, value):
     getattr(cfg, stage).min_crop_px = value
     with pytest.raises(ValueError, match=rf"{stage}\.min_crop_px must be a whole number of pixels"):
         cfg.validate()
+
+
+
+# ---- link defaults ---------------------------------------------------------------------------
+
+
+def test_link_band_defaults():
+    lc = RefineConfig.defaults().link
+    assert (lc.accept_above, lc.reject_below) == (0.62, 0.40)
+    assert lc.ambiguous_cap == 0.60 and lc.occluded_score_cap == 0.60
+
+
+@pytest.mark.parametrize("data, match", [
+    ({"link": {"ambiguous_cap": 0.62}}, "ambiguous_cap"),
+    ({"link": {"occluded_score_cap": 0.62}}, "occluded_score_cap"),
+    ({"link": {"accept_above": 0.60}}, "must be below link.accept_above"),
+])
+def test_link_caps_must_stay_below_the_new_accept_above(data, match):
+    with pytest.raises(ValueError, match=match):
+        RefineConfig.from_dict(data)
+    RefineConfig.from_dict({"link": {"ambiguous_cap": 0.61, "occluded_score_cap": 0.61}})

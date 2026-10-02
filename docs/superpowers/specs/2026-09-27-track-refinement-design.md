@@ -375,9 +375,9 @@ For each stage, `accept_above` and `reject_below`, with `reject_below < accept_a
 **Exceptions**
 - **Static screen.** The static-object score is capped at `screen.static_score_cap` (default 0.80). Keep the cap below `screen.accept_above`, so static tracks never auto-drop (§6.2).
 - **Rider subtype.** A `RECLASS` whose rider score is `AUTO_ACCEPT` still needs one VLM call to choose the subtype, unless a ReClass hint has already settled it (§6.2). That call only picks the subtype and cannot overturn the rider decision. If the VLM answers with a non-rider option (for example `pedestrian`), the algorithm and the VLM disagree, and the event becomes `HUMAN_PENDING`. It also becomes `HUMAN_PENDING` if `params.new_cls` is still `None` after verification.
-- **Link ambiguity.** In stage 3, a pair whose margin over the next-best alternative is below `link.margin_min` (default 0.1) is capped at `link.ambiguous_cap` (default 0.75, below `link.accept_above`). An ambiguous pair is never auto-accepted. Ambiguity alone also never auto-rejects a pair: if its score reaches `reject_below`, it goes to the VLM (§6.3).
+- **Link ambiguity.** In stage 3, a pair whose margin over the next-best alternative is below `link.margin_min` (default 0.1) is capped at `link.ambiguous_cap` (default 0.60, below `link.accept_above`). An ambiguous pair is never auto-accepted. Ambiguity alone also never auto-rejects a pair: if its score reaches `reject_below`, it goes to the VLM (§6.3).
 - **Mixed screen.** A partial `DROP` or `RECLASS` (§6.2) is capped at `screen.mixed_score_cap` (default 0.75), so it is never auto-applied.
-- **Occluded link.** A link through the occlusion-witness gate (§6.3) is capped at `link.occluded_score_cap` (default 0.75). Keep the cap below `link.accept_above`, so these links are never auto-accepted. Waiting in a queue also produces occlusion, so a witness makes a link plausible, not certain.
+- **Occluded link.** A link through the occlusion-witness gate (§6.3) is capped at `link.occluded_score_cap` (default 0.60). Keep the cap below `link.accept_above`, so these links are never auto-accepted. Waiting in a queue also produces occlusion, so a witness makes a link plausible, not certain.
 
 ## 5. Shared primitives
 
@@ -895,7 +895,7 @@ switch:
 link:
   enabled: true
   mode: scored               # scored | legacy (§6.3)
-  accept_above: 0.80
+  accept_above: 0.62         # 0.80 before; see the note below the block
   reject_below: 0.40
   max_gap: 1.0               # seconds
   max_gap_static: 10.0       # seconds
@@ -905,9 +905,9 @@ link:
   max_heading_change: 120    # degrees
   speed_factor: 1.5
   min_feasible_speed: 0.5    # h/s
-  occluded_score_cap: 0.75
+  occluded_score_cap: 0.60
   margin_min: 0.10
-  ambiguous_cap: 0.75
+  ambiguous_cap: 0.60
   max_passes: 3
   weights_occluded: {mot: 0.25, app: 0.60, gap: 0.15}
   class_groups: []           # vehicle default: [[2, 7]]
@@ -944,6 +944,8 @@ vlm:
   send_context_frames: true
   cache_dir: ~/.cache/dnt/vlm
 ```
+
+The link band was lowered from `accept_above: 0.80` (caps 0.75) after a review of three real 640x480 pedestrian clips: of eleven pending links scoring 0.63-0.75, nine looked correct. The caps stay below `accept_above`, so occluded and ambiguous links still never auto-accept. The same band applies in motion-only mode, where the score is renormalized without appearance.
 
 **Validation, run when the config loads**
 - `0 ≤ reject_below < accept_above ≤ 1` for every stage.

@@ -49,6 +49,15 @@
   proposed), while most links scored from small crops were correct. The feature cache key now
   includes the smaller of the two values and `FEATURES_VERSION` is 3, so caches of earlier runs
   are recomputed.
+- Stage 3 applies more links: `link.accept_above` is 0.62 (was 0.80), and `link.ambiguous_cap`
+  and `link.occluded_score_cap` are 0.60 (were 0.75). On three real pedestrian clips, nine of
+  eleven pending links scoring 0.63-0.75 looked correct on review; with the new defaults eight
+  of the eleven are applied. Of the other three, one has an ambiguous margin and stays pending,
+  and two only re-joined pedestrians cut by wrong ID-switch splits, which are no longer made.
+  Links across occlusions and links with an ambiguous assignment margin still stay pending,
+  because their caps stay below the threshold. The new threshold applies in motion-only mode
+  too (`encoder.kind: none`, or no video), where the score is renormalized without appearance;
+  on the three clips it applied one more link there.
 
 ## 0.3.4 — 2026-10-01
 
