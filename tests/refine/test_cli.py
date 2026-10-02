@@ -353,3 +353,24 @@ def test_missing_encoder_package_is_a_clean_error(tmp_path, capsys, synthetic_vi
     )
     assert code == 2 and "refine-dino" in err and stdout == ""
     assert not (tmp_path / "o.txt").exists()
+
+
+def test_a_hub_download_failure_is_a_clean_error(tmp_path, capsys, synthetic_video, monkeypatch):
+    from ._fakes import install_fake_transformers
+
+    install_fake_transformers(monkeypatch)
+
+    def offline(source):
+        raise OSError(f"We couldn't connect to 'https://huggingface.co' to load {source}")
+
+    monkeypatch.setattr(sys.modules["transformers"].AutoModel, "from_pretrained", offline)
+    video, _ = synthetic_video
+    src = tmp_path / "t.txt"
+    table(box_rows(1, range(100), 10.0, 40.0, vx=1.5)).to_csv(src, index=False, header=False)
+    code, stdout, err = _main(
+        capsys, "run", src, "--video", video, "--config", _cfg(tmp_path, kind="dino"),
+        "--out", tmp_path / "o.txt",
+    )
+    assert code == 2 and stdout == ""
+    assert "dnt-refine: error: We couldn't connect to 'https://huggingface.co'" in err
+    assert "Traceback" not in err and not (tmp_path / "o.txt").exists()

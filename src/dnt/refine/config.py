@@ -299,7 +299,13 @@ class RefineConfig:
         Path(path).write_text(yaml.safe_dump(self.to_dict(), sort_keys=False), encoding="utf-8")
 
     def validate(self) -> None:
-        """Raise ValueError listing every rule of spec 9 the config breaks."""
+        """Raise ValueError listing every rule of spec 9 the config breaks.
+
+        An empty ``encoder.weights`` (``""`` from YAML) is first set to ``None``: the default
+        weights.
+        """
+        if isinstance(self.encoder.weights, str) and not self.encoder.weights.strip():
+            self.encoder.weights = None
         p: list[str] = []
         if self.target not in TARGETS:
             p.append(f"target must be one of {TARGETS}")

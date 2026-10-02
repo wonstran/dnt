@@ -94,6 +94,14 @@ def test_dino_weights_override_the_model_id(fake_transformers, tmp_path):
     assert enc.weights_sha == parameters_digest(enc._model) and len(enc.weights_sha) == 64
 
 
+def test_a_half_precision_checkpoint_is_run_in_float32(fake_transformers):
+    fake_transformers["half"] = True
+    enc = DinoEncoder("m", None, "cpu", 2)
+    assert {p.dtype for p in enc._model.parameters()} == {torch.float32}
+    e = enc.encode([RED, BLUE])  # float32 pixels through a float16 model would fail
+    assert e.dtype == np.float32 and np.allclose(np.linalg.norm(e, axis=1), 1.0, atol=1e-5)
+
+
 def test_dino_weights_sha_identifies_the_loaded_parameters(fake_transformers):
     a = DinoEncoder("facebook/dinov2-small", None, "cpu", 2)
     again = DinoEncoder("facebook/dinov2-small", None, "cpu", 2)
@@ -210,3 +218,21 @@ def test_make_encoder_reid_for_a_vehicle_uses_the_given_weights(fake_torchreid, 
     w.write_bytes(b"v")
     enc = make_encoder(EncoderConfig(kind="reid", weights=str(w), device="cpu"), "vehicle")
     assert fake_torchreid["model_path"] == str(w) and enc.weights_sha == weights_digest(w)
+
+
+def test_empty_weights_from_yaml_mean_the_default_weights(fake_torchreid, tmp_path):
+    from dnt.refine.config import RefineConfig
+    from dnt.refine.encoders import weights_identity
+    from dnt.refine.refiner import TrackRefiner
+
+    path = tmp_path / "c.yaml"
+    path.write_text("encoder:\n  kind: reid\n  weights: ''\n  device: cpu\n")
+    cfg = RefineConfig.from_yaml(path)
+    assert cfg.encoder.weights is None
+    default = default_reid_weights()
+    assert weights_identity(cfg.encoder, "person") == weights_digest(default)
+    enc = make_encoder(cfg.encoder, "person")
+    assert fake_torchreid["model_path"] == str(default) and enc.weights_sha == weights_digest(default)
+    built = RefineConfig.defaults()
+    built.encoder.weights = ""
+    assert TrackRefiner(config=built).config.encoder.weights is None

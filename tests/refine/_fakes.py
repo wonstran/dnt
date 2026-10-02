@@ -34,16 +34,18 @@ class _FakeDino(torch.nn.Module):
 def install_fake_transformers(monkeypatch):
     """Install a fake ``transformers``; set ``seen["seed"]`` to change what the model name loads.
 
-    ``seen["batches"]`` collects the batch size of every forward pass.
+    ``seen["batches"]`` collects the batch size of every forward pass; ``seen["half"]`` makes
+    the loaded model half precision.
     """
-    seen = {"seed": 0, "loads": 0, "batches": []}
+    seen = {"seed": 0, "loads": 0, "batches": [], "half": False}
 
     class AutoModel:
         @staticmethod
         def from_pretrained(source):
             seen["source"] = source
             seen["loads"] += 1
-            return _FakeDino(seen["seed"], seen["batches"])
+            model = _FakeDino(seen["seed"], seen["batches"])
+            return model.half() if seen["half"] else model  # a half-precision checkpoint
 
     mod = _module("transformers")
     mod.AutoModel = AutoModel

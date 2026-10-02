@@ -128,6 +128,11 @@ class VideoAppearance:
             emb = self.encoder.encode(chunk)
             if len(emb) != len(chunk):
                 raise ValueError(f"encoder returned {len(emb)} embeddings for {len(chunk)} crops")
+            bad = int((~np.isfinite(np.asarray(emb, dtype=np.float32)).all(axis=1)).sum())
+            if bad:
+                raise ValueError(
+                    f"encoder returned {bad} non-finite embedding(s) for {len(chunk)} crops"
+                )
             for (raw_id, frame), e in zip(owners[i : i + self.batch_size], emb, strict=True):
                 self.store.put(raw_id, frame, e)
         crops.clear()

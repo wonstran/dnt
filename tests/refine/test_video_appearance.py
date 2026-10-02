@@ -266,6 +266,26 @@ def test_an_encoder_returning_the_wrong_row_count_stores_nothing_of_that_chunk(t
     assert len(store) == 4  # the first, whole chunk only; nothing of the failed one
 
 
+class _NaNEncoder(ColorEncoder):
+    """Returns a NaN row and an inf row on its second call."""
+
+    def encode(self, crops):
+        out = super().encode(crops)
+        if self.calls == 2:
+            out[0, 0], out[1, 2] = np.nan, np.inf
+        return out
+
+
+def test_non_finite_embeddings_are_rejected_and_never_stored(tmp_path):
+    app, _, store, _ = _make(
+        tmp_path, [_walker(1, range(12))], [RED], every=1, batch=4, enc=_NaNEncoder()
+    )
+    with pytest.raises(ValueError, match="2 non-finite embedding"):
+        app.clean_embeddings(1, 0, 11)
+    assert len(store) == 4  # the first chunk only; nothing of the one with NaN/inf rows
+    assert all(np.isfinite(store.get(1, [f])).all() for f in range(4))
+
+
 def test_a_retry_after_a_failed_chunk_embeds_only_the_missing_samples(tmp_path):
     app, _, store, _ = _make(
         tmp_path, [_walker(1, range(12))], [RED], every=1, batch=4, enc=_ShortEncoder(fail_on=2)

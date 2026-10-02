@@ -72,7 +72,8 @@ class DinoEncoder:
         self.model_name = model
         self.device = resolve_device(device)
         self.batch_size = max(1, int(batch_size))
-        loaded = AutoModel.from_pretrained(weights or model).eval()
+        # float32 even for a half-precision checkpoint: encode() feeds float32 pixels
+        loaded = AutoModel.from_pretrained(weights or model).eval().float()
         # identify what the name resolved to, so a Hub model that changes under the same name
         # makes the feature cache miss
         self.weights_sha = parameters_digest(loaded)
