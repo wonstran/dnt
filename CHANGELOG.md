@@ -45,12 +45,16 @@
   `TrackRefiner(..., vlm_api_key=...)`, else from the file `vlm.api_key_file` names, else from
   the variable `vlm.api_key_env` names (`OPENAI_API_KEY` or `ANTHROPIC_API_KEY` by default); it
   must be one line of printable ASCII without whitespace (a key file's surrounding whitespace and
-  byte order mark are stripped; a `NAME=value` line is rejected), and it is never written to the
-  config, the ledger, the summary, or a log line. `openai_compat` without `base_url` and without
+  byte order mark are stripped; a quoted key and a `NAME=value`, `NAME=` or `NAME==value` line
+  are rejected), and it is never written to the config, the ledger, the summary, or a log line.
+  This also applies to the default `OPENAI_API_KEY` and `ANTHROPIC_API_KEY` variables: a value
+  with internal whitespace, a newline, quotes, or non-ASCII characters is now an error when the
+  backend is built at the start of `refine` (a blank value counts as unset). `openai_compat` without `base_url` and without
   a key now fails before the run instead of calling api.openai.com with a placeholder.
   `dnt-refine run` takes `--vlm-backend`, `--vlm-model`, `--vlm-base-url`, `--vlm-api-key-env`,
   and `--vlm-api-key-file`, applied to the `--config` file before it is checked; switching the
-  backend with `--vlm-backend` drops the file's `model`, `base_url`, and key settings. There is
+  backend with `--vlm-backend` drops the file's `model`, `base_url`, and key settings (a file
+  without a `backend` counts as `none`). There is
   deliberately no option for the key itself (shell history, process list).
 - This release scores with motion only unless a video and an appearance encoder are given, and
   applies only the edits it is sure of: in-vehicle and duplicate false-track drops, rider

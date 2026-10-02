@@ -196,12 +196,15 @@ vlm:
 
 A key can also live in a file. Surrounding whitespace (such as a trailing newline or CRLF)
 and a UTF-8 byte order mark are stripped and `~` is expanded. The file must hold the key alone:
-one line of printable ASCII without whitespace, not a `NAME=value` line or a comment (at most
-64 KiB is read). The same rule applies to a key from Python or from the environment (a blank
+one line of printable ASCII without whitespace, not wrapped in quotes, and not a `NAME=value`,
+`NAME=`, or `NAME==value` line or a comment (at most 64 KiB is read; trailing base64 `=`
+padding is fine). The same rule applies to a key from Python or from the environment (a blank
 variable counts as unset); a key that breaks it is an error naming the file, argument or
 variable, never the key. The path goes into the ledger; the content never does. The file is
-read once per `refine()` call, so once per video under `refine_batch`; a one-shot source such
-as `/dev/stdin` works for a single video only:
+read once per `refine()` call, when the backend is built at its start (with a video), so once
+per video under `refine_batch`; a one-shot source such as `/dev/stdin` works for a single video
+only. A named pipe (FIFO) is read at that moment too: if no program has it open for writing
+then, it reads as empty, which is an error:
 
 ```yaml
 vlm:
@@ -225,7 +228,10 @@ template without one). An empty value, such as `--vlm-base-url ""`, resets the f
 not given leaves the file's value. When `--vlm-backend` names a different backend than the file,
 the file's `model`, `base_url`, `api_key_env`, and `api_key_file` belong to the other backend
 and are not used (give them again with their flags if you want them): a vLLM file run with
-`--vlm-backend anthropic` never sends the Anthropic key to the vLLM server. The ledger header
+`--vlm-backend anthropic` never sends the Anthropic key to the vLLM server. A file without a
+`backend` (or with `backend: null`) counts as `none`, so enabling a template with
+`--vlm-backend X` also drops the template's `model`, `base_url`, and key settings unless their
+flags are given too; an INFO line names the fields that were dropped. The ledger header
 records the settings in effect:
 
 ```bash
