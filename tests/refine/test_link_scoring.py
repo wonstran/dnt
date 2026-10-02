@@ -637,13 +637,14 @@ def test_zero_occluded_motion_weights_are_rejected_in_motion_only_mode():
 
 def test_occluded_size_gate_compares_the_unoccluded_boxes():
     # i's last two boxes are partial (20x20 instead of 50x50) and overlap a context box with
-    # IoU 0.48, so they are occluded (spec 5.3); the size gate uses i's last clean box
+    # IoU 0.45, so they are occluded (spec 5.3); the size gate uses i's last clean box. The
+    # IoU is below primitives.CONTEXT_MATCH_IOU, so the box is not the rows' own detection.
     ends = [[f, 1, 215.0, 500.0 - 5.0 * (f - 780) + 15.0, 20.0, 20.0, 0.9, 0, -1, -1]
             for f in (819, 820)]
     w = _work(box_rows(1, range(780, 819), 200.0, 500.0, vy=-5.0, w=50.0, h=50.0), ends,
               box_rows(2, range(883, 900), 160.0, 240.0, w=50.0, h=50.0),
               box_rows(99, range(821, 900), 100.0, 150.0, vx=0.5, w=300.0, h=300.0))
-    ctx_rows = table([[f, 7, 222.0, 500.0 - 5.0 * (f - 780) + 15.0, 20.0, 20.0, 0.9, 9, -1, -1]
+    ctx_rows = table([[f, 7, 223.0, 500.0 - 5.0 * (f - 780) + 15.0, 20.0, 20.0, 0.9, 9, -1, -1]
                       for f in (819, 820)])
     ctx = ctx_rows[["frame", "track", "x", "y", "w", "h", "cls"]]
     cfg = RefineConfig.defaults()

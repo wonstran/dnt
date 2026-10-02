@@ -1149,20 +1149,31 @@ def test_fill_max_gap_null_falls_back_to_link_max_gap(tmp_path):
 # ---- final review I3 (R22): a same-run detection file as context -----------------------------
 
 
-def _beside_the_path(tmp_path, shift):
+def _beside_the_path(tmp_path, shift, extra=None):
     """Tracks 1 and 2 are one pedestrian with a 30-frame gap; pedestrian 3 walks beside the path.
 
     Track 3's box covers 48% of each hidden box of the gap, below ``link.witness_iob``. The
     context is a detection file of the same run: every row's box, with track 3's detections
-    ``shift`` px closer to the path.
+    ``shift`` px closer to the path. With ``extra``, every frame of track 3 also has a second
+    box ``extra`` px from track 3's box.
     """
     t = table(box_rows(1, range(60, 101), 20.0, 100.0, vx=2.0, w=50.0, h=50.0)
               + box_rows(2, range(131, 170), 162.0, 100.0, vx=2.0, w=50.0, h=50.0)
               + box_rows(3, range(60, 171), 46.0, 100.0, vx=2.0, w=50.0, h=50.0))
     dets = pd.DataFrame({"frame": t.frame, "res": -1, "x": t.x + (t.track == 3) * shift,
                          "y": t.y, "w": t.w, "h": t.h, "conf": 0.9, "cls": t.cls})
-    d = tmp_path / f"shift{-shift:g}"
+    if extra is not None:
+        dets = pd.concat([dets, dets[t.track == 3].assign(x=t.x[t.track == 3] + extra)],
+                         ignore_index=True)
+    d = tmp_path / f"shift{-shift:g}_{extra}"
     return _refine(_write(d, t), d / "o.txt", fps=10, context_file=_write(d, dets, "dets.txt"))
+
+
+def _witnessed(res):
+    (link,) = _by(res, "link")
+    assert link.tracks == [1, 2] and link.params["gate"] == "occluded"
+    assert link.signals["witness"] == pytest.approx(1.0) and link.signals["occluders"] == [-1]
+    assert link.decision is Decision.HUMAN_PENDING
 
 
 def test_own_detections_in_the_context_do_not_witness_an_occlusion(tmp_path):
@@ -1172,12 +1183,18 @@ def test_own_detections_in_the_context_do_not_witness_an_occlusion(tmp_path):
     assert Ledger.read(res.ledger_path).header["inputs"]["context"]["format"] == "dets"
     assert _by(res, "link") == []
     assert res.tracks["track"].nunique() == 3
-    # 8 px closer: IoU 0.73, a different box (a genuine occluder) -> the gap is witnessed
-    res = _beside_the_path(tmp_path, -8.0)
-    (link,) = _by(res, "link")
-    assert link.tracks == [1, 2] and link.params["gate"] == "occluded"
-    assert link.signals["witness"] == pytest.approx(1.0) and link.signals["occluders"] == [-1]
-    assert link.decision is Decision.HUMAN_PENDING
+    # 12 px closer: IoU 0.62, still track 3's own detection (one-to-one match at IoU >= 0.5,
+    # ruling R6; the old 0.9 cutoff took it for an occluder)
+    assert _by(_beside_the_path(tmp_path, -12.0), "link") == []
+    # 20 px closer: IoU 0.44, a different box (a genuine occluder) -> the gap is witnessed
+    _witnessed(_beside_the_path(tmp_path, -20.0))
+
+
+def test_a_second_box_over_a_row_with_its_own_detection_still_witnesses(tmp_path):
+    # track 3's own detection is exact; another box 12 px closer to the path (IoU 0.62 with
+    # track 3, 73% over each hidden box) is not track 3's: it witnesses the gap. Stage 3 must
+    # not match it again against the edited rows once the own detection is gone.
+    _witnessed(_beside_the_path(tmp_path, 0.0, extra=-12.0))
 
 
 def test_screening_cues_still_see_context_boxes_that_duplicate_a_row(tmp_path):
