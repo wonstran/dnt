@@ -9,11 +9,13 @@ from dnt.refine.switch import (
     _dense_rescore,
     _merge_dense,
     _relocate,
+    _sides_ok,
     _silhouette,
+    _span,
     propose_splits,
 )
 
-from ._fixtures import box_rows, table
+from ._fixtures import box_rows, random_tracks, table
 
 FPS = 10.0
 A_, B_ = np.eye(8)[0], np.eye(8)[1]
@@ -209,3 +211,97 @@ def test_dense_samples_are_merged_into_the_track_samples():
     ef = info["ef"]
     assert len(ef) > before and 33 in ef and list(ef) == sorted(set(ef.tolist()))
     assert len(info["emb"]) == len(ef)
+
+
+@pytest.mark.parametrize("gap", [12, 20, 40])
+@pytest.mark.parametrize("every", [5, 1])
+def test_a_switch_across_an_occlusion_gap_is_kept(gap, every):
+    """The first row after a long gap has no dense 'before' window; its coarse score must count."""
+    frames = [f for f in range(140) if not (56 <= f < 56 + gap)]
+    work = _work(box_rows(1, frames, 100.0, 100.0, vx=2.0))
+    rng = np.random.default_rng(gap)
+    emb = np.array([A_ if f < 56 else B_ for f in frames]) + rng.normal(0, 0.05, (len(frames), 8))
+    emb /= np.linalg.norm(emb, axis=1, keepdims=True)
+    cfg = RefineConfig.defaults()
+    plain = propose_splits(work, cfg, FPS, ArrayAppearance({1: (frames, emb)}))
+    dense = propose_splits(work, cfg, FPS, CoarseArrayAppearance({1: (frames, emb)}, every=every))
+    assert plain.events and plain.events[0].params["cut_frame"] == 56 + gap
+    got = [(e.params["cut_frame"], e.algo_score) for e in dense.events]
+    assert got == pytest.approx([(e.params["cut_frame"], e.algo_score) for e in plain.events])
+    assert dense.candidates[1] == plain.candidates[1]
+
+
+@pytest.mark.parametrize("seed", range(15))
+def test_dense_every_frame_matches_the_plain_provider_on_random_tracks(seed):
+    rng = np.random.default_rng(seed)
+    work = io.to_work(random_tracks(seed, n_objects=25, n_frames=300)).work
+    tab = {}
+    for rid, g in work.groupby("raw_id"):
+        f = np.sort(g["frame"].to_numpy(int))
+        e = rng.normal(size=8) + rng.normal(0, 0.5, (len(f), 8))
+        if len(f) > 30 and rng.random() < 0.6:
+            k = int(rng.integers(10, len(f) - 10))
+            e[k:] = rng.normal(size=8) + rng.normal(0, 0.5, (len(f) - k, 8))
+        tab[int(rid)] = (f, e)
+    cfg = RefineConfig.defaults()
+    a = propose_splits(work, cfg, FPS, ArrayAppearance(tab))
+    b = propose_splits(work, cfg, FPS, CoarseArrayAppearance(tab, every=1))
+    assert a.candidates == b.candidates and a.weak_cuts == b.weak_cuts
+    got = [(e.params["cut_frame"], e.algo_score) for e in b.events]
+    assert got == pytest.approx([(e.params["cut_frame"], e.algo_score) for e in a.events])
+
+
+def test_relocate_without_a_baseline_returns_the_candidate_and_writes_nothing():
+    info, emb = _crafted(40, (12,), [10])
+    info["med"] = float("nan")
+    sc = RefineConfig.defaults().switch
+    assert _relocate(info, 10, sc, 5, 15, 5, np.arange(40), emb, lambda j: True) == 10
+    assert info["S"][12] == 0.0 and info["A"][12] == 0.0
+
+
+def test_relocate_keeps_the_candidate_row_when_it_has_no_dense_side_means():
+    info, emb = _crafted(40, (12,), [10])
+    info["A"][10] = 0.9
+    sc = RefineConfig.defaults().switch
+    ef = np.arange(40)
+    # dense samples cover only the right of row 10, so its 'before' window is empty
+    keep = ef >= 10
+    got = _relocate(info, 10, sc, 5, 15, 5, ef[keep], emb[keep], lambda j: j in (10, 5))
+    assert got == 10 and info["S"][10] == 0.65 and info["A"][10] == 0.9
+    assert info["S"][5] == 0.0  # the other row was rescored to 0 and lost
+
+
+def test_relocate_ties_go_to_the_nearest_then_the_earliest_row():
+    info, emb = _crafted(40, (), [20])  # no change anywhere: every row scores the same
+    sc = RefineConfig.defaults().switch
+    ef = np.arange(40)
+    assert _relocate(info, 20, sc, 15, 25, 5, ef, emb, lambda j: j in (17, 21)) == 21
+    assert _relocate(info, 20, sc, 15, 25, 5, ef, emb, lambda j: j in (19, 21)) == 19
+
+
+def test_span_starts_at_row_one_and_stops_at_the_last_row():
+    info, _ = _crafted(40, (), [])
+    assert _span(info, 2, 5, 5)[:2] == (1, 7)
+    assert _span(info, 38, 5, 5)[:2] == (33, 39)
+
+
+def test_sides_ok_checks_each_side_on_its_own():
+    info, _ = _crafted(45, (), [])  # coarse samples at 0, 5, ..., 40
+    assert _sides_ok(info, 22, 10.0, 1.0)
+    assert not _sides_ok(info, 3, 10.0, 1.0)  # only the left side is short
+    assert not _sides_ok(info, 43, 10.0, 1.0)  # only the right side is short
+
+
+def test_relocate_returns_the_candidate_when_no_row_is_eligible():
+    info, emb = _crafted(40, (12,), [10])
+    sc = RefineConfig.defaults().switch
+    assert _relocate(info, 10, sc, 5, 15, 5, np.arange(40), emb, lambda j: False) == 10
+    assert info["S"][12] == 0.0
+
+
+def test_relocate_counts_the_bimodal_split_score_of_a_row():
+    info, emb = _crafted(40, (), [10])  # the embedding never changes
+    info["bim"][13] = 1.0
+    sc = RefineConfig.defaults().switch
+    assert _relocate(info, 10, sc, 5, 15, 5, np.arange(40), emb, lambda j: True) == 13
+    assert info["S"][13] == pytest.approx(sc.w_app)

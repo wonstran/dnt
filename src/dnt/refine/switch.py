@@ -284,7 +284,10 @@ def _lineage_windows(lin, f0: int, f1: int) -> list[tuple[int, int, int]]:
 
 
 def _span(info, i: int, radius: int, w: int) -> tuple[int, int, int, int]:
-    """Rows ``lo..hi`` around candidate row ``i``, and the frame range their sides need."""
+    """Rows ``lo..hi`` around candidate row ``i``, and the frame range their sides need.
+
+    ``radius`` counts observed rows, so across a gap the rows can span more frames than it.
+    """
     fr = info["frames"]
     lo, hi = max(1, i - radius), min(len(fr) - 1, i + radius)
     return lo, hi, int(fr[lo]) - w, int(fr[hi]) + w - 1
@@ -296,6 +299,9 @@ def _relocate(info, i: int, sc, lo: int, hi: int, w: int, ef_d, emb_d, eligible)
     The best row has the highest ``S``, then the highest raw appearance change (``S`` saturates
     for strong changes), then the smallest distance from ``i``, then the earliest frame.
     ``eligible(j)`` says whether a row may hold the cut; the original row ``i`` always may.
+    The search radius counts observed rows, so across a gap it can span more frames than the
+    NMS spacing; this is why ``eligible`` checks the spacing explicitly. A row without dense side
+    means is skipped, except row ``i``, which then competes with its stored coarse values.
     """
     if not np.isfinite(info["med"]):
         return i
@@ -305,6 +311,10 @@ def _relocate(info, i: int, sc, lo: int, hi: int, w: int, ef_d, emb_d, eligible)
             continue
         m = _side_means(ef_d, emb_d, int(info["frames"][j]), w)
         if m is None:
+            if j == i:  # no dense side means (e.g. just after a gap): keep the coarse values
+                key = (float(info["S"][i]), float(info["A"][i]), 0, -i)
+                if best is None or key > best[0]:
+                    best = (key, i, None)
             continue
         a = 1.0 - float(m[0] @ m[1])
         z = (a - info["med"]) / (1.4826 * info["mad"] + sc.mad_floor)
@@ -313,10 +323,13 @@ def _relocate(info, i: int, sc, lo: int, hi: int, w: int, ef_d, emb_d, eligible)
         s = (sc.w_app * app + sc.w_mot * float(info["mot"][j])) if gate else 0.0
         key = (s, a, -abs(j - i), -j)
         if best is None or key > best[0]:
-            best = (key, j, a, z, app, s)
+            best = (key, j, (a, z, app, s))
     if best is None:
         return i
-    _, j, a, z, app, s = best
+    _, j, vals = best
+    if vals is None:  # row i won on its stored coarse values: nothing to write back
+        return i
+    a, z, app, s = vals
     info["A"][j], info["z"][j], info["app"][j], info["S"][j] = a, z, app, s
     return j
 
@@ -354,7 +367,11 @@ def _dense_rescore(appearance, infos, cands, cfg: RefineConfig, w: int, fps: flo
     """Rescore each candidate on dense embeddings and move it to its best row (spec 5.3).
 
     A move must keep the rules that chose the candidate: ``switch.min_side_seconds`` of samples
-    on each side, and ``nms`` frames from every other candidate of the track.
+    on each side, and ``nms`` frames from every other candidate of the track. The search radius
+    counts observed rows, so across a gap it can span more frames than ``nms``, which is why the
+    spacing is checked explicitly. ``info["samples"]`` must stay the COARSE sample array while
+    candidates move (``_sides_ok`` relies on it): the dense samples are merged into
+    ``info["ef"]``/``info["emb"]`` only after a track's loop.
     """
     if appearance is None or not hasattr(appearance, "dense_embeddings"):
         return
