@@ -71,7 +71,7 @@ def load_config(args: argparse.Namespace) -> RefineConfig:
         vlm = {} if vlm is None else vlm
         if isinstance(vlm, Mapping):  # anything else is reported by from_dict
             vlm = dict(vlm)
-            old_backend = vlm.get("backend", "none")
+            old_backend = vlm.get("backend") or "none"  # no backend (or null): none
             if "backend" in given and given["backend"] != old_backend:
                 dropped = [k for k in _BACKEND_BOUND if k in vlm and k not in given]
                 for k in dropped:

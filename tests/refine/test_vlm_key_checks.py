@@ -4,6 +4,9 @@ import json
 import logging
 import os
 import re
+import subprocess
+import sys
+import threading
 
 import pytest
 
@@ -82,15 +85,103 @@ def test_a_malformed_key_file_is_rejected_by_reason_without_the_content(
         assert tok not in msg, tok
 
 
+@pytest.mark.parametrize(
+    ("content", "reason"),
+    [
+        ('"sk-Quoted1Part"', "wrapped in quotes"),
+        ("'sk-Quoted2Part'", "wrapped in quotes"),
+        ("OPENAI_API_KEY=", "NAME=value"),
+        ("API_KEY=", "NAME=value"),  # 8 characters, but a variable name, not base64
+        ("export OPENAI_API_KEY=", "NAME=value"),
+        ("MYKEY==sk-Double9Eq", "NAME=value"),
+        ("Short1Key=", "NAME=value"),  # not a multiple of 4: not base64 padding
+    ],
+)
+def test_quoted_keys_and_empty_or_doubled_assignments_are_rejected(
+    monkeypatch, tmp_path, content, reason
+):
+    install_fake_anthropic(monkeypatch, [GOOD])
+    f = tmp_path / "vlm.key"
+    f.write_text(content + "\n")
+    with pytest.raises(ValueError, match=re.escape(reason)) as err:
+        make_backend(anthropic_cfg(api_key_file=str(f)))
+    for tok in tokens(content):
+        assert tok not in str(err.value), tok
+
+
+@pytest.mark.parametrize("key", ["QUJDREVGR0g=", "QUJDREVGRw==", "sk-proj-Abc4=", "abcdefg="])
+def test_trailing_base64_padding_is_allowed(monkeypatch, tmp_path, key):
+    seen = install_fake_anthropic(monkeypatch, [GOOD])
+    f = tmp_path / "vlm.key"
+    f.write_text(key + "\n")
+    make_backend(anthropic_cfg(api_key_file=str(f)))
+    assert seen["client_kwargs"]["api_key"] == key
+
+
+def test_quoted_env_and_runtime_keys_are_rejected(monkeypatch):
+    install_fake_anthropic(monkeypatch, [GOOD])
+    monkeypatch.setenv("ANTHROPIC_API_KEY", '"sk-QuotedEnv1"')
+    with pytest.raises(ValueError, match="ANTHROPIC_API_KEY environment variable is wrapped"):
+        make_backend(anthropic_cfg())
+    with pytest.raises(ValueError, match="vlm_api_key argument is wrapped") as err:
+        TrackRefiner(vlm_api_key="'sk-QuotedArg2'")
+    assert "QuotedArg2" not in str(err.value)
+
+
+@pytest.mark.parametrize(
+    "case", ["not_utf8", "oversized", "missing", "directory", "empty", "multi_line", "quoted"]
+)
+def test_key_file_errors_carry_no_exception_context(monkeypatch, tmp_path, case):
+    # a chained UnicodeDecodeError's .object would hold the file's bytes (the key)
+    install_fake_anthropic(monkeypatch, [GOOD])
+    f = tmp_path / "vlm.key"
+    if case == "not_utf8":
+        f.write_bytes(b"\xff" + KEY.encode())
+    elif case == "oversized":
+        f.write_bytes(KEY.encode() * 5000)
+    elif case == "directory":
+        f.mkdir()
+    elif case == "empty":
+        f.write_text(" \n")
+    elif case == "multi_line":
+        f.write_text(KEY + "\n" + KEY)
+    elif case == "quoted":
+        f.write_text(f'"{KEY}"')
+    with pytest.raises(ValueError) as err:
+        make_backend(anthropic_cfg(api_key_file=str(f)))
+    assert err.value.__context__ is None and err.value.__cause__ is None
+    assert KEY not in str(err.value)
+
+
 def test_an_oversized_key_file_is_rejected_after_a_capped_read(monkeypatch, tmp_path):
     install_fake_anthropic(monkeypatch, [GOOD])
     f = tmp_path / "big.key"
     f.write_bytes(b"A" * (64 * 1024 + 1))
     with pytest.raises(ValueError, match="larger than 64 KiB"):
         make_backend(anthropic_cfg(api_key_file=str(f)))
-    if os.path.exists("/dev/zero"):  # an endless source must not hang or fill memory
-        with pytest.raises(ValueError, match="larger than 64 KiB"):
-            make_backend(anthropic_cfg(api_key_file="/dev/zero"))
+
+
+@pytest.mark.skipif(not os.path.exists("/proc/self/statm"),
+                    reason="needs /dev/zero, /proc and resource limits (Linux)")
+def test_an_endless_key_file_is_cut_off():
+    # in a child limited to 1 GiB more address space than its imports took, with a timeout: a
+    # regression that reads to the end fails here instead of filling memory or hanging the run
+    code = (
+        "import os, resource\n"
+        "from dnt.refine.config import VLMConfig\n"
+        "from dnt.refine.vlm import resolve_api_key\n"
+        "with open('/proc/self/statm') as f:\n"
+        "    size = int(f.read().split()[0]) * os.sysconf('SC_PAGE_SIZE')\n"
+        "resource.setrlimit(resource.RLIMIT_AS, (size + (1 << 30), size + (1 << 30)))\n"
+        "try:\n"
+        "    resolve_api_key(VLMConfig(api_key_file='/dev/zero'), 'X')\n"
+        "except ValueError as e:\n"
+        "    print(e)\n"
+    )
+    env = {**os.environ, "PYTHONPATH": os.pathsep.join(sys.path)}
+    r = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=60,
+                       env=env)
+    assert "larger than 64 KiB" in r.stdout, r.stderr[-500:]
 
 
 @pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="needs named pipes")
@@ -98,8 +189,27 @@ def test_a_fifo_with_no_writer_does_not_hang(monkeypatch, tmp_path):
     install_fake_anthropic(monkeypatch, [GOOD])
     fifo = tmp_path / "pipe"
     os.mkfifo(fifo)
-    with pytest.raises(ValueError, match="is empty"):
-        make_backend(anthropic_cfg(api_key_file=str(fifo)))
+    got = {}
+
+    def read():
+        try:
+            make_backend(anthropic_cfg(api_key_file=str(fifo)))
+        except Exception as exc:
+            got["error"] = exc
+
+    t = threading.Thread(target=read, daemon=True)
+    t.start()
+    t.join(10)
+    hung = t.is_alive()
+    try:
+        # a reader blocked in open() or read() returns once a writer opens and closes the pipe
+        fd = os.open(fifo, os.O_WRONLY | os.O_NONBLOCK)
+        os.close(fd)
+    except OSError:  # ENXIO: no reader is waiting, nothing to release
+        pass
+    t.join(10)
+    assert not hung, "reading a FIFO with no writer blocked"
+    assert isinstance(got.get("error"), ValueError) and "is empty" in str(got["error"])
 
 
 # ---- runtime and environment keys ---------------------------------------------------------
@@ -328,3 +438,19 @@ def test_a_bad_port_is_a_clean_cli_error(tmp_path, capsys):
                            "--out", tmp_path / "o.txt", "--vlm-base-url", "http://h:abc/v1")
     assert code == 2 and out == "" and err.startswith("dnt-refine: error: ")
     assert "vlm.base_url" in err and "Traceback" not in err
+
+
+@pytest.mark.parametrize("backend_line", ["", "  backend: null\n"])
+def test_a_file_without_a_backend_counts_as_none(tmp_path, capsys, caplog, backend_line):
+    src, _ = takeover_scene(tmp_path)
+    y = _yaml(tmp_path, "vlm:\n" + backend_line + "  base_url: http://x.example/v1\n"
+              "  api_key_env: TEMPLATE_KEY\n")
+    with caplog.at_level(logging.INFO, logger="dnt.refine.cli"):
+        code, out, err = _main(capsys, "run", src, "--fps", 10, "--config", y,
+                               "--out", tmp_path / "o.txt", "--vlm-backend", "anthropic")
+    assert code == 0, err
+    vlm = _header_vlm(out)
+    assert vlm["backend"] == "anthropic" and vlm["base_url"] is None
+    assert vlm["api_key_env"] is None
+    assert "replaces the config's none" in caplog.text and "None" not in caplog.text
+    assert "x.example" not in caplog.text and "TEMPLATE_KEY" not in caplog.text  # names only

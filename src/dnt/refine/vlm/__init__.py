@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import importlib.util
 import ipaddress
 import json
@@ -158,7 +159,8 @@ def missing_key_message(backend: str, env: str) -> str:
 
 #: The largest key file read; a longer one is an error (a key is a few hundred bytes at most).
 KEY_FILE_MAX_BYTES = 64 * 1024
-_ENV_ASSIGNMENT = re.compile(r"(?:export\s+)?[A-Za-z_][A-Za-z0-9_]*=[^=]")
+_ENV_ASSIGNMENT = re.compile(r"(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)(=+)(.*)", re.DOTALL)
+_SHOUTED_NAME = re.compile(r"[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+")  # OPENAI_API_KEY, MY_KEY, ...
 _LOOPBACK_NAMES = {"localhost", "localhost.localdomain", "ip6-localhost"}
 
 
@@ -166,12 +168,26 @@ def key_problem(key: str) -> str | None:
     """Return why ``key`` (already stripped) cannot be an API key, or None if it can.
 
     The reason never quotes the key: a key is printable ASCII with no whitespace; a ``.env``
-    line (``NAME=value``) or several lines are reported as such.
+    line (``NAME=value``, ``NAME=``, ``NAME==value``), a quoted key, or several lines are
+    reported as such. Trailing base64 padding (``abcd=``, ``abcdef==``) is allowed when the
+    whole key is a multiple of 4 characters long and does not look like a variable name.
     """
     if "\n" in key or "\r" in key:
         return "has more than one line"
-    if _ENV_ASSIGNMENT.match(key):
-        return "looks like NAME=value; put only the key in it"
+    if len(key) >= 2 and key[0] == key[-1] and key[0] in "\"'":
+        return "is wrapped in quotes; put only the key in it, without quotes"
+    m = _ENV_ASSIGNMENT.match(key)
+    if m is not None:
+        name, eqs, rest = m.groups()
+        padding = (
+            not rest
+            and len(eqs) <= 2
+            and key == name + eqs
+            and len(key) % 4 == 0
+            and not _SHOUTED_NAME.fullmatch(name)
+        )
+        if not padding:
+            return "looks like NAME=value; put only the key in it"
     if any(c.isspace() for c in key):
         return "contains whitespace"
     if any(not (32 < ord(c) < 127) for c in key):
@@ -250,17 +266,22 @@ def resolve_api_key(cfg: VLMConfig, default_env: str, runtime_key: str | None = 
     if key_file:
         path = Path(key_file).expanduser()
         where = f"the VLM key file {path} (vlm.api_key_file)"
+        # every ValueError below is raised outside an ``except`` block, so it carries no
+        # exception context: a UnicodeDecodeError's ``object`` would hold the file's bytes
+        raw, why = None, None
         try:
             raw = _read_key_file(path)
         except OSError as exc:
             why = exc.strerror or type(exc).__name__
-            raise ValueError(f"cannot read {where}: {why}") from None
+        if raw is None:
+            raise ValueError(f"cannot read {where}: {why}")
         if len(raw) > KEY_FILE_MAX_BYTES:
             raise ValueError(f"{where} is larger than {KEY_FILE_MAX_BYTES // 1024} KiB")
-        try:
+        text = None
+        with contextlib.suppress(UnicodeDecodeError):
             text = raw.decode("utf-8-sig")
-        except UnicodeDecodeError:
-            raise ValueError(f"{where} is not UTF-8 text") from None
+        if text is None:
+            raise ValueError(f"{where} is not UTF-8 text")
         key = clean_api_key(text, where)
         if key is None:
             raise ValueError(f"{where} is empty")
