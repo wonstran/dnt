@@ -6,7 +6,6 @@ import hashlib
 import json
 import logging
 import os
-import zipfile
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Protocol
@@ -211,7 +210,7 @@ class FeatureStore:
 
     def put(self, raw_id: int, frame: int, emb) -> None:
         """Store one embedding; every embedding of a store has the same width."""
-        e = np.asarray(emb, dtype=np.float32)
+        e = np.array(emb, dtype=np.float32)
         if e.ndim != 1 or (self._dim is not None and e.shape[0] != self._dim):
             raise ValueError(
                 f"embedding of shape {e.shape} does not match the store's width {self._dim}"
@@ -242,9 +241,13 @@ class FeatureStore:
         }
         p = Path(path)
         tmp = p.with_name(p.name + ".tmp")
-        with tmp.open("wb") as fh:
-            np.savez(fh, **arrays)
-        os.replace(tmp, p)
+        try:
+            with tmp.open("wb") as fh:
+                np.savez(fh, **arrays)
+            os.replace(tmp, p)
+        except BaseException:
+            tmp.unlink(missing_ok=True)
+            raise
         self.dirty = False
         return sha256_file(p)
 
@@ -266,11 +269,14 @@ class FeatureStore:
         if not p.is_file():
             return None
         try:
-            with np.load(p, allow_pickle=False) as z:
+            with p.open("rb") as fh, np.load(fh, allow_pickle=False) as z:
                 key_array = z["key"]
                 ids, frames, emb = z["raw_id"], z["frame"], z["emb"]
-        except (OSError, ValueError, KeyError, EOFError, zipfile.BadZipFile) as err:
+        except Exception as err:  # a damaged cache is a miss, never an exception
             log.info("feature cache %s is unreadable (%s); recomputing", p, err)
+            return None
+        if not all(isinstance(a, np.ndarray) for a in (key_array, ids, frames, emb)):
+            log.info("feature cache %s does not hold arrays; recomputing", p)
             return None
         if key_array.ndim != 0 or key_array.dtype.kind != "U" or str(key_array) != key:
             log.info("feature cache %s was built with different inputs; recomputing", p)

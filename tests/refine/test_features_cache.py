@@ -1,4 +1,6 @@
 import logging
+import zipfile
+from io import BytesIO
 from types import SimpleNamespace
 
 import numpy as np
@@ -253,3 +255,120 @@ def test_a_failed_save_leaves_the_previous_cache_intact(tmp_path, monkeypatch):
     monkeypatch.undo()
     loaded = FeatureStore.load(p, "k")
     assert loaded is not None and len(loaded) == 3
+    assert not list(tmp_path.glob("*.tmp"))  # the half-written file is cleaned up
+
+
+def test_a_failure_after_the_temporary_file_exists_leaves_no_tmp_behind(tmp_path, monkeypatch):
+    p = tmp_path / "gone.features.npz"
+
+    def _no_replace(src, dst):
+        raise OSError("cannot replace")
+
+    monkeypatch.setattr(features.os, "replace", _no_replace)
+    s = _store()
+    with pytest.raises(OSError, match="cannot replace"):
+        s.save(p)
+    assert list(tmp_path.iterdir()) == [] and s.dirty
+
+
+def test_save_clears_the_dirty_flag(tmp_path):
+    s = _store()
+    assert s.dirty
+    s.save(tmp_path / "d.features.npz")
+    assert s.dirty is False
+
+
+def test_put_checks_the_rank_before_any_width_is_known():
+    s = FeatureStore("k")
+    with pytest.raises(ValueError, match="width"):
+        s.put(1, 3, [[1.0, 0.0]])
+    assert len(s) == 0 and not s.dirty
+
+
+def test_a_loaded_store_knows_its_width(tmp_path):
+    p = tmp_path / "w.features.npz"
+    _store().save(p)
+    loaded = FeatureStore.load(p, "k")
+    with pytest.raises(ValueError, match="width"):
+        loaded.put(1, 9, [1.0, 0.0, 0.0])
+    loaded.put(1, 9, [0.0, 1.0])
+    assert loaded.has(1, 9)
+
+
+def test_put_copies_the_callers_array():
+    s = FeatureStore("k")
+    v = np.array([1.0, 0.0], dtype=np.float32)
+    s.put(1, 3, v)
+    v[0] = 9.0
+    assert s.get(1, [3])[0, 0] == 1.0
+
+
+def test_the_coarse_stride_counts_ordinals_not_frame_numbers():
+    frames = list(range(3, 23))  # off the multiple-of-5 grid
+    app = CoarseArrayAppearance({1: (frames, np.eye(4)[np.arange(20) % 4])}, every=5)
+    f, _ = app.clean_embeddings(1, 0, 99)
+    assert list(f) == [3, 8, 13, 18]
+
+
+def _zip_with(path, members):
+    with zipfile.ZipFile(path, "w") as z:
+        for name, data in members.items():
+            z.writestr(name, data)
+
+
+def _npy_bytes(arr):
+    buf = BytesIO()
+    np.save(buf, arr)
+    return buf.getvalue()
+
+
+def test_an_archive_of_non_npy_members_is_a_miss(tmp_path):
+    p = tmp_path / "junk.features.npz"
+    _zip_with(p, {f"{n}.npy": b"junk" for n in ("key", "raw_id", "frame", "emb")})
+    assert FeatureStore.load(p, "k") is None
+
+
+def test_an_archive_declaring_an_enormous_array_is_a_miss(tmp_path):
+    header = "{'descr': '<f4', 'fortran_order': False, 'shape': (1000000, 1000000), }"
+    header = header.ljust(((len(header) + 11) // 64 + 1) * 64 - 11 - 1) + "\n"
+    huge = b"\x93NUMPY\x01\x00" + len(header).to_bytes(2, "little") + header.encode("ascii")
+    p = tmp_path / "huge.features.npz"
+    _zip_with(
+        p,
+        {
+            "key.npy": _npy_bytes(np.array("k")),
+            "raw_id.npy": _npy_bytes(np.array([1], dtype=np.int64)),
+            "frame.npy": _npy_bytes(np.array([3], dtype=np.int64)),
+            "emb.npy": huge,
+        },
+    )
+    assert FeatureStore.load(p, "k") is None
+
+
+def test_no_corruption_of_a_saved_cache_raises(tmp_path):
+    good = tmp_path / "good.features.npz"
+    _store().save(good)
+    data = good.read_bytes()
+    central = data.index(b"PK\x01\x02")  # first central directory entry: flags at +8, method at +10
+    cases = []
+    rng = np.random.RandomState(1234)
+    for _ in range(200):
+        cases.append((int(rng.randint(len(data))), int(rng.randint(1, 256))))
+    # general-purpose flag bits and compression method, in the local and the central header
+    for base in (6, central + 8):
+        cases += [(base, 1 << b) for b in range(8)] + [(base + 1, 1 << b) for b in range(8)]
+    for base in (8, central + 10):
+        cases += [(base, v ^ data[base]) for v in (1, 8, 9, 12, 14, 99)]
+    bad = tmp_path / "bad.features.npz"
+    for off, flip in cases:
+        mutated = bytearray(data)
+        mutated[off] ^= flip
+        bad.write_bytes(bytes(mutated))
+        got = FeatureStore.load(bad, "k")
+        assert got is None or isinstance(got, FeatureStore)
+    # an encrypted entry and an unsupported compression method are plain misses
+    for off, val in ((central + 8, 1), (central + 10, 99)):
+        mutated = bytearray(data)
+        mutated[off] = val
+        bad.write_bytes(bytes(mutated))
+        assert FeatureStore.load(bad, "k") is None
