@@ -31,6 +31,10 @@ def _as_rows(df):
     return [[r.frame, r.track, r.x, r.y, r.w, r.h] for r in df.itertuples()]
 
 
+def _decode(jpeg):
+    return cv2.imdecode(np.frombuffer(jpeg, np.uint8), cv2.IMREAD_COLOR)
+
+
 def _ev(kind, stage, tracks, lineage, frames, **params):
     ev = Event.propose(stage=stage, kind=kind, tracks=tracks, lineage=lineage, frames=frames,
                        params=params, algo_score=0.5, signals={})
@@ -185,6 +189,11 @@ def test_a_box_partly_outside_the_frame_still_gives_a_tile(tmp_path):
     assert len(b.plan(ev).rows[0][1]) == 6
     jpeg = b.build(ev)
     assert jpeg is not None and jpeg[:2] == b"\xff\xd8"
+    # the crop row is really drawn: without the context frame there is still an image of crop
+    # height, and the image with it is taller
+    no_ctx = _builder(tmp_path, w, {1: RED}, send_context_frames=False).build(ev)
+    assert no_ctx is not None and _decode(no_ctx).shape[0] >= 160
+    assert _decode(jpeg).shape[0] > _decode(no_ctx).shape[0]
 
 
 def test_frames_are_read_in_one_sorted_pass_per_chunk(tmp_path, monkeypatch):
@@ -208,3 +217,42 @@ def test_frames_are_read_in_one_sorted_pass_per_chunk(tmp_path, monkeypatch):
     monkeypatch.setattr(evidence, "FrameReader", counting)
     b.build_many(evs)
     assert len(opened) == 1
+
+
+def test_a_video_shorter_than_frame_count_skips_the_unreadable_frames(tmp_path, caplog):
+    w = _work(_walker(1, range(60)), _walker(2, [10, 125], x0=150.0), _walker(3, [125, 126]))
+    rows = []
+    for raw, color in {1: RED, 2: BLUE}.items():
+        rows += video_rows(w[w.raw_id == raw].assign(track=raw).pipe(_as_rows), color)
+    video = make_color_video(tmp_path / "v.mp4", rows, N)  # 120 frames
+    b = EvidenceBuilder(video, w, pd.Series(False, index=w.index), frame_count=130)
+    e1 = _ev(EventKind.DROP, "screen", [1], [[[1, 0, 59]]], (0, 59), reason="static", spans=None)
+    e2 = _ev(
+        EventKind.DROP, "screen", [2], [[[2, 10, 125]]], (10, 125), reason="static", spans=None
+    )
+    e2.id = "screen-r0-000002"
+    e3 = _ev(
+        EventKind.DROP, "screen", [3], [[[3, 125, 126]]], (125, 126), reason="static", spans=None
+    )
+    e3.id = "screen-r0-000003"
+    with caplog.at_level("WARNING", logger="dnt.refine.evidence"):
+        out = b.build_many([e1, e2, e3])
+    assert set(out) == {e1.id, e2.id, e3.id}
+    assert out[e1.id] is not None  # unaffected
+    assert out[e2.id] is not None  # frame 10 is drawn, frame 125 cannot be read
+    assert out[e3.id] is None  # nothing readable to draw
+    assert any("skipping frame" in r.message for r in caplog.records)
+
+
+def test_an_unopenable_video_gives_none_for_every_event(tmp_path, caplog):
+    w = _work(_walker(1, range(60)))
+    b = EvidenceBuilder(tmp_path / "missing.mp4", w, pd.Series(False, index=w.index), frame_count=N)
+    evs = []
+    for i in range(2):
+        e = _ev(EventKind.DROP, "screen", [1], [[[1, 0, 59]]], (0, 59), reason="static", spans=None)
+        e.id = f"screen-r0-{i:06d}"
+        evs.append(e)
+    with caplog.at_level("WARNING", logger="dnt.refine.evidence"):
+        out = b.build_many(evs)
+    assert out == {e.id: None for e in evs}
+    assert any("cannot open video" in r.message for r in caplog.records)

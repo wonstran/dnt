@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -9,6 +10,8 @@ import pandas as pd
 
 from .crops import FrameReader, crop_box
 from .events import Event, EventKind
+
+log = logging.getLogger(__name__)
 
 BACKGROUND = 128
 EVIDENCE_PAD = 1.5
@@ -93,8 +96,8 @@ class EvidenceBuilder:
 
     # ---- planning (no video access) ----
 
-    def _clean(self, spans, lo: int | None = None, hi: int | None = None):
-        """Clean ``(raw_id, frame)`` pairs of the lineage ``spans``, sorted by frame."""
+    def _pairs(self, spans, lo: int | None, hi: int | None, *, include_occluded: bool):
+        """``(raw_id, frame)`` pairs of the lineage ``spans`` with a drawable box, by frame."""
         out = []
         for raw, f0, f1 in spans:
             for f in range(int(f0), int(f1) + 1):
@@ -102,25 +105,20 @@ class EvidenceBuilder:
                     continue
                 key = (int(raw), f)
                 box = self._box.get(key)
-                if box is None or self._occ[key] or box[2] <= 0 or box[3] <= 0:
+                if box is None or box[2] <= 0 or box[3] <= 0 or f >= self.frame_count:
                     continue
-                if f >= self.frame_count:
+                if self._occ[key] and not include_occluded:
                     continue
                 out.append(key)
         return sorted(out, key=lambda k: k[1])
 
+    def _clean(self, spans, lo: int | None = None, hi: int | None = None):
+        """Clean ``(raw_id, frame)`` pairs of the lineage ``spans``, sorted by frame."""
+        return self._pairs(spans, lo, hi, include_occluded=False)
+
     def _observed(self, spans, lo: int | None = None, hi: int | None = None):
         """Like ``_clean`` but keeps rows flagged occluded (screen evidence, spec 7.1)."""
-        out = []
-        for raw, f0, f1 in spans:
-            for f in range(int(f0), int(f1) + 1):
-                if (lo is not None and f < lo) or (hi is not None and f > hi):
-                    continue
-                box = self._box.get((int(raw), f))
-                if box is None or box[2] <= 0 or box[3] <= 0 or f >= self.frame_count:
-                    continue
-                out.append((int(raw), f))
-        return sorted(out, key=lambda k: k[1])
+        return self._pairs(spans, lo, hi, include_occluded=True)
 
     def _box_at(self, spans, frame: int):
         for raw, f0, f1 in spans:
@@ -217,18 +215,39 @@ class EvidenceBuilder:
                 for ci, ctx in enumerate(p.contexts):
                     requests.setdefault(ctx.frame, []).append((e.id, "ctx", ci, 0, 0))
             if requests:
-                with FrameReader(self.video_file) as reader:
-                    for f, img in reader.frames(requests):
-                        for eid, kind, a, b, raw in requests[f]:
-                            if kind == "crop":
-                                tile = self._crop_tile(img, raw, f)
-                            else:
-                                tile = self._context_tile(img, plans[eid].contexts[a])
-                            if tile is not None:
-                                parts[(eid, kind, a, b)] = tile
+                try:
+                    reader = FrameReader(self.video_file)
+                except ValueError as exc:
+                    log.warning("evidence: %s; no images for %d events", exc, len(chunk))
+                    out.update({e.id: None for e in chunk})
+                    continue
+                with reader:
+                    self._render(reader, requests, plans, parts)
             for e in chunk:
                 out[e.id] = self._compose(plans[e.id], parts, e.id)
         return out
+
+    def _render(self, reader, requests: dict, plans: dict, parts: dict) -> None:
+        """Decode the wanted frames in order; a frame that cannot be read is skipped."""
+        pending = sorted(requests)
+        while pending:
+            frames = reader.frames(pending)
+            while pending:
+                try:
+                    f, img = next(frames)
+                except StopIteration:
+                    return
+                except ValueError as exc:
+                    log.warning("evidence: skipping frame %d: %s", pending.pop(0), exc)
+                    break  # the reader seeks on its next call: restart over the rest
+                pending.pop(0)  # frames come back in sorted order, one per wanted index
+                for eid, kind, a, b, raw in requests[f]:
+                    if kind == "crop":
+                        tile = self._crop_tile(img, raw, f)
+                    else:
+                        tile = self._context_tile(img, plans[eid].contexts[a])
+                    if tile is not None:
+                        parts[(eid, kind, a, b)] = tile
 
     def _crop_tile(self, img, raw: int, frame: int):
         import cv2
