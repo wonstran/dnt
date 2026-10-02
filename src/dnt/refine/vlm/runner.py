@@ -174,11 +174,17 @@ class VLMRunner:
     # ---- one question ----
 
     def _scrub(self, text: str) -> str:
+        """Replace every known key in ``text`` with ``***`` and cut it to 300 characters.
+
+        The keys are the values of the key variables and the backend's resolved key (its
+        ``secret`` attribute, which holds a key given at run time or read from a key file); a
+        backend without that attribute is fine.
+        """
         names = {self.cfg.api_key_env, *_DEFAULT_KEY_ENVS} - {None}
-        for name in names:
-            secret = os.environ.get(name)
-            if secret:
-                text = text.replace(secret, "***")
+        secrets = {os.environ.get(name) for name in names}
+        secrets.add(getattr(self.backend, "secret", None))
+        for secret in sorted((s for s in secrets if isinstance(s, str) and s), key=len)[::-1]:
+            text = text.replace(secret, "***")
         return text[:300]
 
     def _aborted(self) -> str:

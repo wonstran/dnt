@@ -520,10 +520,32 @@ class TrackRefiner:
         appearance_factory: Callable[..., Appearance | None] | None = None,
         encoder_factory: Callable[..., object] | None = None,
         vlm_backend_factory: Callable[..., object] | None = None,
+        vlm_api_key: str | None = None,
     ) -> None:
-        """Configure once with ``config`` or ``config_yaml``; ``device`` sets ``encoder.device``."""
+        """Configure once with ``config`` or ``config_yaml``; ``device`` sets ``encoder.device``.
+
+        Parameters
+        ----------
+        config, config_yaml : RefineConfig or str, optional
+            The settings, as an object or a YAML file (not both); the defaults if neither.
+        device : str, optional
+            Overrides ``encoder.device``.
+        appearance_factory, encoder_factory : callable, optional
+            Supply your own appearance source or encoder (mainly for tests).
+        vlm_backend_factory : callable, optional
+            ``factory(cfg.vlm)`` returns the VLM backend to use instead of the built-in one.
+        vlm_api_key : str, optional
+            The API key of the built-in VLM backend. It takes precedence over
+            ``vlm.api_key_file`` and the ``vlm.api_key_env`` variable, is kept on this object
+            only, and is never written to the config, the ledger, the summary, or a log line
+            (error texts have it replaced by ``***``). A ``vlm_backend_factory`` does not
+            receive it.
+
+        """
         if config is not None and config_yaml is not None:
             raise ValueError("pass config or config_yaml, not both")
+        if vlm_api_key is not None and not (isinstance(vlm_api_key, str) and vlm_api_key.strip()):
+            raise ValueError("vlm_api_key must be a non-empty string (or None)")
         if config_yaml is not None:
             config = RefineConfig.from_yaml(config_yaml)
         self.config = config if config is not None else RefineConfig.defaults()
@@ -533,6 +555,7 @@ class TrackRefiner:
         self.appearance_factory = appearance_factory
         self.encoder_factory = encoder_factory
         self.vlm_backend_factory = vlm_backend_factory
+        self._vlm_api_key = vlm_api_key  # never copied into the config, ledger, or logs
         self._encoder_memo: tuple[tuple, object] | None = None
         self.last_result: RefineResult | None = None
 
@@ -562,7 +585,8 @@ class TrackRefiner:
         ValueError
             If ``out_file``, or the ledger, review or feature-cache path next to it, is one of
             the input files; if no frame rate is known; if an input is malformed; or, with a
-            video and a VLM backend, if the backend's API key variable is not set.
+            video and a VLM backend, if the backend needs a key and none is found, or
+            ``vlm.api_key_file`` cannot be read.
         ImportError
             If a video is given, ``encoder.kind`` is ``dino`` or ``reid``, and the encoder's
             package is not installed; or if a video is given, ``vlm.backend`` is set, and the
@@ -596,10 +620,12 @@ class TrackRefiner:
                 cfg.vlm.backend,
             )
         elif cfg.vlm.backend != "none":
+            # a missing API key or an unreadable key file fails here, before any file is read
             if self.vlm_backend_factory is None:
                 check_vlm_dependencies(cfg.vlm)  # before any processing (spec 5.5)
-            # a missing API key fails here, before any file is read
-            backend = (self.vlm_backend_factory or make_backend)(cfg.vlm)
+                backend = make_backend(cfg.vlm, api_key=self._vlm_api_key)
+            else:
+                backend = self.vlm_backend_factory(cfg.vlm)
         track_sha = io.sha256_file(track_file)
         context_sha = None
         if context_file is not None:

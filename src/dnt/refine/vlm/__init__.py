@@ -8,9 +8,11 @@ from __future__ import annotations
 import importlib.util
 import json
 import math
+import os
 import re
 import sys
 from dataclasses import dataclass
+from pathlib import Path
 from typing import TYPE_CHECKING, Protocol
 
 if TYPE_CHECKING:
@@ -139,21 +141,76 @@ def check_vlm_dependencies(cfg: VLMConfig) -> None:
         )
 
 
-def make_backend(cfg: VLMConfig) -> VLMBackend:
-    """Build the backend selected by ``cfg.backend``.
+def missing_key_message(backend: str, env: str) -> str:
+    """Return the error for a backend that found no API key; it names every way to give one."""
+    return (
+        f"vlm.backend: {backend} needs an API key and none was found. Pass it in Python "
+        f"(TrackRefiner(..., vlm_api_key=...)), set vlm.api_key_file (--vlm-api-key-file) to "
+        f"a file that holds it, or set the {env} environment variable (vlm.api_key_env, "
+        "--vlm-api-key-env, names another variable)"
+    )
+
+
+def resolve_api_key(cfg: VLMConfig, default_env: str, runtime_key: str | None = None) -> str | None:
+    """Return the API key for a backend, or None when no source has one.
+
+    The sources, first match wins:
+
+    1. ``runtime_key``: the ``vlm_api_key`` argument of ``TrackRefiner``;
+    2. ``cfg.api_key_file``: a file whose content, stripped of surrounding whitespace, is the
+       key (``~`` is expanded);
+    3. the environment variable ``cfg.api_key_env``, or ``default_env`` when that is unset.
+
+    The key itself never goes into the config, a message, or a log line.
 
     Raises
     ------
     ValueError
-        If ``cfg.backend`` is ``none`` or unknown, or a required key is not set.
+        If ``cfg.api_key_file`` is set but cannot be read or holds only whitespace. The message
+        names the path, never the content.
+
+    """
+    if runtime_key is not None and str(runtime_key).strip():
+        return str(runtime_key).strip()
+    key_file = getattr(cfg, "api_key_file", None)
+    if key_file:
+        path = Path(key_file).expanduser()
+        try:
+            key = path.read_text(encoding="utf-8").strip()
+        except OSError as exc:
+            why = exc.strerror or type(exc).__name__
+            raise ValueError(
+                f"cannot read the VLM key file {path} (vlm.api_key_file): {why}"
+            ) from None
+        except UnicodeDecodeError:
+            raise ValueError(
+                f"the VLM key file {path} (vlm.api_key_file) is not UTF-8 text"
+            ) from None
+        if not key:
+            raise ValueError(f"the VLM key file {path} (vlm.api_key_file) is empty")
+        return key
+    return os.environ.get(cfg.api_key_env or default_env) or None
+
+
+def make_backend(cfg: VLMConfig, api_key: str | None = None) -> VLMBackend:
+    """Build the backend selected by ``cfg.backend``.
+
+    ``api_key`` is a key given at run time (``TrackRefiner(vlm_api_key=...)``); it takes
+    precedence over ``vlm.api_key_file`` and the environment (see ``resolve_api_key``).
+
+    Raises
+    ------
+    ValueError
+        If ``cfg.backend`` is ``none`` or unknown, a required key is not found, or the key file
+        cannot be read.
 
     """
     if cfg.backend == "openai_compat":
         from .openai_compat import OpenAICompatBackend
 
-        return OpenAICompatBackend(cfg)
+        return OpenAICompatBackend(cfg, api_key=api_key)
     if cfg.backend == "anthropic":
         from .anthropic import AnthropicBackend
 
-        return AnthropicBackend(cfg)
+        return AnthropicBackend(cfg, api_key=api_key)
     raise ValueError(f"no VLM backend for vlm.backend={cfg.backend!r}")

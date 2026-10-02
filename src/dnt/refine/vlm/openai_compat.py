@@ -5,7 +5,13 @@ from __future__ import annotations
 import base64
 import os
 
-from . import VLMAnswer, VLMTransientError, parse_answer
+from . import (
+    VLMAnswer,
+    VLMTransientError,
+    missing_key_message,
+    parse_answer,
+    resolve_api_key,
+)
 
 
 class OpenAICompatBackend:
@@ -13,15 +19,33 @@ class OpenAICompatBackend:
 
     name = "openai_compat"
 
-    def __init__(self, cfg):
-        """Create the client. A local server needs no key; a placeholder is sent."""
+    def __init__(self, cfg, *, api_key: str | None = None):
+        """Create the client.
+
+        The key is ``api_key``, else the content of ``vlm.api_key_file``, else the variable
+        named by ``vlm.api_key_env`` (``OPENAI_API_KEY``). A server at ``vlm.base_url`` (or
+        ``OPENAI_BASE_URL``) may need no key, and a placeholder is sent; without either, the
+        client would call api.openai.com, which needs one.
+
+        Raises
+        ------
+        ValueError
+            If no key is found and no endpoint is set, or the key file cannot be read.
+
+        """
         from openai import AsyncOpenAI
 
         self.model = cfg.model
         self._json_mode = bool(cfg.json_mode)
-        key = os.environ.get(cfg.api_key_env or "OPENAI_API_KEY") or "EMPTY"
+        key = resolve_api_key(cfg, "OPENAI_API_KEY", api_key)
+        if key is None and not (cfg.base_url or os.environ.get("OPENAI_BASE_URL")):
+            raise ValueError(
+                missing_key_message("openai_compat", cfg.api_key_env or "OPENAI_API_KEY")
+                + "; a local server needs vlm.base_url instead"
+            )
+        self.secret = key  # the runner scrubs it from every error text
         self._client = AsyncOpenAI(
-            base_url=cfg.base_url, api_key=key, timeout=cfg.timeout_s, max_retries=0
+            base_url=cfg.base_url, api_key=key or "EMPTY", timeout=cfg.timeout_s, max_retries=0
         )
 
     async def ask(self, image_jpeg, prompt, options, temperature, *, tag: str = "") -> VLMAnswer:

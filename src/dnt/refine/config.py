@@ -9,6 +9,7 @@ from collections.abc import Mapping
 from dataclasses import asdict, dataclass, field, fields, is_dataclass
 from pathlib import Path
 from typing import get_args, get_origin, get_type_hints
+from urllib.parse import urlsplit
 
 import yaml
 
@@ -213,12 +214,29 @@ class FillConfig:
 
 @dataclass(kw_only=True)
 class VLMConfig:
-    """VLM verification settings (spec 7); used from Plan 3 on."""
+    """VLM verification settings (spec 7); used from Plan 3 on.
+
+    Attributes
+    ----------
+    base_url : str or None
+        The endpoint of either backend: an OpenAI-compatible server for ``openai_compat``, or a
+        proxy or gateway for ``anthropic`` (None: the vendor's endpoint). An ``http://`` or
+        ``https://`` URL without a user name, password, or query string.
+    api_key_env : str or None
+        The name of the environment variable that holds the key (None: ``OPENAI_API_KEY`` or
+        ``ANTHROPIC_API_KEY``).
+    api_key_file : str or None
+        The path of a file whose content (stripped) is the key; ``~`` is expanded. It takes
+        precedence over ``api_key_env``, and ``TrackRefiner(vlm_api_key=...)`` over both. The
+        config holds no key itself, since it is copied into the ledger header.
+
+    """
 
     backend: str = "none"
     base_url: str | None = None
     model: str | None = None
     api_key_env: str | None = None
+    api_key_file: str | None = None
     json_mode: bool = True
     min_conf: float = 0.7
     votes: int = 1
@@ -310,8 +328,10 @@ class RefineConfig:
         """
         if isinstance(self.encoder.weights, str) and not self.encoder.weights.strip():
             self.encoder.weights = None
-        if isinstance(self.vlm.api_key_env, str) and not self.vlm.api_key_env.strip():
-            self.vlm.api_key_env = None  # "" from YAML: the backend's default variable
+        for name in ("api_key_env", "api_key_file", "base_url"):
+            v = getattr(self.vlm, name)
+            if isinstance(v, str) and not v.strip():
+                setattr(self.vlm, name, None)  # "" from YAML: the default (variable, endpoint)
         p: list[str] = []
         if self.target not in TARGETS:
             p.append(f"target must be one of {TARGETS}")
@@ -393,6 +413,11 @@ class RefineConfig:
                 "vlm.api_key_env must be the name of an environment variable (letters, digits "
                 "and underscores, not starting with a digit), not the key itself"
             )
+        p.extend(_url_problems(vl.base_url))
+        if vl.api_key_file is not None and not isinstance(vl.api_key_file, str):
+            p.append("vlm.api_key_file must be the path of a file that holds the key")
+        elif isinstance(vl.api_key_file, str) and vl.api_key_file.strip().startswith("sk-"):
+            p.append("vlm.api_key_file must be the path of a file that holds the key, not the key")
         ramps = {f"switch.ramps.{k}": v for k, v in self.switch.ramps.items()}
         ramps |= {f"screen.ramps.{k}": v for k, v in sc.ramps.items()}
         ramps |= {"orphan.ramp": self.orphan.ramp, "hints.reclass_ramp": self.hints.reclass_ramp}
@@ -432,6 +457,36 @@ class RefineConfig:
             p.append("hints.reclass_class_map values must be keys of reclass_map")
         if p:
             raise ValueError("invalid refine config: " + "; ".join(p))
+
+
+def _url_problems(url) -> list[str]:
+    """Return what is wrong with ``vlm.base_url``; the messages never echo the value.
+
+    A URL can carry a key (in ``user:pass@`` or a query string), and the config is copied into
+    the ledger header, so neither is allowed.
+    """
+    if url is None:
+        return []
+    if not (isinstance(url, str) and url.lower().startswith(("http://", "https://"))):
+        return ["vlm.base_url must be an http:// or https:// URL"]
+    try:
+        parts = urlsplit(url)
+        host = parts.hostname
+    except ValueError:
+        return ["vlm.base_url is not a valid URL"]
+    if not host:
+        return ["vlm.base_url must name a host"]
+    if "@" in parts.netloc:
+        return [
+            "vlm.base_url must not hold a user name or password (user:pass@); give the key "
+            "with vlm.api_key_file, vlm.api_key_env, or TrackRefiner(vlm_api_key=...) instead"
+        ]
+    if parts.query or parts.fragment or url.rstrip().endswith(("?", "#")):
+        return [
+            "vlm.base_url must not have a query string or fragment; give a key with "
+            "vlm.api_key_file, vlm.api_key_env, or TrackRefiner(vlm_api_key=...)"
+        ]
+    return []
 
 
 def _check_type(path: str, value, hint) -> None:

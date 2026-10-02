@@ -3,9 +3,15 @@
 from __future__ import annotations
 
 import base64
-import os
 
-from . import DEFAULT_ANTHROPIC_MODEL, VLMAnswer, VLMTransientError, parse_answer
+from . import (
+    DEFAULT_ANTHROPIC_MODEL,
+    VLMAnswer,
+    VLMTransientError,
+    missing_key_message,
+    parse_answer,
+    resolve_api_key,
+)
 
 #: Model id prefixes of the Claude models that reject a non-default ``temperature`` (HTTP 400),
 #: think adaptively by default, and take an effort level instead.
@@ -36,16 +42,29 @@ class AnthropicBackend:
 
     name = "anthropic"
 
-    def __init__(self, cfg):
-        """Create the client; the key comes from ``vlm.api_key_env`` (``ANTHROPIC_API_KEY``)."""
+    def __init__(self, cfg, *, api_key: str | None = None):
+        """Create the client; ``vlm.base_url``, when set, replaces Anthropic's endpoint.
+
+        The key is ``api_key``, else the content of ``vlm.api_key_file``, else the variable
+        named by ``vlm.api_key_env`` (``ANTHROPIC_API_KEY``).
+
+        Raises
+        ------
+        ValueError
+            If no key is found, or the key file cannot be read.
+
+        """
         from anthropic import AsyncAnthropic
 
-        env = cfg.api_key_env or "ANTHROPIC_API_KEY"
-        key = os.environ.get(env)
-        if not key:
-            raise ValueError(f"set the {env} environment variable to use vlm.backend: anthropic")
+        key = resolve_api_key(cfg, "ANTHROPIC_API_KEY", api_key)
+        if key is None:
+            raise ValueError(
+                missing_key_message("anthropic", cfg.api_key_env or "ANTHROPIC_API_KEY")
+            )
+        self.secret = key  # the runner scrubs it from every error text
         self.model = cfg.model or DEFAULT_ANTHROPIC_MODEL
-        self._client = AsyncAnthropic(api_key=key, timeout=cfg.timeout_s, max_retries=0)
+        extra = {"base_url": cfg.base_url} if cfg.base_url else {}
+        self._client = AsyncAnthropic(api_key=key, timeout=cfg.timeout_s, max_retries=0, **extra)
 
     def _request(self, content: list, temperature: float) -> dict:
         """Return the keyword arguments of ``messages.create`` for this model.
