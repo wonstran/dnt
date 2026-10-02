@@ -28,6 +28,8 @@
   verification, review pages, and applying review decisions follow in later releases.
 
 ### Changed
+- The `refine-reid` and `refine` extras now also install `tensorboard`, which PyPI torchreid
+  imports but does not declare.
 - `refine` with a video now needs the encoder's package (`pip install 'dnt[refine-dino]'`) or
   `encoder.kind: none`. Before, it logged a warning and ran on motion alone. `dnt-refine run`
   exits with code 2 and names the extra when the package is missing. `TrackRefiner` accepts
