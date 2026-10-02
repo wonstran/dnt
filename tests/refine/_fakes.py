@@ -54,8 +54,9 @@ def install_fake_transformers(monkeypatch):
 def install_fake_torchreid(monkeypatch, layout="torchreid.utils"):
     """Install a fake ``torchreid`` whose extractor embeds a crop by its mean color.
 
-    Like the real ``FeatureExtractor`` it treats ndarray inputs as BGR and converts them to RGB
-    itself. ``seen["batches"]`` collects the number of images of every call.
+    Like the real ``FeatureExtractor`` (which converts an ndarray with ``T.ToPILImage()``) it
+    treats ndarray inputs as RGB, and like it, it prints a weights message to stdout when
+    built. ``seen["batches"]`` collects the number of images of every call.
 
     ``layout`` is the module that provides ``FeatureExtractor``: ``"torchreid.utils"``
     (KaiyangZhou's deep-person-reid), ``"torchreid.reid.utils"`` (the PyPI ``torchreid``
@@ -67,13 +68,13 @@ def install_fake_torchreid(monkeypatch, layout="torchreid.utils"):
         def __init__(self, model_name, model_path, device, verbose=True):
             seen.update(model_name=model_name, model_path=model_path, device=device)
             seen["loads"] += 1
+            print(f"Successfully loaded pretrained weights from {model_path}")
 
         def __call__(self, images):
             seen["n"] += len(images)
             seen["batches"].append(len(images))
-            rgb = [im[..., ::-1] for im in images]  # cv2.COLOR_BGR2RGB on every ndarray
             return torch.tensor(
-                [[float(im[..., c].mean()) + 1.0 for c in range(3)] + [1.0] for im in rgb]
+                [[float(im[..., c].mean()) + 1.0 for c in range(3)] + [1.0] for im in images]
             )
 
     top = _module("torchreid")

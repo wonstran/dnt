@@ -138,14 +138,23 @@ def test_reid_embeddings_and_arguments(fake_torchreid, tmp_path):
     assert enc.encode([]).shape == (0, 4)
 
 
-def test_reid_receives_bgr_arrays_for_rgb_crops(fake_torchreid, tmp_path):
-    # the real torchreid extractor treats ndarray input as BGR; the fake mimics that
+def test_reid_receives_rgb_arrays_unchanged(fake_torchreid, tmp_path):
+    # the real torchreid extractor reads ndarray input as RGB (T.ToPILImage); the fake mimics that
     weights = tmp_path / "w.pt"
     weights.write_bytes(b"w")
     enc = ReidEncoder("osnet_x1_0", str(weights), "cpu", 2)
     red, blue = enc.encode([RED, BLUE])  # RGB crops: red has R only, blue has B only
     assert red[0] == red[:3].max() and red[0] > red[2]
     assert blue[2] == blue[:3].max() and blue[2] > blue[0]
+
+
+def test_reid_construction_keeps_stdout_clean(fake_torchreid, tmp_path, capsys):
+    weights = tmp_path / "w.pt"
+    weights.write_bytes(b"w")
+    ReidEncoder("osnet_x1_0", str(weights), "cpu", 2)
+    out, err = capsys.readouterr()
+    assert out == ""
+    assert "Successfully loaded pretrained weights" in err  # the fake did print; it went here
 
 
 def test_reid_without_a_feature_extractor_names_both_layouts_and_the_github_install(

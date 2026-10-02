@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import contextlib
 import importlib
+import sys
 
 import numpy as np
 
@@ -41,7 +43,7 @@ class ReidEncoder:
     """Person or vehicle re-identification embeddings from a torchreid feature extractor."""
 
     name = "reid"
-    preprocess_id = "reid-torchreid-256x128-v1"
+    preprocess_id = "reid-torchreid-256x128-rgb-v2"  # v1 fed BGR
 
     def __init__(self, model: str, weights: str, device: str, batch_size: int):
         """Load the extractor.
@@ -66,9 +68,12 @@ class ReidEncoder:
         self.device = resolve_device(device)
         self.batch_size = max(1, int(batch_size))
         self.weights_sha = weights_digest(weights)
-        self._extractor = feature_extractor(
-            model_name=model, model_path=str(weights), device=self.device, verbose=False
-        )
+        # torchreid prints "Successfully loaded pretrained weights ..." to stdout even with
+        # verbose=False; send it to stderr so stdout stays clean (dnt-refine prints JSON there)
+        with contextlib.redirect_stdout(sys.stderr):
+            self._extractor = feature_extractor(
+                model_name=model, model_path=str(weights), device=self.device, verbose=False
+            )
         self._dim = int(self._embed([np.zeros((64, 32, 3), np.uint8)]).shape[1])
 
     @property
@@ -77,10 +82,9 @@ class ReidEncoder:
         return self._dim
 
     def _embed(self, crops: list[np.ndarray]) -> np.ndarray:
-        # the torchreid extractor treats ndarray input as BGR (it applies cv2.COLOR_BGR2RGB),
-        # while our crops are RGB, so hand it BGR
-        bgr = [np.ascontiguousarray(c[..., ::-1]) for c in crops]
-        feats = self._extractor(bgr).detach().cpu().numpy().astype(np.float32)
+        # torchreid's FeatureExtractor turns an ndarray into an image with T.ToPILImage(), which
+        # reads it as RGB, so our RGB crops go in unchanged
+        feats = self._extractor(list(crops)).detach().cpu().numpy().astype(np.float32)
         return feats / np.maximum(np.linalg.norm(feats, axis=1, keepdims=True), 1e-12)
 
     def encode(self, crops: list[np.ndarray]) -> np.ndarray:
