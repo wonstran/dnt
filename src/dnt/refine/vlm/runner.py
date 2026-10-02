@@ -18,6 +18,7 @@ log = logging.getLogger(__name__)
 _BACKOFF_FIRST_S = 2.0
 _ATTEMPTS = 3
 _DEFAULT_KEY_ENVS = ("OPENAI_API_KEY", "ANTHROPIC_API_KEY")
+_MIN_SECRET = 4  # shorter values are not scrubbed
 #: HTTP statuses that will not change on the next question (bad request, key, access, model).
 _FATAL_STATUS = frozenset({400, 401, 403, 404, 422})
 #: Other unexpected errors trip the breaker after this many in a row with no answer between.
@@ -178,12 +179,15 @@ class VLMRunner:
 
         The keys are the values of the key variables and the backend's resolved key (its
         ``secret`` attribute, which holds a key given at run time or read from a key file); a
-        backend without that attribute is fine.
+        backend without that attribute is fine. Values shorter than 4 characters (after
+        stripping) are skipped.
         """
         names = {self.cfg.api_key_env, *_DEFAULT_KEY_ENVS} - {None}
         secrets = {os.environ.get(name) for name in names}
         secrets.add(getattr(self.backend, "secret", None))
-        for secret in sorted((s for s in secrets if isinstance(s, str) and s), key=len)[::-1]:
+        # a blank or very short value is no key, and replacing it would garble the text
+        usable = (s for s in secrets if isinstance(s, str) and len(s.strip()) >= _MIN_SECRET)
+        for secret in sorted(usable, key=len, reverse=True):
             text = text.replace(secret, "***")
         return text[:300]
 

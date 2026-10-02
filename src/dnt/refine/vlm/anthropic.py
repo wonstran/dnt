@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import os
 
 from . import (
     DEFAULT_ANTHROPIC_MODEL,
@@ -11,6 +12,7 @@ from . import (
     missing_key_message,
     parse_answer,
     resolve_api_key,
+    warn_if_cleartext,
 )
 
 #: Model id prefixes of the Claude models that reject a non-default ``temperature`` (HTTP 400),
@@ -61,6 +63,8 @@ class AnthropicBackend:
             raise ValueError(
                 missing_key_message("anthropic", cfg.api_key_env or "ANTHROPIC_API_KEY")
             )
+        # the SDK reads ANTHROPIC_BASE_URL itself when no base_url is given
+        warn_if_cleartext(cfg.base_url or os.environ.get("ANTHROPIC_BASE_URL"), self.name)
         self.secret = key  # the runner scrubs it from every error text
         self.model = cfg.model or DEFAULT_ANTHROPIC_MODEL
         extra = {"base_url": cfg.base_url} if cfg.base_url else {}

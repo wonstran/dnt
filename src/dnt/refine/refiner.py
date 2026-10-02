@@ -40,7 +40,7 @@ from .screen import ScreenContext, propose_orphans, propose_screen
 from .switch import propose_splits
 from .verify import NO_EVIDENCE, Band, VLMRouting, decide, route_with_vlm, route_without_vlm
 from .video_appearance import VideoAppearance
-from .vlm import check_vlm_dependencies, make_backend
+from .vlm import check_vlm_dependencies, clean_api_key, make_backend
 from .vlm.cache import AnswerCache
 from .vlm.runner import VLMRunner
 
@@ -538,14 +538,22 @@ class TrackRefiner:
             The API key of the built-in VLM backend. It takes precedence over
             ``vlm.api_key_file`` and the ``vlm.api_key_env`` variable, is kept on this object
             only, and is never written to the config, the ledger, the summary, or a log line
-            (error texts have it replaced by ``***``). A ``vlm_backend_factory`` does not
-            receive it.
+            (error texts have it replaced by ``***``). It must be one line of printable
+            ASCII without whitespace (surrounding whitespace is stripped). It cannot be combined
+            with ``vlm_backend_factory``, which does not receive it.
 
         """
         if config is not None and config_yaml is not None:
             raise ValueError("pass config or config_yaml, not both")
-        if vlm_api_key is not None and not (isinstance(vlm_api_key, str) and vlm_api_key.strip()):
-            raise ValueError("vlm_api_key must be a non-empty string (or None)")
+        if vlm_api_key is not None:
+            if vlm_backend_factory is not None:
+                raise ValueError(
+                    "vlm_api_key is for the built-in VLM backends; a vlm_backend_factory does "
+                    "not receive it, so give the key to your factory instead"
+                )
+            vlm_api_key = clean_api_key(vlm_api_key, "the vlm_api_key argument")
+            if vlm_api_key is None:
+                raise ValueError("vlm_api_key must be a non-empty string (or None)")
         if config_yaml is not None:
             config = RefineConfig.from_yaml(config_yaml)
         self.config = config if config is not None else RefineConfig.defaults()

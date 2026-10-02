@@ -6,12 +6,17 @@ import argparse
 import json
 import logging
 import sys
+from collections.abc import Mapping
 
-from .config import BACKENDS, RefineConfig
+from .config import BACKENDS, RefineConfig, read_yaml_mapping
 from .refiner import TrackRefiner
 
 #: The ``vlm`` config fields that a ``--vlm-*`` option overrides (``--vlm-base-url``: base_url).
 _VLM_FIELDS = ("backend", "model", "base_url", "api_key_env", "api_key_file")
+#: Fields that belong to one backend; dropped from the file when --vlm-backend changes it.
+_BACKEND_BOUND = ("model", "base_url", "api_key_env", "api_key_file")
+
+log = logging.getLogger("dnt.refine.cli")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -49,17 +54,39 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def load_config(args: argparse.Namespace) -> RefineConfig:
-    """Return the config of ``args.config`` with the ``--vlm-*`` options applied and validated.
+    """Return the config of ``args.config`` with the ``--vlm-*`` options applied, validated once.
 
-    An empty value (``--vlm-base-url ""``) resets the field to its default.
+    The options are applied to the YAML's ``vlm`` mapping before it is checked, so a flag can
+    complete or correct a file that is only valid with it. An empty value (``--vlm-model ""``)
+    resets the field to its default. When ``--vlm-backend`` names a different backend than the
+    file, the file's ``model``, ``base_url``, ``api_key_env`` and ``api_key_file`` belong to the
+    other backend and are dropped (each can be given again with its own option): an endpoint
+    meant for one backend must not receive the other backend's key.
     """
-    cfg = RefineConfig.from_yaml(args.config)
-    for name in _VLM_FIELDS:
-        value = getattr(args, f"vlm_{name}", None)
-        if value is not None:
-            setattr(cfg.vlm, name, value)
-    cfg.validate()
-    return cfg
+    data = read_yaml_mapping(args.config)
+    given = {name: getattr(args, f"vlm_{name}", None) for name in _VLM_FIELDS}
+    given = {k: v for k, v in given.items() if v is not None}
+    if given:
+        vlm = data.get("vlm")
+        vlm = {} if vlm is None else vlm
+        if isinstance(vlm, Mapping):  # anything else is reported by from_dict
+            vlm = dict(vlm)
+            old_backend = vlm.get("backend", "none")
+            if "backend" in given and given["backend"] != old_backend:
+                dropped = [k for k in _BACKEND_BOUND if k in vlm and k not in given]
+                for k in dropped:
+                    del vlm[k]
+                if dropped:
+                    log.info(
+                        "--vlm-backend %s replaces the config's %s: its vlm.%s not used",
+                        given["backend"],
+                        old_backend,
+                        ", vlm.".join(dropped),
+                    )
+            for name, value in given.items():
+                vlm[name] = value if value.strip() else None
+            data["vlm"] = vlm
+    return RefineConfig.from_dict(data)  # validates once, with the options applied
 
 
 def main(argv: list[str] | None = None) -> int:

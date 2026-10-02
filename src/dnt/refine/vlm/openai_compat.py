@@ -11,6 +11,7 @@ from . import (
     missing_key_message,
     parse_answer,
     resolve_api_key,
+    warn_if_cleartext,
 )
 
 
@@ -38,11 +39,14 @@ class OpenAICompatBackend:
         self.model = cfg.model
         self._json_mode = bool(cfg.json_mode)
         key = resolve_api_key(cfg, "OPENAI_API_KEY", api_key)
-        if key is None and not (cfg.base_url or os.environ.get("OPENAI_BASE_URL")):
+        endpoint = cfg.base_url or os.environ.get("OPENAI_BASE_URL")
+        if key is None and not endpoint:
             raise ValueError(
                 missing_key_message("openai_compat", cfg.api_key_env or "OPENAI_API_KEY")
                 + "; a local server needs vlm.base_url instead"
             )
+        if key is not None:  # the placeholder is no secret
+            warn_if_cleartext(endpoint, self.name)
         self.secret = key  # the runner scrubs it from every error text
         self._client = AsyncOpenAI(
             base_url=cfg.base_url, api_key=key or "EMPTY", timeout=cfg.timeout_s, max_retries=0

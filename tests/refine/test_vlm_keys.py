@@ -179,6 +179,12 @@ def test_a_key_from_any_source_never_reaches_config_ledger_summary_or_logs(
     assert key not in res.ledger_path.read_text()
     assert key not in json.dumps(res.summary, default=str)
     assert key not in caplog.text and "***" in caplog.text
+    assert "remaining VLM questions are skipped" in caplog.text  # the breaker tripped
+    page = res.review_path.read_text()
+    assert ev.id in page and key not in page  # the pending event is on the review page
+    for f in res.review_path.with_suffix("").rglob("*"):  # the page's images and manifest
+        if f.is_file():
+            assert key.encode() not in f.read_bytes(), f
     assert Ledger.read(res.ledger_path).header["config"]["vlm"]["api_key_file"] == (
         cfg.vlm.api_key_file
     )

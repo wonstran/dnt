@@ -221,12 +221,14 @@ class VLMConfig:
     base_url : str or None
         The endpoint of either backend: an OpenAI-compatible server for ``openai_compat``, or a
         proxy or gateway for ``anthropic`` (None: the vendor's endpoint). An ``http://`` or
-        ``https://`` URL without a user name, password, or query string.
+        ``https://`` URL with a host and a valid port, without whitespace, a user name,
+        password, query string, or fragment.
     api_key_env : str or None
         The name of the environment variable that holds the key (None: ``OPENAI_API_KEY`` or
         ``ANTHROPIC_API_KEY``).
     api_key_file : str or None
-        The path of a file whose content (stripped) is the key; ``~`` is expanded. It takes
+        The path of a file whose content (stripped) is the key: one line of printable ASCII
+        without whitespace; ``~`` is expanded. It takes
         precedence over ``api_key_env``, and ``TrackRefiner(vlm_api_key=...)`` over both. The
         config holds no key itself, since it is copied into the ledger header.
 
@@ -307,10 +309,7 @@ class RefineConfig:
     @classmethod
     def from_yaml(cls, path) -> RefineConfig:
         """Load a config from a YAML file."""
-        data = yaml.safe_load(Path(path).read_text(encoding="utf-8"))
-        if data is not None and not isinstance(data, Mapping):
-            raise ValueError(f"{path}: expected a mapping at the top level")
-        return cls.from_dict(data)
+        return cls.from_dict(read_yaml_mapping(path))
 
     def to_dict(self) -> dict:
         """Return the config as plain Python data."""
@@ -459,6 +458,17 @@ class RefineConfig:
             raise ValueError("invalid refine config: " + "; ".join(p))
 
 
+def read_yaml_mapping(path) -> dict:
+    """Return the top-level mapping of a config YAML file (empty if the file is empty).
+
+    Nothing is checked beyond the shape; ``RefineConfig.from_dict`` checks the keys and values.
+    """
+    data = yaml.safe_load(Path(path).read_text(encoding="utf-8"))
+    if data is not None and not isinstance(data, Mapping):
+        raise ValueError(f"{path}: expected a mapping at the top level")
+    return dict(data or {})
+
+
 def _url_problems(url) -> list[str]:
     """Return what is wrong with ``vlm.base_url``; the messages never echo the value.
 
@@ -469,11 +479,14 @@ def _url_problems(url) -> list[str]:
         return []
     if not (isinstance(url, str) and url.lower().startswith(("http://", "https://"))):
         return ["vlm.base_url must be an http:// or https:// URL"]
+    if any(c.isspace() or ord(c) < 32 or ord(c) == 127 for c in url):
+        return ["vlm.base_url must not contain whitespace or control characters"]
     try:
         parts = urlsplit(url)
         host = parts.hostname
+        _ = parts.port  # raises ValueError for a port that is not a number in range
     except ValueError:
-        return ["vlm.base_url is not a valid URL"]
+        return ["vlm.base_url is not a valid URL (check the host and the port)"]
     if not host:
         return ["vlm.base_url must name a host"]
     if "@" in parts.netloc:

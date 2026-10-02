@@ -6,7 +6,9 @@
 from __future__ import annotations
 
 import importlib.util
+import ipaddress
 import json
+import logging
 import math
 import os
 import re
@@ -14,9 +16,12 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol
+from urllib.parse import urlsplit
 
 if TYPE_CHECKING:
     from ..config import VLMConfig
+
+log = logging.getLogger(__name__)
 
 #: For each backend: the module it needs and the pip extra that provides it.
 BACKEND_REQUIRES = {
@@ -151,45 +156,144 @@ def missing_key_message(backend: str, env: str) -> str:
     )
 
 
+#: The largest key file read; a longer one is an error (a key is a few hundred bytes at most).
+KEY_FILE_MAX_BYTES = 64 * 1024
+_ENV_ASSIGNMENT = re.compile(r"(?:export\s+)?[A-Za-z_][A-Za-z0-9_]*=[^=]")
+_LOOPBACK_NAMES = {"localhost", "localhost.localdomain", "ip6-localhost"}
+
+
+def key_problem(key: str) -> str | None:
+    """Return why ``key`` (already stripped) cannot be an API key, or None if it can.
+
+    The reason never quotes the key: a key is printable ASCII with no whitespace; a ``.env``
+    line (``NAME=value``) or several lines are reported as such.
+    """
+    if "\n" in key or "\r" in key:
+        return "has more than one line"
+    if _ENV_ASSIGNMENT.match(key):
+        return "looks like NAME=value; put only the key in it"
+    if any(c.isspace() for c in key):
+        return "contains whitespace"
+    if any(not (32 < ord(c) < 127) for c in key):
+        return "contains non-ASCII or control characters"
+    return None
+
+
+def clean_api_key(value, source: str) -> str | None:
+    """Strip ``value``; return None if it is blank, the key if it is valid.
+
+    Raises
+    ------
+    ValueError
+        If ``value`` is not a string or is not a valid key; the message names ``source`` (an
+        argument, a variable, or a file), never the value.
+
+    """
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise ValueError(f"{source} must be a string")
+    key = value.strip()
+    if not key:
+        return None
+    why = key_problem(key)
+    if why is not None:
+        raise ValueError(f"{source} {why}")
+    return key
+
+
+def _read_key_file(path: Path) -> bytes:
+    """Read at most ``KEY_FILE_MAX_BYTES + 1`` bytes; a FIFO with no writer reads as empty."""
+    flags = os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_BINARY", 0)
+    fd = os.open(path, flags)  # non-blocking open: a FIFO with no writer must not hang
+    try:
+        if getattr(os, "O_NONBLOCK", 0):
+            os.set_blocking(fd, True)  # then read normally, to the end of what is written
+        chunks, size = [], 0
+        while size <= KEY_FILE_MAX_BYTES:
+            chunk = os.read(fd, KEY_FILE_MAX_BYTES + 1 - size)
+            if not chunk:
+                break
+            chunks.append(chunk)
+            size += len(chunk)
+        return b"".join(chunks)
+    finally:
+        os.close(fd)
+
+
 def resolve_api_key(cfg: VLMConfig, default_env: str, runtime_key: str | None = None) -> str | None:
     """Return the API key for a backend, or None when no source has one.
 
     The sources, first match wins:
 
     1. ``runtime_key``: the ``vlm_api_key`` argument of ``TrackRefiner``;
-    2. ``cfg.api_key_file``: a file whose content, stripped of surrounding whitespace, is the
-       key (``~`` is expanded);
-    3. the environment variable ``cfg.api_key_env``, or ``default_env`` when that is unset.
+    2. ``cfg.api_key_file``: a file whose content, stripped of surrounding whitespace (and a
+       UTF-8 byte order mark), is the key (``~`` is expanded; at most 64 KiB is read);
+    3. the environment variable ``cfg.api_key_env``, or ``default_env`` when that is unset (a
+       blank value counts as unset).
 
+    Each key is checked with ``key_problem``: one line of printable ASCII without whitespace.
     The key itself never goes into the config, a message, or a log line.
 
     Raises
     ------
     ValueError
-        If ``cfg.api_key_file`` is set but cannot be read or holds only whitespace. The message
-        names the path, never the content.
+        If ``cfg.api_key_file`` is set but cannot be read, is too large, is empty, or does not
+        hold a valid key, or a runtime or environment key is not valid. The message names the
+        file, argument or variable, never the content.
 
     """
-    if runtime_key is not None and str(runtime_key).strip():
-        return str(runtime_key).strip()
+    key = clean_api_key(runtime_key, "the vlm_api_key argument")
+    if key is not None:
+        return key
     key_file = getattr(cfg, "api_key_file", None)
     if key_file:
         path = Path(key_file).expanduser()
+        where = f"the VLM key file {path} (vlm.api_key_file)"
         try:
-            key = path.read_text(encoding="utf-8").strip()
+            raw = _read_key_file(path)
         except OSError as exc:
             why = exc.strerror or type(exc).__name__
-            raise ValueError(
-                f"cannot read the VLM key file {path} (vlm.api_key_file): {why}"
-            ) from None
+            raise ValueError(f"cannot read {where}: {why}") from None
+        if len(raw) > KEY_FILE_MAX_BYTES:
+            raise ValueError(f"{where} is larger than {KEY_FILE_MAX_BYTES // 1024} KiB")
+        try:
+            text = raw.decode("utf-8-sig")
         except UnicodeDecodeError:
-            raise ValueError(
-                f"the VLM key file {path} (vlm.api_key_file) is not UTF-8 text"
-            ) from None
-        if not key:
-            raise ValueError(f"the VLM key file {path} (vlm.api_key_file) is empty")
+            raise ValueError(f"{where} is not UTF-8 text") from None
+        key = clean_api_key(text, where)
+        if key is None:
+            raise ValueError(f"{where} is empty")
         return key
-    return os.environ.get(cfg.api_key_env or default_env) or None
+    env = cfg.api_key_env or default_env
+    return clean_api_key(os.environ.get(env), f"the {env} environment variable")
+
+
+def warn_if_cleartext(url: str | None, backend: str) -> None:
+    """Log one warning if the key would go over plain ``http://`` to a host that is not local.
+
+    Only the host is logged (validation already forbids a user name, password, or query).
+    """
+    if not url:
+        return
+    try:
+        parts = urlsplit(url)
+        host = parts.hostname or ""
+    except ValueError:
+        return
+    if parts.scheme.lower() != "http":
+        return
+    try:
+        local = ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        local = host.lower() in _LOOPBACK_NAMES or host.lower().endswith(".localhost")
+    if not local:
+        log.warning(
+            "vlm.backend %s: the endpoint uses http:// to %s, so the API key is sent "
+            "unencrypted; use https:// unless the network is trusted",
+            backend,
+            host,
+        )
 
 
 def make_backend(cfg: VLMConfig, api_key: str | None = None) -> VLMBackend:
