@@ -28,9 +28,12 @@ def _run(*args):
                           capture_output=True, text=True)
 
 
-def _cfg(tmp_path, name="c.yaml"):
+def _cfg(tmp_path, name="c.yaml", **encoder):
     cfg = tmp_path / name
-    RefineConfig.defaults().to_yaml(cfg)
+    c = RefineConfig.defaults()
+    for k, v in encoder.items():
+        setattr(c.encoder, k, v)
+    c.to_yaml(cfg)
     return cfg
 
 
@@ -190,8 +193,8 @@ def test_video_option_supplies_the_frame_rate(tmp_path, capsys, synthetic_video)
     table(box_rows(1, range(0, 20), 100.0, 100.0, vx=2.0),
           box_rows(2, range(24, 60), 148.0, 100.0, vx=2.0)).to_csv(src, index=False, header=False)
     out = tmp_path / "o.csv"
-    code, stdout, err = _main(capsys, "run", src, "--video", video, "--config", _cfg(tmp_path),
-                              "--out", out)
+    code, stdout, err = _main(capsys, "run", src, "--video", video,
+                              "--config", _cfg(tmp_path, kind="none"), "--out", out)
     assert code == 0, err
     header = json.loads((tmp_path / "o.ledger.jsonl").read_text().splitlines()[0])
     assert header["fps"] == 25.0 and header["fps_source"] == "video"
@@ -315,3 +318,16 @@ def test_docs_and_changelog_state_the_limitation_accurately():
     assert log.index("## Unreleased") < log.index("## 0.3.3")
     # final review M8: the root CHANGELOG.md mirrors docs/changelog.md
     assert (ROOT / "CHANGELOG.md").read_text() == log
+
+
+def test_missing_encoder_package_is_a_clean_error(tmp_path, capsys, synthetic_video, monkeypatch):
+    monkeypatch.setitem(sys.modules, "transformers", None)
+    video, _ = synthetic_video
+    src = tmp_path / "t.txt"
+    table(box_rows(1, range(100), 10.0, 40.0, vx=1.5)).to_csv(src, index=False, header=False)
+    code, stdout, err = _main(
+        capsys, "run", src, "--video", video, "--config", _cfg(tmp_path),
+        "--out", tmp_path / "o.txt",
+    )
+    assert code == 2 and "refine-dino" in err and stdout == ""
+    assert not (tmp_path / "o.txt").exists()

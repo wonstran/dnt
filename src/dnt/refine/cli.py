@@ -51,7 +51,7 @@ def main(argv: list[str] | None = None) -> int:
             verbose=False,
         )
         res = refiner.last_result
-    except (ValueError, FileNotFoundError) as exc:
+    except (ValueError, FileNotFoundError, ImportError) as exc:
         print(f"dnt-refine: error: {exc}", file=sys.stderr)
         return 2
     print(

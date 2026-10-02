@@ -17,8 +17,10 @@ from .. import __version__
 from . import io
 from .apply import apply_edit, lineage_of_rows, merge_chains, next_track_id, renumber
 from .config import RefineConfig, to_frames
+from .crops import CROP_PAD
+from .encoders import check_encoder_dependencies, make_encoder, weights_identity
 from .events import ACCEPTED, Decision, Event, EventKind, Ledger
-from .features import Appearance
+from .features import Appearance, FeatureStore, features_key
 from .hints import read_reclass_hints
 from .interpolate import interpolate_tracks_rts
 from .link import run_link_stage
@@ -33,6 +35,7 @@ from .primitives import (
 from .screen import ScreenContext, propose_orphans, propose_screen
 from .switch import propose_splits
 from .verify import Band, decide, route_without_vlm
+from .video_appearance import VideoAppearance
 
 log = logging.getLogger(__name__)
 LEDGER_FORMAT = "dnt.refine.ledger/1"
@@ -385,6 +388,7 @@ class TrackRefiner:
         device: str | None = None,
         *,
         appearance_factory: Callable[..., Appearance | None] | None = None,
+        encoder_factory: Callable[..., object] | None = None,
     ) -> None:
         """Configure once with ``config`` or ``config_yaml``; ``device`` sets ``encoder.device``."""
         if config is not None and config_yaml is not None:
@@ -396,6 +400,8 @@ class TrackRefiner:
             self.config.encoder.device = device
         self.config.validate()
         self.appearance_factory = appearance_factory
+        self.encoder_factory = encoder_factory
+        self._encoder_memo: tuple[tuple, object] | None = None
         self.last_result: RefineResult | None = None
 
     def refine(
@@ -424,6 +430,9 @@ class TrackRefiner:
         ValueError
             If ``out_file``, or the ledger, review or feature-cache path next to it, is one of
             the input files; if no frame rate is known; or if an input is malformed.
+        ImportError
+            If a video is given, ``encoder.kind`` is ``dino`` or ``reid``, and the encoder's
+            package is not installed; the message names the pip extra.
 
         """
         cfg = self.config
@@ -438,6 +447,13 @@ class TrackRefiner:
             },
         )
         paths = output_paths(out)
+        if (
+            video_file is not None
+            and cfg.encoder.kind != "none"
+            and self.appearance_factory is None
+            and self.encoder_factory is None
+        ):
+            check_encoder_dependencies(cfg.encoder)  # before any processing (spec 5.5)
         track_sha = io.sha256_file(track_file)
         context_sha = None
         if context_file is not None:
@@ -496,7 +512,18 @@ class TrackRefiner:
             "features": None,
         }
         before = table_summary(work, fps_val)
-        appearance = self._appearance(work, video_file, ctx_boxes, fps_val)
+        appearance, store = self._appearance(
+            work,
+            video_file,
+            ctx_boxes,
+            fps_val,
+            key_parts={
+                "tracks_sha": track_sha,
+                "video": (inputs["video"] or {}).get("fingerprint"),
+                "context_sha": context_sha,
+            },
+            features_path=paths["features"],
+        )
         stages = _Stages(cfg, fps_val, frame_size, appearance, ctx_boxes, ctx_fmt, hint_map)
         desc = (
             "Refining"
@@ -509,6 +536,9 @@ class TrackRefiner:
             work, events = stages.run(
                 work, tick=lambda name: (pbar.set_postfix_str(name), pbar.update(1))
             )
+        if store is not None:
+            sha = store.save(paths["features"])
+            inputs["features"] = _file_record(paths["features"], sha, cache_key=store.key)
         work, id_map = renumber(work)
         summary = {
             "before": before,
@@ -629,11 +659,57 @@ class TrackRefiner:
             results.append(str(out))
         return results
 
-    def _appearance(self, work, video, context, fps) -> Appearance | None:
+    def _encoder(self):
+        """Return the encoder, reused while the settings and the weights file are unchanged."""
+        cfg = self.config.encoder
+        # a weights file replaced in place under the same path must not reuse the old model
+        identity = None
+        if self.encoder_factory is None:
+            identity = weights_identity(cfg, self.config.target)
+        key = (
+            cfg.kind,
+            cfg.model,
+            cfg.weights,
+            cfg.device,
+            cfg.batch_size,
+            self.config.target,
+            identity,
+        )
+        if self._encoder_memo is None or self._encoder_memo[0] != key:
+            factory = self.encoder_factory or make_encoder
+            self._encoder_memo = (key, factory(cfg, self.config.target))
+        return self._encoder_memo[1]
+
+    def _appearance(self, work, video, context, fps, *, key_parts, features_path):
+        """Return ``(appearance, store)``; ``store`` is the feature cache to save, or None."""
         if self.appearance_factory is not None:
-            return self.appearance_factory(
+            app = self.appearance_factory(
                 work=work, video=video, context=context, fps=fps, config=self.config
             )
-        if video is not None and self.config.encoder.kind != "none":
-            log.warning("appearance encoders arrive in dnt.refine Plan 2; running motion-only")
-        return None
+            return app, None
+        cfg = self.config.encoder
+        if video is None or cfg.kind == "none":
+            return None, None
+        encoder = self._encoder()
+        key = features_key(
+            **key_parts,
+            encoder=encoder,
+            sample_every=cfg.sample_every,
+            occlusion_iou=cfg.occlusion_iou,
+            crop_pad=CROP_PAD,
+        )
+        loaded = FeatureStore.load(features_path, key, dim=encoder.dim)
+        store = loaded if loaded is not None else FeatureStore(key)
+        occluded = occlusion_flags(work, context, cfg.occlusion_iou)
+        app = VideoAppearance(
+            work,
+            occluded,
+            video,
+            encoder,
+            store,
+            sample_every=cfg.sample_every,
+            batch_size=cfg.batch_size,
+            crop_pad=CROP_PAD,
+        )
+        app.prefetch_coarse()
+        return app, store

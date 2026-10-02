@@ -27,6 +27,9 @@ def _write(dirpath, df, name="t.txt"):
 
 
 def _refine(src, out, cfg=None, **kw):
+    if kw.get("video_file") is not None:
+        cfg = cfg if cfg is not None else RefineConfig.defaults()
+        cfg.encoder.kind = "none"  # these tests are about the video's metadata, not appearance
     refiner = TrackRefiner(cfg)
     df = refiner.refine(src, out, verbose=False, **kw)
     assert df is refiner.last_result.tracks
@@ -137,7 +140,7 @@ def test_video_supplies_fps_frame_size_and_fingerprint(tmp_path, synthetic_video
     assert h["fps"] == pytest.approx(25.0) and h["fps_source"] == "video"
     assert h["frame_size"] == [320, 240]
     assert h["inputs"]["video"]["fingerprint"]["sha256"] == io.sha256_file(video)
-    assert "motion-only" in caplog.text
+    assert "Plan 2" not in caplog.text
 
 
 def test_track_frames_beyond_the_video_are_rejected(tmp_path, synthetic_video):
