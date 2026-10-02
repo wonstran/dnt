@@ -47,6 +47,9 @@ dependencies = [
 [project.optional-dependencies]
 dev = ["pytest", "pytest-cov", "ruff", "build"]
 docs = ["mkdocs-material", "mkdocstrings[python]", "mkdocs-with-pdf", "qrcode"]
+refine-dino = ["transformers>=4.40"]
+refine-reid = ["torchreid"]
+refine = ["transformers>=4.40", "torchreid"]
 
 [project.scripts]
 dnt-refine = "dnt.refine.cli:main"
