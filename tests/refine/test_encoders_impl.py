@@ -1,4 +1,5 @@
 import math
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -12,6 +13,7 @@ from dnt.refine.encoders import (
     parameters_digest,
     weights_digest,
 )
+from dnt.refine.encoders import reid as reid_module
 from dnt.refine.encoders.dino import DinoEncoder, letterbox
 from dnt.refine.encoders.reid import ReidEncoder
 
@@ -179,6 +181,20 @@ def test_reid_without_a_feature_extractor_names_both_layouts_and_the_github_inst
     assert "dnt[refine-reid]" in msg
     assert "pip install git+https://github.com/KaiyangZhou/deep-person-reid.git" in msg
     assert "encoder.kind: none" in msg
+    assert "tensorboard" not in msg
+
+
+def test_reid_import_error_naming_tensorboard_points_to_the_extra(monkeypatch, tmp_path):
+    def import_module(name):
+        raise ModuleNotFoundError("No module named 'tensorboard'", name="tensorboard")
+
+    monkeypatch.setattr(reid_module, "importlib", SimpleNamespace(import_module=import_module))
+    weights = tmp_path / "w.pt"
+    weights.write_bytes(b"w")
+    with pytest.raises(ImportError) as info:
+        ReidEncoder("osnet_x1_0", str(weights), "cpu", 2)
+    msg = str(info.value)
+    assert "tensorboard" in msg and "dnt[refine-reid]" in msg
 
 
 @pytest.mark.parametrize("batch_size", [1, 2, 3, 7])

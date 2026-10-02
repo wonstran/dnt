@@ -112,10 +112,10 @@ def test_extras_are_declared_and_not_required():
     meta = tomllib.loads((ROOT / "pyproject.toml").read_text())["project"]
     extras = meta["optional-dependencies"]
     assert extras["refine-dino"] == ["transformers>=4.40"]
-    assert extras["refine-reid"] == ["torchreid"]
-    assert set(extras["refine"]) == {"transformers>=4.40", "torchreid"}
+    assert extras["refine-reid"] == ["torchreid", "tensorboard"]
+    assert set(extras["refine"]) == {"transformers>=4.40", "torchreid", "tensorboard"}
     required = " ".join(meta["dependencies"])
-    assert "transformers" not in required and "torchreid" not in required
+    assert not any(n in required for n in ("transformers", "torchreid", "tensorboard"))
 
 
 def test_importing_the_package_loads_no_encoder_library():

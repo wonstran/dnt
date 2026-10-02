@@ -29,10 +29,18 @@ def _feature_extractor_class():
             return importlib.import_module(name).FeatureExtractor
         except (ImportError, AttributeError) as exc:
             tried.append(f"{name} ({exc})")
+    tensorboard_hint = (
+        " PyPI torchreid imports torch.utils.tensorboard but does not declare it: "
+        "pip install tensorboard (the dnt[refine-reid] extra includes it)."
+        if any("tensorboard" in t for t in tried)
+        else ""
+    )
     raise ImportError(
         "encoder.kind='reid' needs torchreid's FeatureExtractor, which was not found in "
         + "; ".join(tried)
-        + ". pip install 'dnt[refine-reid]' may install a repackaged torchreid without it; "
+        + "."
+        + tensorboard_hint
+        + " pip install 'dnt[refine-reid]' may install a repackaged torchreid without it; "
         "install the original instead with "
         "pip install git+https://github.com/KaiyangZhou/deep-person-reid.git, "
         "or set encoder.kind: none to run without appearance."

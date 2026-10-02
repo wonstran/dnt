@@ -54,7 +54,7 @@ find ID switches (stage 1) and to score links (stage 3). Install an encoder firs
 
 ```bash
 pip install 'dnt[refine-dino]'   # DINOv2 (the default, kind: dino)
-pip install 'dnt[refine-reid]'   # torchreid OSNet (kind: reid)
+pip install 'dnt[refine-reid]'   # torchreid OSNet (kind: reid), with tensorboard
 ```
 
 ```yaml
