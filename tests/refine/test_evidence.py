@@ -256,3 +256,20 @@ def test_an_unopenable_video_gives_none_for_every_event(tmp_path, caplog):
         out = b.build_many(evs)
     assert out == {e.id: None for e in evs}
     assert any("cannot open video" in r.message for r in caplog.records)
+
+
+@pytest.mark.parametrize("frame_count", [0, -1])
+def test_an_unknown_frame_count_does_not_bound_the_evidence(tmp_path, frame_count):
+    # raw .h264, some .ts/.mkv, and streams report 0 (or -1) frames: that is "unknown", not
+    # "empty", so every box still qualifies and an unreadable frame is skipped when read
+    w = _work(_walker(1, range(60)))
+    rows = video_rows(w.assign(track=1).pipe(_as_rows), RED)
+    video = make_color_video(tmp_path / "v.mp4", rows, N)
+    b = EvidenceBuilder(video, w, pd.Series(False, index=w.index), frame_count=frame_count)
+    ev = _ev(EventKind.DROP, "screen", [1], [[[1, 0, 59]]], (0, 59), reason="static", spans=None)
+    plan = b.plan(ev)
+    assert len(plan.rows[0][1]) == 6 and len(plan.contexts) == 1
+    jpeg = b.build(ev)
+    assert jpeg is not None and _decode(jpeg).shape[0] > 160
+    split = _ev(EventKind.SPLIT, "switch", [1], [[[1, 0, 59]]], (30, 30), cut_frame=30)
+    assert len(b.plan(split).contexts) == 1 and b.build(split) is not None

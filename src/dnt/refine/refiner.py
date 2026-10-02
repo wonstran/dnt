@@ -38,7 +38,7 @@ from .primitives import (
 from .review import review_image_dir, write_review
 from .screen import ScreenContext, propose_orphans, propose_screen
 from .switch import propose_splits
-from .verify import Band, VLMRouting, decide, route_with_vlm, route_without_vlm
+from .verify import NO_EVIDENCE, Band, VLMRouting, decide, route_with_vlm, route_without_vlm
 from .video_appearance import VideoAppearance
 from .vlm import check_vlm_dependencies, make_backend
 from .vlm.cache import AnswerCache
@@ -208,15 +208,24 @@ def _check_frames_fit_the_video(max_frame: int, n: int, fmt: str, *, reads_frame
     raise ValueError(msg)
 
 
-def _vlm_counts(runner) -> dict:
+def _vlm_counts(runner, events: list[Event]) -> dict:
+    no_evidence = sum(1 for e in events if (e.vlm or {}).get("error") == NO_EVIDENCE)
     if runner is None:
-        return {"calls": 0, "retries": 0, "cache_hits": 0, "failures": 0, "budget_skipped": 0}
+        return {
+            "calls": 0,
+            "retries": 0,
+            "cache_hits": 0,
+            "failures": 0,
+            "budget_skipped": 0,
+            "no_evidence": no_evidence,
+        }
     return {
         "calls": runner.calls,
         "retries": runner.retries,
         "cache_hits": runner.cache_hits,
         "failures": runner.failures,
         "budget_skipped": runner.budget_skipped,
+        "no_evidence": no_evidence,
     }
 
 
@@ -603,6 +612,10 @@ class TrackRefiner:
                     "run as context."
                 )
         vinfo = io.video_info(video_file) if video_file is not None else None
+        if runner is not None and vinfo["frame_count"] <= 0:
+            log.warning(
+                "frame count unknown; evidence frames are not range-checked (%s)", video_file
+            )
         fps_val, fps_src = resolve_fps(fps, cfg.fps, vinfo["fps"] if vinfo else None)
         if cfg.frame_size:
             frame_size = tuple(int(v) for v in cfg.frame_size)
@@ -726,7 +739,7 @@ class TrackRefiner:
             "before": before,
             "after": table_summary(work, fps_val),
             "events": _event_counts(events),
-            "vlm": _vlm_counts(runner),
+            "vlm": _vlm_counts(runner, events),
             "orphan_deferred": sorted(id_map[t] for t in stages.orphan_deferred if t in id_map),
             "filled_input_rows_removed": tin.n_filled_removed,
             "duplicate_input_rows_removed": tin.n_duplicates_removed,

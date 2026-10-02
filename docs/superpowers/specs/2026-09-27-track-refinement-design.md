@@ -707,7 +707,7 @@ Each routed event gets **one composite JPEG**, built by `evidence.py`:
 - A grid of labeled tiles on a neutral background.
 - Crops are padded to 1.5× the box and upscaled so their height is at least 160 px.
 - Context frames are downscaled to 768 px wide, with the event's boxes drawn and labeled "A" or "B".
-- Evidence is built in chunks of 64 events. Within a chunk the frames are fetched in one pass, sorted by frame index, with sequential reads and seeking only across large jumps. A frame that cannot be read is skipped with a warning (a tile is left out, and an event with no tile left gets no image); a video that cannot be opened gives no image for any event.
+- Evidence is built in chunks of 64 events. Within a chunk the frames are fetched in one pass, sorted by frame index, with sequential reads and seeking only across large jumps. A frame that cannot be read is skipped with a warning (a tile is left out, and an event with no tile left gets no image); a video that cannot be opened gives no image for any event. A frame count of 0 or less (the container does not know it: raw `.h264`, some `.ts`/`.mkv`, streams) means unknown, not empty: frames are then not range-checked, and with a VLM backend one warning says so.
 
 | Event | Tiles |
 |---|---|
@@ -802,7 +802,7 @@ class VLMBackend(Protocol):
 - **Budget.** `vlm.max_calls` (default 500) is a hard limit on backend invocations per `refine` run: `calls` + `retries` never exceed it. Each vote that is sent counts one call, and each retry (after a transient failure, or after an invalid reply) counts one retry; cache hits cost nothing.
   - Whole questions are admitted in priority order, before anything is sent, but within each routing batch, not across the run: the switch stage, the screen stage, and each link pass are routed separately, in that order, and each batch orders its uncertain events by `|algo_score − band midpoint|`, closest first, and admits them against what earlier batches left. This deviates from the original "closest first overall": later stages only exist after earlier stages' edits are applied, so a run-wide order is not possible. With `max_calls: 200` and 250 uncertain switch events, the link questions are all skipped with `budget`, even when closer to their band midpoint. `max_calls` (calls + retries) still holds for the whole run; raise it rather than expect global ordering. Rider-subtype calls come out of the same budget. A question is admitted only if all its uncached votes fit in what is left. A question that does not fit is skipped with `vlm.error: "budget"` and stays `HUMAN_PENDING`; a later question that does fit still runs.
   - Retries draw from the allowance left after admission. When none is left, the event stays `HUMAN_PENDING` with `vlm.error: "budget"`.
-  - The summary reports `calls`, `retries`, and `budget_skipped` (§8.3).
+  - The summary reports `calls`, `retries`, `budget_skipped`, and `no_evidence` (§8.3).
 - **Concurrency.** An `asyncio` semaphore enforces `vlm.max_concurrency` (default 4). The public API stays synchronous: the runner keeps one event loop alive on its own thread for its whole life, runs one batch at a time on it, and closes the backend's client on that same loop. An interrupted wait (for example Ctrl+C) cancels the batch; `close()` while a batch runs makes `ask_many` raise `RuntimeError`.
 - **Cache.** `vlm.cache_dir` (default `~/.cache/dnt/vlm`) stores one JSON file per SHA-256 of (image bytes, prompt, options, backend, model, temperature, vote index). A cache hit costs nothing against the budget and sets `vlm.cached: true`. A cached answer is validated like a fresh reply (an option, a finite confidence in [0, 1]); a damaged entry is a miss.
 - **Failures.**
@@ -852,7 +852,7 @@ The summary is written to the ledger header, printed at the end of the run, and 
 - observed and interpolated row counts,
 - median observed track duration,
 - event counts per (stage, kind, decision),
-- the `vlm` counters: `calls`, `retries`, `cache_hits`, `failures`, and `budget_skipped`.
+- the `vlm` counters: `calls`, `retries`, `cache_hits`, `failures`, `budget_skipped`, and `no_evidence` (events in the uncertain band that were not asked because no evidence image could be made).
 
 ## 9. Configuration
 

@@ -75,9 +75,15 @@ class EvidenceBuilder:
         frame_count: int,
         send_context_frames: bool = True,
     ):
-        """Index the raw boxes by ``(raw_id, frame)``; ``occluded`` aligns with ``raw_work``."""
+        """Index the raw boxes by ``(raw_id, frame)``; ``occluded`` aligns with ``raw_work``.
+
+        A ``frame_count`` of 0 or less means the container does not know it (raw ``.h264``,
+        some ``.ts``/``.mkv``, streams): frames are then not range-checked, and a frame that
+        cannot be read is skipped when the images are built.
+        """
         self.video_file = video_file
         self.frame_count = int(frame_count)
+        self._limit = self.frame_count if self.frame_count > 0 else None  # None: unknown
         self.send_context_frames = bool(send_context_frames)
         w = raw_work.assign(_occ=occluded.reindex(raw_work.index).fillna(False).to_numpy(bool))
         self._box = {
@@ -105,7 +111,7 @@ class EvidenceBuilder:
                     continue
                 key = (int(raw), f)
                 box = self._box.get(key)
-                if box is None or box[2] <= 0 or box[3] <= 0 or f >= self.frame_count:
+                if box is None or box[2] <= 0 or box[3] <= 0 or not self._in_video(f):
                     continue
                 if self._occ[key] and not include_occluded:
                     continue
@@ -126,8 +132,11 @@ class EvidenceBuilder:
                 return self._box[(int(raw), frame)]
         return None
 
+    def _in_video(self, frame: int) -> bool:
+        return frame >= 0 and (self._limit is None or frame < self._limit)
+
     def _ctx(self, frame, caption, boxes):
-        if not self.send_context_frames or not 0 <= frame < self.frame_count:
+        if not self.send_context_frames or not self._in_video(frame):
             return []
         return [ContextTile(int(frame), caption, boxes)]
 

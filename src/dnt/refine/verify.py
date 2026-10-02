@@ -67,6 +67,10 @@ def route_without_vlm(events: list[Event], band: Band, *, round: int = 0) -> Non
         decide(ev, Decision.HUMAN_PENDING if d is None else d, source="auto", round=round)
 
 
+#: ``vlm.error`` of an event that was not asked because no evidence image could be made.
+NO_EVIDENCE = "no evidence image"
+
+
 @dataclass
 class VLMRouting:
     """Everything `route_with_vlm` needs: the runner, the evidence builder, the config, fps."""
@@ -172,7 +176,7 @@ def route_with_vlm(events: list[Event], band: Band, *, vlm: VLMRouting, round: i
     for _, ev, mode, options in asked:
         image = images.get(ev.id)
         if image is None:
-            ev.vlm = _vlm_record(vlm, None, "no evidence image")
+            ev.vlm = _vlm_record(vlm, None, NO_EVIDENCE)
             decide(ev, Decision.HUMAN_PENDING, source="auto", round=round)
             continue
         prompt = build_prompt(ev, cfg.target, options, fps=vlm.fps)

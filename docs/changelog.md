@@ -25,7 +25,8 @@
   cached under `vlm.cache_dir`; `vlm.votes` asks a question several times. Questions are
   admitted to the budget closest-to-the-band-middle first within each stage (switch, screen,
   each link pass), earlier stages first; raise `max_calls` rather than expecting a global order. The run summary has
-  a `vlm` entry with `calls`, `retries`, `cache_hits`, `failures`, and `budget_skipped`. Events
+  a `vlm` entry with `calls`, `retries`, `cache_hits`, `failures`, `budget_skipped`, and
+  `no_evidence` (events not asked because no evidence image could be made). Events
   left pending, with or without a backend, are collected on a static review page,
   `OUT.review.html` (signals only without a video), with their images in `OUT.review/`; **Export decisions** downloads `decisions.json`, which a later release will
   apply. New extra: `pip install 'dnt[refine-vlm]'` (`openai` and `anthropic`; also part of

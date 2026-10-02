@@ -49,7 +49,8 @@ def test_a_sure_answer_decides_and_applies_the_split(tmp_path):
     assert ev.vlm["answer"] == "different" and ev.vlm["backend"] == "fake"
     assert res.tracks.track.nunique() == 2
     assert res.summary["vlm"] == {
-        "calls": 1, "retries": 0, "cache_hits": 0, "failures": 0, "budget_skipped": 0
+        "calls": 1, "retries": 0, "cache_hits": 0, "failures": 0, "budget_skipped": 0,
+        "no_evidence": 0,
     }
     assert backend.calls[0]["tag"] == f"SPLIT:{ev.id}"
     led = Ledger.read(res.ledger_path)
@@ -93,7 +94,8 @@ def test_a_retry_is_reported_in_the_result_the_ledger_and_the_budget(tmp_path):
     backend = FakeBackend({"SPLIT": ["not json", reply("different")]})  # an invalid reply, no sleep
     res = run(tmp_path, cfg_for(tmp_path, max_calls=2), backend, src, video)
     assert res.summary["vlm"] == {
-        "calls": 1, "retries": 1, "cache_hits": 0, "failures": 0, "budget_skipped": 0
+        "calls": 1, "retries": 1, "cache_hits": 0, "failures": 0, "budget_skipped": 0,
+        "no_evidence": 0,
     }
     assert len(backend.calls) == 2
     assert Ledger.read(res.ledger_path).header["summary"]["vlm"]["retries"] == 1
@@ -115,7 +117,8 @@ def test_a_rerun_with_the_same_cache_makes_no_backend_calls(tmp_path):
     (ev,) = splits(res)
     assert again.calls == [] and ev.decision is Decision.VLM_ACCEPT and ev.vlm["cached"] is True
     assert res.summary["vlm"] == {
-        "calls": 0, "retries": 0, "cache_hits": 1, "failures": 0, "budget_skipped": 0
+        "calls": 0, "retries": 0, "cache_hits": 1, "failures": 0, "budget_skipped": 0,
+        "no_evidence": 0,
     }
 
 
@@ -231,7 +234,8 @@ def test_backend_none_changes_nothing(tmp_path):
     refiner.refine(src, tmp_path / "o.txt", video_file=video, verbose=False)
     assert splits(refiner.last_result)[0].decision is Decision.HUMAN_PENDING
     assert refiner.last_result.summary["vlm"] == {
-        "calls": 0, "retries": 0, "cache_hits": 0, "failures": 0, "budget_skipped": 0
+        "calls": 0, "retries": 0, "cache_hits": 0, "failures": 0, "budget_skipped": 0,
+        "no_evidence": 0,
     }
 
 
@@ -302,3 +306,50 @@ def test_a_run_without_a_video_still_writes_a_signals_only_review(tmp_path):
     refiner.refine(src, tmp_path / "o.txt", fps=10, verbose=False)
     html = refiner.last_result.review_path.read_text()
     assert "<img" not in html and "no image" in html
+
+
+def test_an_unknown_frame_count_still_reaches_the_backend(tmp_path, monkeypatch, caplog):
+    from dnt.refine import io
+
+    real = io.video_info
+    monkeypatch.setattr(io, "video_info", lambda path: {**real(path), "frame_count": 0})
+    src, video = takeover_scene(tmp_path)
+    backend = FakeBackend({"SPLIT": reply("different")})
+    with caplog.at_level(logging.WARNING, logger="dnt.refine"):
+        res = run(tmp_path, cfg_for(tmp_path), backend, src, video)
+    (ev,) = splits(res)
+    assert len(backend.calls) == 1 and ev.decision is Decision.VLM_ACCEPT
+    assert res.summary["vlm"]["calls"] == 1 and res.summary["vlm"]["no_evidence"] == 0
+    unknown = [r for r in caplog.records if "frame count unknown" in r.getMessage()]
+    assert len(unknown) == 1 and unknown[0].levelno == logging.WARNING
+
+
+def test_the_frame_count_warning_needs_a_backend(tmp_path, monkeypatch, caplog):
+    from dnt.refine import io
+
+    real = io.video_info
+    monkeypatch.setattr(io, "video_info", lambda path: {**real(path), "frame_count": 0})
+    src, video = takeover_scene(tmp_path)
+    cfg = cfg_for(tmp_path)
+    cfg.vlm.backend, cfg.vlm.model = "none", None
+    with caplog.at_level(logging.WARNING, logger="dnt.refine"):
+        TrackRefiner(cfg).refine(src, tmp_path / "o.txt", video_file=video, verbose=False)
+    assert not [r for r in caplog.records if "frame count unknown" in r.getMessage()]
+
+
+def test_events_without_an_evidence_image_are_counted(tmp_path, monkeypatch):
+    from dnt.refine import evidence
+
+    def broken(path):
+        raise ValueError("cannot open video")
+
+    monkeypatch.setattr(evidence, "FrameReader", broken)
+    src, video = takeover_scene(tmp_path)
+    backend = FakeBackend({"SPLIT": reply("different")})
+    res = run(tmp_path, cfg_for(tmp_path), backend, src, video)
+    (ev,) = splits(res)
+    assert backend.calls == [] and ev.vlm["error"] == "no evidence image"
+    assert res.summary["vlm"] == {
+        "calls": 0, "retries": 0, "cache_hits": 0, "failures": 0, "budget_skipped": 0,
+        "no_evidence": 1,
+    }

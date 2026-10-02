@@ -186,8 +186,8 @@ order is not possible. If the budget runs out before the later stages, raise `vl
 instead of expecting global ordering (with `max_calls: 200` and 250 uncertain splits, every
 link question is skipped, however close to its band middle). A retry (after a timeout, HTTP 429 or 5xx, or an invalid reply)
 uses what admission left over; with nothing left, the event stays pending with the same error.
-`refiner.last_result.summary["vlm"]` reports `calls`, `retries`, `cache_hits`, `failures`, and
-`budget_skipped`.
+`refiner.last_result.summary["vlm"]` reports `calls`, `retries`, `cache_hits`, `failures`,
+`budget_skipped`, and `no_evidence` (events not asked because no evidence image could be made).
 
 **Cache.** Each answer is stored under `vlm.cache_dir` (`~/.cache/dnt/vlm` by default), keyed
 by the image, prompt, options, backend, model, temperature, and vote number. A rerun on the same
@@ -208,7 +208,10 @@ errors in a row, stops the run's remaining questions: one warning is logged, and
 not yet sent ends with `vlm.error: "aborted after a fatal API error: ..."` without a request. A
 batch with failures logs one warning with their count and the first error. Without a video the
 backend is ignored with a warning. With a video, a backend whose package is missing raises
-`ImportError` before any work starts, naming `pip install 'dnt[refine-vlm]'`.
+`ImportError` before any work starts, naming `pip install 'dnt[refine-vlm]'`. A video whose
+container does not report its frame count (raw `.h264`, some `.ts` or `.mkv`) still works: a
+warning says the evidence frames are not range-checked, and a frame that cannot be read is left
+out of the image.
 
 **Review page.** Events left `HUMAN_PENDING` (except fills and smoothing) are collected on
 `OUT.review.html`, whether or not a backend was used (with `vlm.backend: none` too), with their images in `OUT.review/`. One card per event shows the evidence
