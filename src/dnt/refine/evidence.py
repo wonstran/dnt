@@ -75,7 +75,11 @@ class EvidenceBuilder:
         frame_count: int,
         send_context_frames: bool = True,
     ):
-        """Index the raw boxes by ``(raw_id, frame)``; ``occluded`` aligns with ``raw_work``.
+        """Keep a copy of the raw boxes; ``occluded`` aligns with ``raw_work``.
+
+        The ``(raw_id, frame)`` index is built lazily, only for the raw ids that the planned
+        events' lineages reference (and the frames a split's context shows), so a run that asks
+        about few events never indexes a long table.
 
         A ``frame_count`` of 0 or less means the container does not know it (raw ``.h264``,
         some ``.ts``/``.mkv``, streams): frames are then not range-checked, and a frame that
@@ -85,25 +89,64 @@ class EvidenceBuilder:
         self.frame_count = int(frame_count)
         self._limit = self.frame_count if self.frame_count > 0 else None  # None: unknown
         self.send_context_frames = bool(send_context_frames)
-        w = raw_work.assign(_occ=occluded.reindex(raw_work.index).fillna(False).to_numpy(bool))
-        self._box = {
-            (int(r), int(f)): (float(x), float(y), float(ww), float(hh))
-            for r, f, x, y, ww, hh in zip(
-                w["raw_id"], w["frame"], w["x"], w["y"], w["w"], w["h"], strict=True
-            )
-        }
-        self._occ = {
-            (int(r), int(f)): bool(o)
-            for r, f, o in zip(w["raw_id"], w["frame"], w["_occ"], strict=True)
-        }
-        self._by_frame: dict[int, list[int]] = {}
-        for r, f in self._box:
-            self._by_frame.setdefault(f, []).append(r)
+        # a copy: the caller's table may be edited by later stages
+        self._raw = raw_work["raw_id"].to_numpy(np.int64, copy=True)
+        self._frame = raw_work["frame"].to_numpy(np.int64, copy=True)
+        self._xywh = raw_work[["x", "y", "w", "h"]].to_numpy(np.float64, copy=True)
+        self._occ_col = occluded.reindex(raw_work.index).fillna(False).to_numpy(bool, copy=True)
+        self._box: dict[tuple[int, int], tuple] = {}  # (raw_id, frame) -> box, filled on demand
+        self._occ: dict[tuple[int, int], bool] = {}
+        self._loaded: set[int] = set()  # raw ids whose rows are all in _box
+        self._raws_at_frame: dict[int, list[int]] = {}  # frames whose rows are all in _box
+        self._raw_order: tuple[np.ndarray, np.ndarray] | None = None  # (order, sorted keys)
+        self._frame_order: tuple[np.ndarray, np.ndarray] | None = None
+
+    # ---- the lazy index ----
+
+    @staticmethod
+    def _sorted_by(col: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        order = np.argsort(col, kind="stable")  # stable: rows keep their order within a key
+        return order, col[order]
+
+    @staticmethod
+    def _rows(index: tuple[np.ndarray, np.ndarray], value: int) -> np.ndarray:
+        order, keys = index
+        lo, hi = np.searchsorted(keys, value, "left"), np.searchsorted(keys, value, "right")
+        return order[lo:hi]
+
+    def _put(self, rows: np.ndarray) -> None:
+        """Index ``rows`` in table order, so a later duplicate of a key wins."""
+        for i in rows:
+            key = (int(self._raw[i]), int(self._frame[i]))
+            self._box[key] = tuple(float(v) for v in self._xywh[i])
+            self._occ[key] = bool(self._occ_col[i])
+
+    def _ensure(self, spans) -> None:
+        """Index every row of the raw ids of the lineage ``spans``."""
+        need = {int(raw) for raw, _, _ in spans} - self._loaded
+        if not need:
+            return
+        if self._raw_order is None:
+            self._raw_order = self._sorted_by(self._raw)
+        for raw in sorted(need):
+            self._put(self._rows(self._raw_order, raw))
+            self._loaded.add(raw)
+
+    def _raws_at(self, frame: int) -> list[int]:
+        """Return the raw ids with a box at ``frame``, first row first; index their rows."""
+        if frame not in self._raws_at_frame:
+            if self._frame_order is None:
+                self._frame_order = self._sorted_by(self._frame)
+            rows = self._rows(self._frame_order, frame)
+            self._put(rows)
+            self._raws_at_frame[frame] = list(dict.fromkeys(int(self._raw[i]) for i in rows))
+        return self._raws_at_frame[frame]
 
     # ---- planning (no video access) ----
 
     def _pairs(self, spans, lo: int | None, hi: int | None, *, include_occluded: bool):
         """``(raw_id, frame)`` pairs of the lineage ``spans`` with a drawable box, by frame."""
+        self._ensure(spans)
         out = []
         for raw, f0, f1 in spans:
             for f in range(int(f0), int(f1) + 1):
@@ -127,6 +170,7 @@ class EvidenceBuilder:
         return self._pairs(spans, lo, hi, include_occluded=True)
 
     def _box_at(self, spans, frame: int):
+        self._ensure(spans)
         for raw, f0, f1 in spans:
             if int(f0) <= frame <= int(f1) and (int(raw), frame) in self._box:
                 return self._box[(int(raw), frame)]
@@ -170,7 +214,7 @@ class EvidenceBuilder:
             boxes = [ContextBox("A", GREEN, False, self._box_at(a_spans, t))]
             own = {int(r) for r, _, _ in a_spans}
             mine = self._box_at(a_spans, t)
-            for raw in self._by_frame.get(t, []):
+            for raw in self._raws_at(t):
                 if raw in own or mine is None:
                     continue
                 ob = self._box[(raw, t)]

@@ -273,3 +273,42 @@ def test_an_unknown_frame_count_does_not_bound_the_evidence(tmp_path, frame_coun
     assert jpeg is not None and _decode(jpeg).shape[0] > 160
     split = _ev(EventKind.SPLIT, "switch", [1], [[[1, 0, 59]]], (30, 30), cut_frame=30)
     assert len(b.plan(split).contexts) == 1 and b.build(split) is not None
+
+
+def test_the_index_is_built_lazily_for_the_raw_ids_the_events_reference(tmp_path):
+    w = _work(_walker(1, range(60)), _walker(2, range(60), x0=255.0), _walker(3, range(60)))
+    b = _builder(tmp_path, w, {1: RED, 2: BLUE})
+    assert b._box == {} and b._occ == {} and b._loaded == set()  # nothing indexed yet
+    drop = _ev(EventKind.DROP, "screen", [1], [[[1, 0, 59]]], (0, 59), reason="static",
+               spans=None)
+    b.plan(drop)
+    assert b._loaded == {1} and {r for r, _ in b._box} == {1} and len(b._box) == 60
+    link = _ev(EventKind.LINK, "link", [1, 2], [[[1, 0, 29]], [[2, 40, 59]]], (29, 40),
+               gap=[29, 40], gate="normal")
+    b.build_many([link])
+    assert b._loaded == {1, 2}  # raw 3 is never indexed
+    # a split's context frame shows the other boxes near the cut: only that frame is read
+    split = _ev(EventKind.SPLIT, "switch", [1], [[[1, 0, 59]]], (30, 30), cut_frame=30)
+    plan = b.plan(split)
+    assert b._loaded == {1, 2} and (3, 30) in b._box and (3, 31) not in b._box
+    assert len(plan.contexts[0].boxes) == 2  # its own box and raw 3 nearby (raw 2 is far)
+
+
+def test_the_lazy_index_matches_the_rows_and_keeps_the_last_duplicate(tmp_path):
+    w = _work(_walker(1, range(10)))
+    dup = w[w.frame == 4].assign(x=99.0)
+    w2 = pd.concat([w, dup], ignore_index=True)
+    occ = pd.Series(False, index=w2.index)
+    occ.iloc[-1] = True
+    b = EvidenceBuilder(tmp_path / "v.mp4", w2, occ, frame_count=N)
+    ev = _ev(EventKind.DROP, "screen", [1], [[[1, 0, 9]]], (0, 9), reason="static", spans=None)
+    b.plan(ev)
+    assert b._box[(1, 4)][0] == 99.0 and b._occ[(1, 4)] is True  # the last row wins, as before
+    assert b._box[(1, 3)] == tuple(float(v) for v in w.loc[w.frame == 3, ["x", "y", "w", "h"]]
+                                   .iloc[0])
+    # the builder keeps its own copy: later edits of the table do not change the evidence
+    w2.loc[w2.frame == 5, "x"] = -1.0
+    b2 = EvidenceBuilder(tmp_path / "v.mp4", w, pd.Series(False, index=w.index), frame_count=N)
+    w.loc[w.frame == 5, "x"] = -1.0
+    b2.plan(ev)
+    assert b2._box[(1, 5)][0] != -1.0
