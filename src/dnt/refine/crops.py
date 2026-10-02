@@ -57,8 +57,10 @@ class FrameReader:
         self._cv2 = cv2
         self._cap = cv2.VideoCapture(self.path)
         if not self._cap.isOpened():
+            self._cap.release()
             raise ValueError(f"cannot open video {path}")
-        self._next = 0
+        #: Index of the frame the next ``grab``/``read`` returns; ``None`` when unknown.
+        self._next: int | None = 0
 
     def __enter__(self) -> FrameReader:
         """Return the reader."""
@@ -78,22 +80,27 @@ class FrameReader:
         Raises
         ------
         ValueError
-            If a frame cannot be read (for example, it is past the end of the video).
+            If an index is negative, or a frame cannot be read (for example, it is past the
+            end of the video). After a failed read the next call seeks.
 
         """
         for f in sorted({int(v) for v in wanted}):
-            if f < self._next or f - self._next > SEEK_GAP:
+            if f < 0:
+                raise ValueError(f"frame index must not be negative, got {f}")
+            if self._next is None or f < self._next or f - self._next > SEEK_GAP:
                 self._cap.set(self._cv2.CAP_PROP_POS_FRAMES, f)
                 self._next = f
             while self._next < f:
                 if not self._cap.grab():
+                    stopped_at, self._next = self._next, None
                     raise ValueError(
                         f"cannot read frame {f} of {self.path}: "
-                        f"the video ends at frame {self._next}"
+                        f"the video ends at frame {stopped_at}"
                     )
                 self._next += 1
             ok, img = self._cap.read()
             if not ok or img is None:
+                self._next = None
                 raise ValueError(f"cannot read frame {f} of {self.path}")
             self._next += 1
             yield f, img
