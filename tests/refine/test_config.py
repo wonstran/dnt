@@ -224,13 +224,17 @@ def test_link_caps_must_stay_below_the_new_accept_above(data, match):
         ("max_concurrency", 0), ("max_concurrency", False),
         ("timeout_s", 0), ("timeout_s", -3),
         ("vote_temperature", -0.5),
+        ("timeout_s", float("inf")), ("timeout_s", float("nan")), ("timeout_s", True),
+        ("timeout_s", "0.5"),
+        ("vote_temperature", float("inf")), ("vote_temperature", float("nan")),
+        ("vote_temperature", True), ("vote_temperature", "0.5"),
         ("cache_dir", ""), ("cache_dir", 7),
     ],
 )
 def test_vlm_settings_are_validated(key, value):
     cfg = RefineConfig.defaults()
     setattr(cfg.vlm, key, value)
-    with pytest.raises(ValueError, match=f"vlm.{key}"):
+    with pytest.raises(ValueError, match=re.escape(f"vlm.{key}")):
         cfg.validate()
 
 

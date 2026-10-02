@@ -1,10 +1,11 @@
 import subprocess
 import sys
 import textwrap
+from pathlib import Path
 
 SCRIPT = textwrap.dedent(
     """
-    import logging, sys
+    import sys
     for name in ("transformers", "torchreid", "openai", "anthropic"):
         sys.modules[name] = None  # a minimal install
     from pathlib import Path
@@ -41,7 +42,7 @@ SCRIPT = textwrap.dedent(
 
 
 def test_a_minimal_install_runs_without_a_vlm_and_fails_early_with_one_requested(tmp_path):
-    tests_dir = str(__import__("pathlib").Path(__file__).resolve().parents[1])
+    tests_dir = str(Path(__file__).resolve().parents[1])
     done = subprocess.run(
         [sys.executable, "-c", SCRIPT, str(tmp_path), tests_dir], capture_output=True, text=True
     )

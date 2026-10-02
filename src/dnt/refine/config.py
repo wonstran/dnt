@@ -354,30 +354,32 @@ class RefineConfig:
             p.append("encoder.weights is required for reid with the vehicle target")
         if self.vlm.backend not in ("none", "anthropic") and not self.vlm.model:
             p.append("vlm.model is required for this backend")
-        v = self.vlm
+        vl = self.vlm
 
         def _num(x):
-            return isinstance(x, int | float) and not isinstance(x, bool)
+            return isinstance(x, int | float) and not isinstance(x, bool) and math.isfinite(x)
 
-        if not (isinstance(v.votes, int) and not isinstance(v.votes, bool) and v.votes >= 1):
+        if not (isinstance(vl.votes, int) and not isinstance(vl.votes, bool) and vl.votes >= 1):
             p.append("vlm.votes must be an integer >= 1")
-        if not (_num(v.min_conf) and 0.0 <= v.min_conf <= 1.0):
+        if not (_num(vl.min_conf) and 0.0 <= vl.min_conf <= 1.0):
             p.append("vlm.min_conf must be a number in [0, 1]")
         if not (
-            isinstance(v.max_calls, int) and not isinstance(v.max_calls, bool) and v.max_calls >= 0
+            isinstance(vl.max_calls, int)
+            and not isinstance(vl.max_calls, bool)
+            and vl.max_calls >= 0
         ):
             p.append("vlm.max_calls must be an integer >= 0")
         if not (
-            isinstance(v.max_concurrency, int)
-            and not isinstance(v.max_concurrency, bool)
-            and v.max_concurrency >= 1
+            isinstance(vl.max_concurrency, int)
+            and not isinstance(vl.max_concurrency, bool)
+            and vl.max_concurrency >= 1
         ):
             p.append("vlm.max_concurrency must be an integer >= 1")
-        if not (_num(v.timeout_s) and v.timeout_s > 0):
+        if not (_num(vl.timeout_s) and vl.timeout_s > 0):
             p.append("vlm.timeout_s must be a number > 0")
-        if not (_num(v.vote_temperature) and v.vote_temperature >= 0):
+        if not (_num(vl.vote_temperature) and vl.vote_temperature >= 0):
             p.append("vlm.vote_temperature must be a number >= 0")
-        if not (isinstance(v.cache_dir, str) and v.cache_dir.strip()):
+        if not (isinstance(vl.cache_dir, str) and vl.cache_dir.strip()):
             p.append("vlm.cache_dir must be a non-empty string")
         ramps = {f"switch.ramps.{k}": v for k, v in self.switch.ramps.items()}
         ramps |= {f"screen.ramps.{k}": v for k, v in sc.ramps.items()}
