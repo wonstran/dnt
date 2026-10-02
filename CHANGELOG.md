@@ -28,8 +28,12 @@
   a `vlm` entry with `calls`, `retries`, `cache_hits`, `failures`, `budget_skipped`, and
   `no_evidence` (events not asked because no evidence image could be made). Events
   left pending, with or without a backend, are collected on a static review page,
-  `OUT.review.html` (signals only without a video), with their images in `OUT.review/`; **Export decisions** downloads `decisions.json`, which a later release will
-  apply. New extra: `pip install 'dnt[refine-vlm]'` (`openai` and `anthropic`; also part of
+  `OUT.review.html` (signals only without a video), with their images in `OUT.review/`;
+  **Export decisions** downloads `decisions.json`, which a later release will apply. Each entry
+  is an object, `{"accept": true|false, "new_cls": N (only when a class was picked),
+  "proposal_key": ..., "run_key": ...}`: event IDs are reused after a rerun, and `apply` will
+  refuse or warn when a key does not match the ledger. `"accept"`, `"reject"`, and
+  `{"accept": true, "new_cls": N}` stay valid in hand-written files. New extra: `pip install 'dnt[refine-vlm]'` (`openai` and `anthropic`; also part of
   `'dnt[refine]'`). Neither is a required dependency. See "Verification with a VLM" in the
   Track Refinement docs.
 - This release scores with motion only unless a video and an appearance encoder are given, and

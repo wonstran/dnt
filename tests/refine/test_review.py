@@ -154,15 +154,67 @@ def test_the_storage_key_is_namespaced_by_the_run_and_decisions_export_in_the_sp
     console.log(JSON.stringify({
       a: storageKey("r1"), b: storageKey("r2"),
       out: exportDecisions([
-        {id: "e1", choice: "accept", cls: ""},
-        {id: "e2", choice: "accept", cls: "36"},
-        {id: "e3", choice: "reject", cls: "3"},
-        {id: "e4", choice: null, cls: ""}
+        {id: "e1", key: "K1", run: "R", choice: "accept", cls: ""},
+        {id: "e2", key: "K2", run: "R", choice: "accept", cls: "36"},
+        {id: "e3", key: "K3", run: "R", choice: "reject", cls: "3"},
+        {id: "e4", key: "K4", run: "R", choice: null, cls: ""}
       ])
     }));"""
     got = run_node(body)
     assert got["a"] != got["b"] and got["a"].endswith("r1")
-    assert got["out"] == {"e1": "accept", "e2": {"accept": True, "new_cls": 36}, "e3": "reject"}
+    # objects that name the proposal and the run: an event id alone is reused after a rerun
+    assert got["out"] == {
+        "e1": {"accept": True, "proposal_key": "K1", "run_key": "R"},
+        "e2": {"accept": True, "new_cls": 36, "proposal_key": "K2", "run_key": "R"},
+        "e3": {"accept": False, "proposal_key": "K3", "run_key": "R"},
+    }
+
+
+@pytest.mark.skipif(NODE is None, reason="node is not installed")
+def test_the_export_button_writes_each_cards_proposal_key_and_the_pages_run_key(tmp_path):
+    a = pending(EventKind.SPLIT, "switch", 1, cut_frame=40)
+    b = pending(EventKind.RECLASS, "screen", 2, new_cls=None, spans=None)
+    c = pending(EventKind.SPLIT, "switch", 3, cut_frame=50)
+    page = write(tmp_path, [a, b, c], run_key="run-xyz").read_text()
+    script = page.split("<script>", 1)[1].split("</script>", 1)[0]
+    cards = [
+        {"id": a.id, "key": a.proposal_key, "choice": "reject", "cls": None},
+        {"id": b.id, "key": b.proposal_key, "choice": "accept", "cls": "36"},
+        {"id": c.id, "key": c.proposal_key, "choice": None, "cls": None},
+    ]
+    dom = """
+    var CARDS = %s, exported = [];
+    function card(d) {
+      return {dataset: {id: d.id, key: d.key, stage: "s", score: "0.5"}, style: {},
+        querySelector: function (sel) {
+          if (sel === "input[type=radio]:checked") { return d.choice ? {value: d.choice} : null; }
+          if (sel === "select.cls") { return d.cls ? {value: d.cls} : null; }
+          return null;
+        }};
+    }
+    var cards = CARDS.map(card), els = {};
+    ["export", "stage-filter", "sort"].forEach(function (k) { els[k] = {value: ""}; });
+    els.cards = {appendChild: function () {}};
+    globalThis.document = {
+      body: {dataset: {run: "run-xyz"}},
+      querySelectorAll: function (sel) { return sel === ".card" ? cards : []; },
+      getElementById: function (k) { return els[k]; },
+      addEventListener: function () {},
+      createElement: function () { return {click: function () {}}; }
+    };
+    globalThis.localStorage = {getItem: function () { return null; }, setItem: function () {}};
+    globalThis.Blob = function (parts) { exported.push(parts.join("")); };
+    globalThis.URL = {createObjectURL: function () { return "blob:x"; }};
+    """ % json.dumps(cards)
+    out = subprocess.run(
+        [NODE, "-e", dom + script + "\nels.export.onclick(); console.log(exported[0]);"],
+        capture_output=True, text=True,
+    )
+    assert out.returncode == 0, out.stderr
+    assert json.loads(out.stdout) == {
+        a.id: {"accept": False, "proposal_key": a.proposal_key, "run_key": "run-xyz"},
+        b.id: {"accept": True, "new_cls": 36, "proposal_key": b.proposal_key, "run_key": "run-xyz"},
+    }
 
 
 def test_cards_are_filterable_and_sortable(tmp_path):

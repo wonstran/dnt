@@ -43,9 +43,12 @@ function sortCards(rows, key) {
 function exportDecisions(rows) {
   var out = {};
   rows.forEach(function (r) {
-    if (r.choice === "accept") {
-      out[r.id] = r.cls ? {accept: true, new_cls: parseInt(r.cls, 10)} : "accept";
-    } else if (r.choice === "reject") { out[r.id] = "reject"; }
+    if (r.choice !== "accept" && r.choice !== "reject") { return; }
+    var d = {accept: r.choice === "accept"};
+    if (r.choice === "accept" && r.cls) { d.new_cls = parseInt(r.cls, 10); }
+    d.proposal_key = r.key;
+    d.run_key = r.run;
+    out[r.id] = d;
   });
   return out;
 }
@@ -61,7 +64,8 @@ _JS_DOM = """
     var r = c.querySelector("input[type=radio]:checked");
     var sel = c.querySelector("select.cls");
     if (!r) { return null; }
-    return {id: c.dataset.id, key: c.dataset.key, choice: r.value, cls: sel ? sel.value : ""};
+    return {id: c.dataset.id, key: c.dataset.key, run: document.body.dataset.run,
+            choice: r.value, cls: sel ? sel.value : ""};
   }
   cards.forEach(function (c) {
     var s = restorable(saved, c.dataset.id, c.dataset.key);

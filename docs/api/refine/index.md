@@ -220,8 +220,14 @@ picker for reclasses). Cards can be filtered by stage and sorted by score. A cop
 a `Labeler.draw_track_clips(...)` snippet that cuts one clip per track of the event, each from
 the track's first to last frame plus 2 s on each side (it is left out when there is no video).
 The page makes no network requests and keeps your choices in the browser, namespaced by run.
-**Export decisions** downloads them as `decisions.json`; applying that file arrives in a later
-release. A rerun deletes only the images listed in `OUT.review/.dnt-review.json`, the page's own
+**Export decisions** downloads them as `decisions.json`, one object per decided event:
+`{"switch-r0-000001": {"accept": true, "new_cls": 3, "proposal_key": "...", "run_key": "..."}}`
+(`new_cls` only when a class was picked for an accepted event). Event IDs are reused for
+different proposals after a rerun, so `proposal_key` (the event's) and `run_key` (the page's)
+say which proposal and run each decision was made on; `apply` will refuse an entry whose
+`proposal_key` does not match the ledger and warn when the `run_key` differs. Hand-written files
+may also use `"accept"`, `"reject"`, or `{"accept": true, "new_cls": 3}`. Applying the file
+arrives in a later release. A rerun deletes only the images listed in `OUT.review/.dnt-review.json`, the page's own
 manifest, and never overwrites another file. Without a video the page is still written, with
 signals only.
 
