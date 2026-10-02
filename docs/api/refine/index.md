@@ -202,9 +202,13 @@ again. A damaged entry is ignored.
 
 **Failures** never stop a run and never apply an edit: a timeout, a rate limit, a server error,
 an invalid reply, a missing evidence image, or an exhausted budget leaves the event
-`HUMAN_PENDING` with the reason in its `vlm.error`. Without a video the backend is ignored with
-a warning. With a video, a backend whose package is missing raises `ImportError` before any work
-starts, naming `pip install 'dnt[refine-vlm]'`.
+`HUMAN_PENDING` with the reason in its `vlm.error`. An error that will not go away (HTTP 400,
+401, 403, 404 or 422: a bad request, key, permission, or model), or three other unexpected
+errors in a row, stops the run's remaining questions: one warning is logged, and every question
+not yet sent ends with `vlm.error: "aborted after a fatal API error: ..."` without a request. A
+batch with failures logs one warning with their count and the first error. Without a video the
+backend is ignored with a warning. With a video, a backend whose package is missing raises
+`ImportError` before any work starts, naming `pip install 'dnt[refine-vlm]'`.
 
 **Review page.** Events left `HUMAN_PENDING` (except fills and smoothing) are collected on
 `OUT.review.html`, whether or not a backend was used (with `vlm.backend: none` too), with their images in `OUT.review/`. One card per event shows the evidence

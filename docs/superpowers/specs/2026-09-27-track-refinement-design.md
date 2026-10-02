@@ -808,6 +808,7 @@ class VLMBackend(Protocol):
 - **Failures.**
   - Timeouts (`vlm.timeout_s`, default 60), HTTP 429, and HTTP 5xx are retried with exponential backoff: 3 attempts, starting at 2 s, each retry drawing from the budget above.
   - When the retries run out, or on any other error, the event becomes `HUMAN_PENDING` with `vlm.error`. A failure of one question, including a reply that cannot be serialized, is that question's error only.
+  - Circuit breaker: an error carrying HTTP status 400, 401, 403, 404 or 422 (a bad request, key, permission, or model), or three other unexpected errors in a row with no answer between them, trips the runner. It logs one warning (secrets scrubbed); from then on every vote not yet sent, in that batch and in the runner's later batches, ends its question with `vlm.error: "aborted after a fatal API error: <error>"` without a backend call and counts in `failures`. Cached votes are still used. Transient errors, invalid replies, and budget stops never trip it. A batch that had failures logs one warning with their count and the first error (unless the breaker tripped).
   - VLM errors never abort the run and never apply an edit.
 
 ## 8. Human review, audit, and summary

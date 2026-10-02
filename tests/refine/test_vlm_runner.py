@@ -1,6 +1,7 @@
 import asyncio
 import http.server
 import json
+import logging
 import threading
 import time
 
@@ -537,3 +538,138 @@ def test_a_reply_that_cannot_be_cached_fails_only_its_own_question(tmp_path):
     assert [v.error is None for v in vs] == [True, False, True]
     assert vs[1].answer is None and vs[1].error.startswith("TypeError")
     assert vs[0].answer == vs[2].answer == OPTS[0] and r.failures == 1
+
+
+# ---- the circuit breaker ----
+
+class StatusError(Exception):
+    """Like the SDKs' APIStatusError: carries an int ``status_code``."""
+
+    def __init__(self, message, status_code):
+        super().__init__(message)
+        self.status_code = status_code
+
+
+def six():
+    return [q(f"LINK:link-r0-{i:06d}") for i in range(1, 7)]
+
+
+def warnings_of(caplog):
+    return [r for r in caplog.records if r.levelno == logging.WARNING]
+
+
+@pytest.mark.parametrize("status", [400, 401, 403, 404, 422])
+def test_a_fatal_api_error_skips_the_rest_of_the_run(monkeypatch, caplog, status):
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-very-secret")
+    err = StatusError(f"Error code: {status} - invalid x-api-key sk-very-secret", status)
+    r, b = runner({"*": [err, reply()]}, max_concurrency=1)
+    with caplog.at_level(logging.WARNING, logger="dnt.refine.vlm.runner"):
+        vs = r.ask_many(six())
+        assert len(b.calls) == 1 and r.calls == 1 and r.retries == 0
+        assert vs[0].answer is None and vs[0].error.startswith("StatusError: Error code")
+        for v in vs[1:]:
+            assert v.answer is None
+            assert v.error.startswith("aborted after a fatal API error: StatusError: Error code")
+            assert "sk-very-secret" not in v.error and "***" in v.error
+        assert r.failures == 6 and r.budget_skipped == 0
+        # the breaker stays tripped for the runner's later batches: nothing more is sent
+        (later,) = r.ask_many([q("LINK:link-r0-000099")])
+        assert later.error.startswith("aborted after a fatal API error")
+        assert len(b.calls) == 1 and r.calls == 1 and r.failures == 7
+    (w,) = warnings_of(caplog)
+    assert "skipped" in w.getMessage() and "sk-very-secret" not in caplog.text
+
+
+def test_a_fatal_error_lets_cached_votes_through_and_counts_no_unsent_call(tmp_path):
+    cache = AnswerCache(tmp_path)
+    r0, _ = runner({"*": reply("same_individual")}, cache=cache)
+    r0.ask_many([q(image=b"cached")])
+    r, b = runner({"*": [StatusError("bad model", 404)]}, cache=cache, max_concurrency=1)
+    vs = r.ask_many([q(image=b"a"), q(image=b"cached"), q(image=b"c")])
+    assert vs[0].error.startswith("StatusError") and vs[2].error.startswith("aborted")
+    assert vs[1].answer == "same_individual" and vs[1].cached is True
+    assert len(b.calls) == 1 and r.calls == 1 and r.calls + r.retries <= 500
+
+
+def test_a_fatal_error_stops_pending_retries_and_extra_votes():
+    sl = Sleeps()
+
+    class Mixed:
+        name, model = "mixed", "m"
+
+        def __init__(self):
+            self.calls = []
+
+        async def ask(self, image, prompt, options, temperature, *, tag=""):
+            self.calls.append(tag)
+            if tag == "LINK:a":
+                raise StatusError("unauthorized", 401)
+            await asyncio.sleep(0)
+            raise VLMTransientError("503")
+
+    backend = Mixed()
+    r, _ = runner(None, backend=backend, sleep=sl, max_concurrency=2, votes=3)
+    vs = r.ask_many([q("LINK:b"), q("LINK:a"), q("LINK:c")])
+    # b's first attempt was in flight; its retry was not sent, and c never started
+    assert backend.calls.count("LINK:a") == 1 and "LINK:c" not in backend.calls
+    assert backend.calls.count("LINK:b") == 1 and r.retries == 0 and r.calls == 2
+    assert vs[1].error.startswith("StatusError")
+    assert vs[0].error.startswith("aborted") and vs[2].error.startswith("aborted")
+
+
+@pytest.mark.parametrize(
+    "item",
+    [VLMTransientError("429"), VLMTransientError("HTTP 503"), "not json", StatusError("x", 429)],
+)
+def test_transient_invalid_and_retryable_status_errors_do_not_trip_it(item, caplog):
+    r, b = runner({"*": [item]}, max_concurrency=1)
+    with caplog.at_level(logging.WARNING, logger="dnt.refine.vlm.runner"):
+        vs = r.ask_many(six()[:2])
+    assert not any(v.error.startswith("aborted") for v in vs)
+    assert {c["tag"] for c in b.calls} == {"LINK:link-r0-000001", "LINK:link-r0-000002"}
+    (w,) = warnings_of(caplog)  # the batch's failure summary, once
+    assert "2 of 2" in w.getMessage()
+
+
+def test_a_budget_stop_does_not_trip_it():
+    r, b = runner({"*": [reply()]}, max_calls=1, max_concurrency=1)
+    for _ in range(4):
+        vs = r.ask_many(six())
+    assert len(b.calls) == 1 and all(v.error == "budget" for v in vs)
+    assert r.budget_skipped == 6 * 4 - 1 and r.failures == 0
+
+
+def test_three_generic_errors_in_a_row_trip_it(caplog):
+    r, b = runner({"*": [RuntimeError("boom")]}, max_concurrency=1)
+    with caplog.at_level(logging.WARNING, logger="dnt.refine.vlm.runner"):
+        vs = r.ask_many(six())
+    assert len(b.calls) == 3
+    assert [v.error.startswith("RuntimeError: boom") for v in vs] == [True] * 3 + [False] * 3
+    assert all(v.error == "aborted after a fatal API error: RuntimeError: boom" for v in vs[3:])
+    assert r.failures == 6 and len(warnings_of(caplog)) == 1
+
+
+def test_a_success_resets_the_count_of_generic_errors():
+    boom = RuntimeError("boom")
+    r, b = runner({"*": [boom, boom, reply(), boom, boom, reply()]}, max_concurrency=1)
+    vs = r.ask_many(six())
+    assert len(b.calls) == 6 and not any(v.error and v.error.startswith("aborted") for v in vs)
+    assert [v.answer for v in vs] == [None, None, "different", None, None, "different"]
+    # the count also carries across batches: two more errors then make three in a row
+    r2, b2 = runner({"*": [boom, boom, boom]}, max_concurrency=1)
+    r2.ask_many(six()[:2])
+    (v,) = r2.ask_many(six()[:1])
+    assert v.error == "RuntimeError: boom" and len(b2.calls) == 3
+    (v,) = r2.ask_many(six()[:1])
+    assert v.error.startswith("aborted") and len(b2.calls) == 3
+
+
+def test_failures_are_logged_once_per_batch_without_secrets(monkeypatch, caplog):
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-very-secret")
+    r, _ = runner({"LINK:link-r0-000002": ["nope sk-very-secret"], "*": reply()})
+    with caplog.at_level(logging.WARNING, logger="dnt.refine.vlm.runner"):
+        r.ask_many(six())
+        r.ask_many([q()])  # no failure: no warning
+    (w,) = warnings_of(caplog)
+    assert "1 of 6" in w.getMessage() and "invalid output" in w.getMessage()
+    assert "sk-very-secret" not in caplog.text
