@@ -412,7 +412,7 @@ For each stage, `accept_above` and `reject_below`, with `reject_below < accept_a
   - the input track file's SHA-256;
   - the video's **fingerprint**: the SHA-256 of the **entire file**, read in 8 MiB chunks, plus the file size and frame count;
   - the context file's SHA-256, or `none`;
-  - encoder kind, model name, and the SHA-256 of the weights file;
+  - encoder kind, model name, and a digest of the weights actually loaded (the SHA-256 of the weights file; for a Hub model, which has no file path, the SHA-256 of the loaded parameters, so a model name that later resolves to different weights misses the cache);
   - `sample_every` and `occlusion_iou`;
   - crop preprocessing: padding factor, resize target, and normalization;
   - `FEATURES_VERSION`, a constant bumped whenever the crop or embedding code changes.
