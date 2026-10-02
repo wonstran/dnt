@@ -228,7 +228,8 @@ def context_duplicates(
         own = by_frame.get(int(frames[idx[0]]))
         if own is None:
             continue
-        m = iou_matrix(ctx_boxes[idx], own)
+        # absurd finite coordinates can overflow to an IoU of NaN, which the assignment rejects
+        m = np.nan_to_num(iou_matrix(ctx_boxes[idx], own), nan=0.0)
         rows, cols = linear_sum_assignment(m, maximize=True)
         matched = m[rows, cols] >= thr
         dup[idx[rows[matched]]] = True

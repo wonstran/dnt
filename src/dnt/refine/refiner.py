@@ -160,6 +160,35 @@ def _save_on_failure(store: FeatureStore | None, path: Path) -> None:
         log.warning("could not save the feature cache %s: %s", path, err)
 
 
+def _check_frames_fit_the_video(max_frame: int, n: int, fmt: str, *, reads_frames: bool) -> None:
+    """Raise ValueError if the track file's frames do not fit a video of ``n`` frames.
+
+    When frames will be read (an appearance encoder), they are 0-based indexes, so the last
+    valid frame is ``n - 1``. Otherwise the 0.3.4 check (``max_frame > n``) is kept, so a
+    1-based MOT file whose last frame is ``n`` still refines with motion only.
+    """
+    if not reads_frames:
+        if max_frame > n:
+            raise ValueError(
+                f"track frame {max_frame} exceeds the video's frame count {n}; the track file "
+                "does not belong to this video"
+            )
+        return
+    if max_frame < n:
+        return
+    msg = (
+        f"track frame {max_frame} is past the video's last frame: the video's frame count is "
+        f"{n}, so its frames are 0 to {n - 1}. The track file's frames must be 0-based frame "
+        "indexes of this video; check that the track file belongs to this video"
+    )
+    if fmt == "mot":
+        msg += (
+            ". MOT files number frames from 1, while dnt reads frames as 0-based video "
+            "indexes; encoder.kind: none skips this check (no frame is read)"
+        )
+    raise ValueError(msg)
+
+
 def _event_counts(events: list[Event]) -> dict[str, int]:
     c = Counter(f"{e.stage}/{e.kind}/{e.decision}" for e in events)
     return dict(sorted(c.items()))
@@ -489,18 +518,13 @@ class TrackRefiner:
             frame_size = None
         tin = io.read_tracks(track_file, fmt=fmt, class_id=cfg.class_ids[0])
         work = tin.work
-        if (
-            vinfo
-            and vinfo["frame_count"] > 0
-            and len(work)
-            and int(work["frame"].max()) >= vinfo["frame_count"]
-        ):
-            n = vinfo["frame_count"]
-            raise ValueError(
-                f"track frame {int(work['frame'].max())} is past the video's last frame: the "
-                f"video's frame count is {n}, so its frames are 0 to {n - 1}. The track file's "
-                "frames must be 0-based frame indexes of this video; check that the track file "
-                "belongs to this video"
+        if vinfo and vinfo["frame_count"] > 0 and len(work):
+            _check_frames_fit_the_video(
+                int(work["frame"].max()),
+                vinfo["frame_count"],
+                fmt,
+                # frames are read only when the encoder's VideoAppearance is built
+                reads_frames=cfg.encoder.kind != "none" and self.appearance_factory is None,
             )
         ctx_boxes, ctx_fmt = (
             io.read_context(context_file, cfg.context.format)

@@ -209,3 +209,14 @@ def test_own_detection_matching_with_more_boxes_than_rows_and_more_rows_than_box
     assert P.occlusion_flags(work, ctx, 0.3).tolist() == [False, False, False]
     # the same box far from every row is nobody's detection and occludes nobody
     assert P.context_duplicates(work, _boxes((0, 100.0, 0.0))).tolist() == [False]
+
+
+def test_own_detection_matching_survives_coordinates_that_overflow():
+    # x + w overflows to inf, so the IoU is NaN: the assignment must not reject the matrix
+    for big in (1e200, 1e300, 1e308):
+        work = _boxes((0, big, 0.0, big, 10.0))
+        ctx = _boxes((0, big, 0.0, big, 10.0))
+        with np.errstate(all="ignore"):
+            assert P.context_duplicates(work, ctx).shape == (1,)
+            assert P.drop_context_duplicates(work, ctx) is not None
+            assert P.occlusion_flags(work, ctx, 0.3).shape == (1,)

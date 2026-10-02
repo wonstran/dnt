@@ -36,6 +36,10 @@
   of the link stage's occluders, when the frame's rows and context boxes, matched one to one,
   pair it with that row at IoU 0.5 or more. Before, it needed IoU 0.9 with any row, so a
   detection file of the same run as context flagged about a fifth of the rows as occluded.
+  Stage 3 drops the rows' own detections from `context` with the same one-to-one matching
+  (`refine` does it before the stage; `score_candidates` called directly now expects `context`
+  without them), so a detection file of the same run is supported as context: on three real
+  pedestrian clips the share of rows flagged as occluded fell from about 20% to 7-11%.
 
 ## 0.3.4 — 2026-10-01
 

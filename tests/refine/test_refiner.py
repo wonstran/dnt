@@ -150,19 +150,60 @@ def test_track_frames_beyond_the_video_are_rejected(tmp_path, synthetic_video):
         _refine(src, tmp_path / "o.csv", video_file=video)
 
 
+def _refine_with_encoder(src, out, **kw):
+    """Refine with a stub encoder, so the video's frames are read (the 0-based check applies)."""
+    from ._video import ColorEncoder
+
+    refiner = TrackRefiner(RefineConfig.defaults(), encoder_factory=lambda c, t: ColorEncoder())
+    refiner.refine(src, out, verbose=False, **kw)
+    return refiner.last_result
+
+
 def test_a_track_frame_equal_to_the_frame_count_is_rejected(tmp_path, synthetic_video):
-    # frames are 0-based: the synthetic video has 150 frames, 0 to 149
+    # with an encoder, frames are read as 0-based indexes: the synthetic video's 150 frames are
+    # 0 to 149
     video, _ = synthetic_video
     assert io.video_info(video)["frame_count"] == 150
     src = _write(tmp_path, table(box_rows(1, range(140, 151), 0.0, 0.0)))
     with pytest.raises(ValueError, match="frame count") as info:
-        _refine(src, tmp_path / "o.csv", video_file=video)
+        _refine_with_encoder(src, tmp_path / "o.csv", video_file=video)
     msg = str(info.value)
     assert "track frame 150" in msg and "frame count is 150" in msg and "0 to 149" in msg
-    assert "0-based" in msg
+    assert "0-based" in msg and "MOT" not in msg  # a dnt file gets no MOT hint
     assert not (tmp_path / "o.csv").exists()
     last = _write(tmp_path, table(box_rows(1, range(140, 150), 0.0, 0.0)), "last.txt")
-    assert len(_refine(last, tmp_path / "o.csv", video_file=video).tracks) == 10
+    assert len(_refine_with_encoder(last, tmp_path / "o.csv", video_file=video).tracks) == 10
+
+
+def _mot_file(path, n):
+    """A 1-based MOT file whose last frame is ``n`` (as in the final re-review's probe)."""
+    with open(path, "w") as fh:
+        for f in range(1, n + 1):
+            fh.write(f"{f},1,{10 + f},20,30,60,0.9,-1,-1,-1\n")
+    return path
+
+
+def test_a_one_based_mot_file_still_refines_with_motion_only(tmp_path, synthetic_video):
+    # ruling R10: with encoder.kind none no frame is read, so 0.3.4's tolerant check applies
+    video, _ = synthetic_video
+    src = _mot_file(tmp_path / "mot.txt", 150)
+    res = _refine(src, tmp_path / "o.txt", video_file=video, fmt="mot")
+    assert len(res.tracks) == 150 and int(res.tracks["frame"].max()) == 150
+    # past the frame count it is still rejected
+    with pytest.raises(ValueError, match="exceeds the video's frame count 150"):
+        _refine(_mot_file(tmp_path / "long.txt", 151), tmp_path / "o2.txt", video_file=video,
+                fmt="mot")
+
+
+def test_a_one_based_mot_file_read_with_an_encoder_gets_the_mot_hint(tmp_path, synthetic_video):
+    video, _ = synthetic_video
+    src = _mot_file(tmp_path / "mot.txt", 150)
+    with pytest.raises(ValueError, match="frame count is 150") as info:
+        _refine_with_encoder(src, tmp_path / "o.txt", video_file=video, fmt="mot")
+    msg = str(info.value)
+    assert "MOT files number frames from 1" in msg and "0-based video indexes" in msg
+    assert "encoder.kind: none skips this check" in msg
+    assert not (tmp_path / "o.txt").exists()
 
 
 def test_refiner_api_matches_tracker(tmp_path):
