@@ -2,11 +2,12 @@ import json
 import re
 import shutil
 import subprocess
+from pathlib import Path
 
 import pytest
 
 from dnt.refine.events import Decision, Event, EventKind
-from dnt.refine.review import _JS_PURE, write_review
+from dnt.refine.review import _JS_PURE, review_image_dir, write_review
 from dnt.refine.verify import decide
 
 RECLASS_MAP = {"cyclist": 1, "motorcycle": 3, "scooter": 36}
@@ -246,7 +247,8 @@ def test_a_foreign_file_with_an_image_name_is_never_overwritten_or_deleted(tmp_p
     ev2 = pending(EventKind.SPLIT, "switch", 1, cut_frame=40)
     write(tmp_path, [ev2])
     assert mine.read_bytes() == b"the user's own file"
-    assert json.loads((d / ".dnt-review.json").read_text()) == {"images": []}
+    # nothing was written and the manifest was ours (valid), so it goes; the foreign file stays
+    assert not (d / ".dnt-review.json").exists() and mine.read_bytes() == b"the user's own file"
 
 
 def test_a_users_manifest_json_is_left_alone(tmp_path):
@@ -327,3 +329,90 @@ def test_a_segment_without_a_score_does_not_crash_the_page(tmp_path):
                  signals={"segments": [[10, 40, 0.8], [41, 90, None]], "hypothesis": "duplicate"})
     html = write(tmp_path, [ev]).read_text()
     assert "10-40 0.80" in html and "41-90 -" in html
+
+
+def test_an_empty_valid_manifest_is_ours_and_does_not_outlive_the_pending_events(tmp_path):
+    d = tmp_path / "o.review"
+    ev = pending(EventKind.SPLIT, "switch", 1, cut_frame=40)
+    write(tmp_path, [ev])  # run 1, with a video: an image and a manifest
+    assert (d / f"{ev.id}.jpg").exists()
+    write(tmp_path, [ev], evidence=None)  # run 2, no video, still pending: no image, no manifest
+    assert not (d / f"{ev.id}.jpg").exists() and not (d / ".dnt-review.json").exists()
+    assert not d.exists()
+    decide(ev, Decision.AUTO_ACCEPT, source="auto")
+    assert write(tmp_path, [ev]) is None  # run 3, nothing pending
+    assert not d.exists()
+
+
+def test_the_same_sequence_keeps_a_foreign_file_and_drops_the_manifest(tmp_path):
+    d = tmp_path / "o.review"
+    ev = pending(EventKind.SPLIT, "switch", 1, cut_frame=40)
+    write(tmp_path, [ev])
+    (d / "keep.jpg").write_bytes(b"mine")
+    write(tmp_path, [ev], evidence=None)
+    assert sorted(p.name for p in d.iterdir()) == ["keep.jpg"]
+    decide(ev, Decision.AUTO_ACCEPT, source="auto")
+    assert write(tmp_path, [ev]) is None
+    assert sorted(p.name for p in d.iterdir()) == ["keep.jpg"]
+
+
+def test_a_failure_while_writing_images_leaves_them_listed_for_the_next_run(tmp_path, monkeypatch):
+    evs = [pending(EventKind.SPLIT, "switch", i, cut_frame=40) for i in (1, 2)]
+    d = tmp_path / "o.review"
+    real = Path.write_bytes
+    calls = []
+
+    def flaky(self, data):
+        calls.append(self.name)
+        if len(calls) == 2:
+            raise OSError("disk full")
+        return real(self, data)
+
+    monkeypatch.setattr(Path, "write_bytes", flaky)
+    with pytest.raises(OSError, match="disk full"):
+        write(tmp_path, evs)
+    monkeypatch.undo()
+    assert (d / f"{evs[0].id}.jpg").exists()
+    listed = json.loads((d / ".dnt-review.json").read_text())["images"]
+    assert f"{evs[0].id}.jpg" in listed  # the first image is ours, not a stranger
+    write(tmp_path, evs[1:])  # a rerun owns it: the stale first image is cleaned up
+    assert not (d / f"{evs[0].id}.jpg").exists() and (d / f"{evs[1].id}.jpg").exists()
+
+
+def test_a_file_named_like_the_image_directory_is_rejected_up_front(tmp_path):
+    from dnt.refine.refiner import check_output_paths
+
+    (tmp_path / "o.review").write_text("a file, not a directory")
+    with pytest.raises(ValueError, match="not a directory"):
+        check_output_paths(tmp_path / "o.txt", {"video_file": None})
+    assert review_image_dir(tmp_path / "o.review.html") == tmp_path / "o.review"
+
+
+def test_the_image_link_is_url_encoded(tmp_path):
+    ev = pending(EventKind.SPLIT, "switch", 1, cut_frame=40)
+    page = tmp_path / "cam#2 a.review.html"
+    html = write(tmp_path, [ev], review_path=page).read_text()
+    assert f'src="cam%232%20a.review/{ev.id}.jpg"' in html
+    assert (tmp_path / "cam#2 a.review" / f"{ev.id}.jpg").is_file()
+
+
+def test_without_a_video_there_is_no_clip_snippet(tmp_path):
+    ev = pending(EventKind.SPLIT, "switch", 1, cut_frame=40)
+    html = write(tmp_path, [ev], video_file=None).read_text()
+    assert "draw_track_clips" not in html and "None" not in html
+    assert "draw_track_clips" in write(tmp_path, [ev]).read_text()
+
+
+@pytest.mark.skipif(NODE is None, reason="node is not installed")
+def test_sorting_can_return_to_the_document_order_and_never_mutates_its_input():
+    body = """
+    var rows = [{id: "a", score: 0.5, index: 0}, {id: "b", score: 0.9, index: 1},
+                {id: "c", score: 0.5, index: 2}];
+    var ids = function (r) { return r.map(function (x) { return x.id; }); };
+    console.log(JSON.stringify({
+      desc: ids(sortCards(rows, "score-desc")), asc: ids(sortCards(rows, "score-asc")),
+      order: ids(sortCards(sortCards(rows, "score-desc"), "order")), same: ids(rows)
+    }));"""
+    got = run_node(body)
+    assert got == {"desc": ["b", "a", "c"], "asc": ["a", "c", "b"],
+                   "order": ["a", "b", "c"], "same": ["a", "b", "c"]}

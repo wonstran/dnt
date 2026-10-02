@@ -1,4 +1,9 @@
-"""Static review page for HUMAN_PENDING events (spec 8.1)."""
+"""Static review page for HUMAN_PENDING events (spec 8.1).
+
+Each card carries a ``Labeler.draw_track_clips(...)`` snippet to copy. That method writes one clip
+per track id, each spanning that track's first to last frame widened by the start and end offsets;
+the snippet uses a 2 s offset, so every clip shows its track plus 2 s on each side.
+"""
 
 from __future__ import annotations
 
@@ -8,6 +13,7 @@ import json
 import logging
 import os
 from pathlib import Path
+from urllib.parse import quote
 
 from .events import Decision, Event, EventKind
 
@@ -28,6 +34,12 @@ function restorable(saved, id, proposalKey) {
   if (!s || s.key !== proposalKey) { return null; }
   return (s.choice === "accept" || s.choice === "reject") ? s : null;
 }
+function sortCards(rows, key) {
+  return rows.slice().sort(function (a, b) {
+    var d = key === "score-asc" ? a.score - b.score : key === "score-desc" ? b.score - a.score : 0;
+    return d || a.index - b.index;
+  });
+}
 function exportDecisions(rows) {
   var out = {};
   rows.forEach(function (r) {
@@ -42,7 +54,7 @@ function exportDecisions(rows) {
 _JS_DOM = """
 (function () {
   var KEY = storageKey(document.body.dataset.run);
-  var cards = [].slice.call(document.querySelectorAll(".card"));
+  var cards = [].slice.call(document.querySelectorAll(".card"));  // document order, never resorted
   var saved = {};
   try { saved = JSON.parse(localStorage.getItem(KEY) || "{}"); } catch (e) {}
   function choice(c) {
@@ -75,16 +87,17 @@ _JS_DOM = """
     var stage = document.getElementById("stage-filter").value;
     var key = document.getElementById("sort").value;
     var box = document.getElementById("cards");
-    cards.sort(function (a, b) {
-      return key === "score-asc" ? a.dataset.score - b.dataset.score
-           : key === "score-desc" ? b.dataset.score - a.dataset.score : 0;
-    }).forEach(function (c) {
-      box.appendChild(c);
-      c.style.display = (!stage || c.dataset.stage === stage) ? "" : "none";
+    var rows = cards.map(function (c, i) {
+      return {card: c, score: parseFloat(c.dataset.score), index: i};
+    });
+    sortCards(rows, key).forEach(function (r) {
+      box.appendChild(r.card);
+      r.card.style.display = (!stage || r.card.dataset.stage === stage) ? "" : "none";
     });
   }
   document.getElementById("stage-filter").onchange = refresh;
   document.getElementById("sort").onchange = refresh;
+  refresh();
   [].forEach.call(document.querySelectorAll("button.copy"), function (b) {
     b.onclick = function () { navigator.clipboard.writeText(b.nextElementSibling.textContent); };
   });
@@ -112,9 +125,12 @@ def _reason(ev: Event) -> str:
 
 
 def _snippet(ev: Event, id_map: dict, fps: float, video_file, track_file) -> str:
+    if video_file is None:
+        return ""  # without a video there is nothing to cut a clip from
     ids = [i for i in (id_map.get(t, id_map.get(str(t))) for t in ev.tracks) if i is not None]
     margin = round(2.0 * fps)
-    # the clip spans the selected tracks' first to last frame, plus a 2 s margin on each side
+    # draw_track_clips writes one clip per track id; each runs from that track's first frame to
+    # its last, widened by these offsets (frames), so every clip has 2 s of margin on each side
     return (
         "labeler.draw_track_clips(\n"
         f"    input_video={str(video_file)!r}, output_path='clips/{ev.id}',\n"
@@ -159,6 +175,12 @@ def _picker(ev: Event, reclass_map: dict) -> str:
     return f'<label>class <select class="cls">{opts}</select></label>'
 
 
+def _snippet_html(snippet: str) -> str:
+    if not snippet:
+        return ""
+    return f'<button class="copy" type="button">copy clip snippet</button><pre>{_e(snippet)}</pre>'
+
+
 def _card(ev: Event, img_rel: str | None, snippet: str, reclass_map: dict) -> str:
     image = f'<img src="{_e(img_rel)}" alt="evidence">' if img_rel else "<div>no image</div>"
     name = _e(ev.id)
@@ -173,44 +195,54 @@ def _card(ev: Event, img_rel: str | None, snippet: str, reclass_map: dict) -> st
         f'<div><label><input type="radio" name="{name}" value="accept"> accept</label> '
         f'<label><input type="radio" name="{name}" value="reject"> reject</label> '
         f"{_picker(ev, reclass_map)}</div>"
-        f'<button class="copy" type="button">copy clip snippet</button><pre>{_e(snippet)}</pre>'
-        "</div>"
+        f"{_snippet_html(snippet)}</div>"
     )
 
 
 _MANIFEST = ".dnt-review.json"  # the report's own name: a user's manifest.json is never touched
 
 
-def _listed_images(img_dir: Path) -> list[str]:
-    """Return the image names the previous run wrote here (plain ``*.jpg`` names), or ``[]``.
+def review_image_dir(review_path) -> Path:
+    """Return the image directory (``OUT.review``) that goes with the page ``OUT.review.html``."""
+    review_path = Path(review_path)
+    return review_path.parent / review_path.name.removesuffix(".html")
 
-    Anything that is not a JSON object with a list of names proves no ownership.
+
+def _listed_images(img_dir: Path) -> list[str] | None:
+    """Return the image names the previous run wrote here (plain ``*.jpg`` names).
+
+    ``None`` means the manifest is missing or damaged (not a JSON object with a list of names):
+    it proves no ownership. A valid manifest, even with an empty list, is this report's own.
     """
     try:
         names = json.loads((img_dir / _MANIFEST).read_text())["images"]
     except (OSError, ValueError, KeyError, TypeError):
-        return []
+        return None
     if not isinstance(names, list):
-        return []
+        return None
     return [n for n in names if isinstance(n, str) and n == Path(n).name and n.endswith(".jpg")]
 
 
 def _remove_listed(img_dir: Path, keep: set[str] = frozenset()) -> None:
     """Delete the images the manifest lists (except ``keep``); never anything else."""
-    for name in _listed_images(img_dir):
+    for name in _listed_images(img_dir) or []:
         if name not in keep:
             (img_dir / name).unlink(missing_ok=True)
+
+
+def _remove_manifest_and_dir(img_dir: Path) -> None:
+    """Delete a valid manifest of ours, then the directory if nothing else lives there."""
+    if _listed_images(img_dir) is not None:  # a manifest that proves nothing is left where it is
+        (img_dir / _MANIFEST).unlink(missing_ok=True)
+    with contextlib.suppress(OSError):
+        img_dir.rmdir()
 
 
 def _remove_own_files(review_path: Path, img_dir: Path) -> None:
     review_path.unlink(missing_ok=True)
     if img_dir.is_dir():
-        owned = _listed_images(img_dir)
         _remove_listed(img_dir)
-        if owned:  # a manifest that proves nothing is left where it is
-            (img_dir / _MANIFEST).unlink(missing_ok=True)
-        with contextlib.suppress(OSError):
-            img_dir.rmdir()  # only if nothing else lives there
+        _remove_manifest_and_dir(img_dir)
 
 
 def write_review(
@@ -232,7 +264,7 @@ def write_review(
     when no event is pending.
     """
     review_path = Path(review_path)
-    img_dir = review_path.parent / review_path.name.removesuffix(".html")
+    img_dir = review_image_dir(review_path)
     pend = [
         e
         for e in events
@@ -248,28 +280,37 @@ def write_review(
         except Exception as err:  # a damaged video must not stop the review being written
             log.warning("could not build the review images: %s", err)
     cards, stages = [], sorted({e.stage for e in pend})
-    written: list[str] = []
-    owned = set(_listed_images(img_dir))
+    owned_list = _listed_images(img_dir)  # None: no valid manifest, so nothing here is ours
+    owned = set(owned_list or [])
+    plan: dict[str, bytes] = {}
     for ev in pend:
-        rel = None
-        data = images.get(ev.id)
         name = f"{ev.id}.jpg"
+        data = images.get(ev.id)
         if data is not None and name not in owned and os.path.lexists(img_dir / name):
             log.warning("not overwriting %s: it is not an image of this report", img_dir / name)
-            data = None  # the card is shown without an image; the foreign file stays intact
-        if data is not None:
-            img_dir.mkdir(parents=True, exist_ok=True)
-            (img_dir / name).write_bytes(data)
-            written.append(name)
+        elif data is not None:
+            plan[ev.id] = data  # the card of a skipped event is shown without an image
+    if plan:
+        # list the images before writing them, so a failure part-way leaves them ours to clean up
+        img_dir.mkdir(parents=True, exist_ok=True)
+        names = [*(owned_list or []), *(f"{i}.jpg" for i in plan if f"{i}.jpg" not in owned)]
+        (img_dir / _MANIFEST).write_text(json.dumps({"images": names}))
+    written: list[str] = []
+    for ev in pend:
+        rel = None
+        if ev.id in plan:
+            (img_dir / f"{ev.id}.jpg").write_bytes(plan[ev.id])
+            written.append(f"{ev.id}.jpg")
             rel = f"{img_dir.name}/{ev.id}.jpg"
             if ev.vlm:
                 ev.vlm["evidence"] = rel
         snippet = _snippet(ev, id_map, fps, video_file, track_file)
-        cards.append(_card(ev, rel, snippet, reclass_map))
-    if written or owned:  # never start a manifest in a directory that holds none of our images
-        _remove_listed(img_dir, keep=set(written))  # images of events that are gone
-        img_dir.mkdir(parents=True, exist_ok=True)
+        cards.append(_card(ev, None if rel is None else quote(rel), snippet, reclass_map))
+    _remove_listed(img_dir, keep=set(written))  # images of events that are gone
+    if written:
         (img_dir / _MANIFEST).write_text(json.dumps({"images": written}))
+    elif owned_list is not None:  # a valid manifest of ours that lists nothing now is not kept
+        _remove_manifest_and_dir(img_dir)
     stage_opts = '<option value="">all stages</option>' + "".join(
         f'<option value="{_e(s)}">{_e(s)}</option>' for s in stages
     )

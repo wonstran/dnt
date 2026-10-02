@@ -274,15 +274,26 @@ def test_regenerating_a_review_for_other_inputs_changes_the_run_and_card_keys(tm
 
 def test_the_review_lists_exactly_the_pending_events(tmp_path):
     src, video = takeover_scene(tmp_path)
-    res = run(tmp_path, cfg_for(tmp_path), FakeBackend({"SPLIT": reply("different")}), src, video)
+    res = run(tmp_path, cfg_for(tmp_path), FakeBackend({"SPLIT": reply("unsure")}), src, video)
     pend = [e for e in res.events if e.decision is Decision.HUMAN_PENDING
             and e.kind not in (EventKind.FILL, EventKind.SMOOTH)]
-    if pend:
-        html = res.review_path.read_text()
-        assert html.count('class="card"') == len(pend)
-        assert all(f'data-id="{e.id}"' in html for e in pend)
-    else:
-        assert res.review_path is None and not (tmp_path / "o.review.html").exists()
+    assert pend  # an "unsure" answer keeps the split pending
+    html = res.review_path.read_text()
+    assert html.count('class="card"') == len(pend)
+    assert all(f'data-id="{e.id}"' in html for e in pend)
+
+
+def test_the_review_is_removed_when_a_rerun_leaves_nothing_pending(tmp_path):
+    src, video = takeover_scene(tmp_path)
+    run(tmp_path, cfg_for(tmp_path), FakeBackend({"SPLIT": reply("unsure")}), src, video)
+    assert (tmp_path / "o.review.html").is_file() and (tmp_path / "o.review").is_dir()
+    # a "different" answer confirms the split, so nothing is pending any more
+    cfg = cfg_for(tmp_path, cache_dir=str(tmp_path / "other-cache"))  # not the cached "unsure"
+    res = run(tmp_path, cfg, FakeBackend({"SPLIT": reply("different")}), src, video)
+    assert not any(e.decision is Decision.HUMAN_PENDING and e.kind is EventKind.SPLIT
+                   for e in res.events)
+    assert res.review_path is None
+    assert not (tmp_path / "o.review.html").exists() and not (tmp_path / "o.review").exists()
 
 
 def test_a_run_without_a_video_still_writes_a_signals_only_review(tmp_path):

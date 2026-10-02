@@ -35,7 +35,7 @@ from .primitives import (
     occlusion_flags,
     speeds_hps,
 )
-from .review import write_review
+from .review import review_image_dir, write_review
 from .screen import ScreenContext, propose_orphans, propose_screen
 from .switch import propose_splits
 from .verify import Band, VLMRouting, decide, route_with_vlm, route_without_vlm
@@ -111,7 +111,12 @@ def check_output_paths(out, inputs: dict) -> None:
                     f"{out_name} ({out_path}) is {in_name} ({in_path}); refine would overwrite "
                     "its input. Write the output to another path."
                 )
-    review_dir = output_paths(out)["review"].with_suffix("")  # OUT.review
+    review_dir = review_image_dir(output_paths(out)["review"])  # OUT.review
+    if review_dir.exists() and not review_dir.is_dir():
+        raise ValueError(
+            f"{review_dir} exists and is not a directory; refine needs it for the review "
+            "images. Move it or write the output elsewhere."
+        )
     for in_name, in_path in inputs.items():
         if in_path is not None and review_dir.resolve() in Path(in_path).resolve().parents:
             raise ValueError(
