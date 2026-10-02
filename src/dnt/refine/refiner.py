@@ -17,8 +17,10 @@ from .. import __version__
 from . import io
 from .apply import apply_edit, lineage_of_rows, merge_chains, next_track_id, renumber
 from .config import RefineConfig, to_frames
+from .crops import CROP_PAD
+from .encoders import check_encoder_dependencies, make_encoder, weights_identity
 from .events import ACCEPTED, Decision, Event, EventKind, Ledger
-from .features import Appearance
+from .features import Appearance, FeatureStore, features_key
 from .hints import read_reclass_hints
 from .interpolate import interpolate_tracks_rts
 from .link import run_link_stage
@@ -33,6 +35,7 @@ from .primitives import (
 from .screen import ScreenContext, propose_orphans, propose_screen
 from .switch import propose_splits
 from .verify import Band, decide, route_without_vlm
+from .video_appearance import VideoAppearance
 
 log = logging.getLogger(__name__)
 LEDGER_FORMAT = "dnt.refine.ledger/1"
@@ -141,6 +144,49 @@ def table_summary(work: pd.DataFrame, fps: float) -> dict:
         "interpolated_rows": int((work["interp"] == 1).sum()),
         "median_track_seconds": float(dur.median()) if len(dur) else 0.0,
     }
+
+
+def _save_on_failure(store: FeatureStore | None, path: Path) -> None:
+    """Save a feature cache with unsaved embeddings while a run is failing.
+
+    A failed save is logged, not raised, so it never hides the error that stopped the run.
+    """
+    if store is None or not store.dirty:
+        return
+    try:
+        store.save(path)
+        log.info("saved the %d embeddings computed so far to %s", len(store), path)
+    except Exception as err:
+        log.warning("could not save the feature cache %s: %s", path, err)
+
+
+def _check_frames_fit_the_video(max_frame: int, n: int, fmt: str, *, reads_frames: bool) -> None:
+    """Raise ValueError if the track file's frames do not fit a video of ``n`` frames.
+
+    When frames will be read (an appearance encoder), they are 0-based indexes, so the last
+    valid frame is ``n - 1``. Otherwise the 0.3.4 check (``max_frame > n``) is kept, so a
+    1-based MOT file whose last frame is ``n`` still refines with motion only.
+    """
+    if not reads_frames:
+        if max_frame > n:
+            raise ValueError(
+                f"track frame {max_frame} exceeds the video's frame count {n}; the track file "
+                "does not belong to this video"
+            )
+        return
+    if max_frame < n:
+        return
+    msg = (
+        f"track frame {max_frame} is past the video's last frame: the video's frame count is "
+        f"{n}, so its frames are 0 to {n - 1}. The track file's frames must be 0-based frame "
+        "indexes of this video; check that the track file belongs to this video"
+    )
+    if fmt == "mot":
+        msg += (
+            ". MOT files number frames from 1, while dnt reads frames as 0-based video "
+            "indexes; encoder.kind: none skips this check (no frame is read)"
+        )
+    raise ValueError(msg)
 
 
 def _event_counts(events: list[Event]) -> dict[str, int]:
@@ -385,6 +431,7 @@ class TrackRefiner:
         device: str | None = None,
         *,
         appearance_factory: Callable[..., Appearance | None] | None = None,
+        encoder_factory: Callable[..., object] | None = None,
     ) -> None:
         """Configure once with ``config`` or ``config_yaml``; ``device`` sets ``encoder.device``."""
         if config is not None and config_yaml is not None:
@@ -396,6 +443,8 @@ class TrackRefiner:
             self.config.encoder.device = device
         self.config.validate()
         self.appearance_factory = appearance_factory
+        self.encoder_factory = encoder_factory
+        self._encoder_memo: tuple[tuple, object] | None = None
         self.last_result: RefineResult | None = None
 
     def refine(
@@ -424,6 +473,9 @@ class TrackRefiner:
         ValueError
             If ``out_file``, or the ledger, review or feature-cache path next to it, is one of
             the input files; if no frame rate is known; or if an input is malformed.
+        ImportError
+            If a video is given, ``encoder.kind`` is ``dino`` or ``reid``, and the encoder's
+            package is not installed; the message names the pip extra.
 
         """
         cfg = self.config
@@ -438,6 +490,13 @@ class TrackRefiner:
             },
         )
         paths = output_paths(out)
+        if (
+            video_file is not None
+            and cfg.encoder.kind != "none"
+            and self.appearance_factory is None
+            and self.encoder_factory is None
+        ):
+            check_encoder_dependencies(cfg.encoder)  # before any processing (spec 5.5)
         track_sha = io.sha256_file(track_file)
         context_sha = None
         if context_file is not None:
@@ -459,15 +518,13 @@ class TrackRefiner:
             frame_size = None
         tin = io.read_tracks(track_file, fmt=fmt, class_id=cfg.class_ids[0])
         work = tin.work
-        if (
-            vinfo
-            and vinfo["frame_count"] > 0
-            and len(work)
-            and int(work["frame"].max()) > vinfo["frame_count"]
-        ):
-            raise ValueError(
-                f"track frame {int(work['frame'].max())} exceeds the video's frame count "
-                f"{vinfo['frame_count']}; the track file does not belong to this video"
+        if vinfo and vinfo["frame_count"] > 0 and len(work):
+            _check_frames_fit_the_video(
+                int(work["frame"].max()),
+                vinfo["frame_count"],
+                fmt,
+                # frames are read only when the encoder's VideoAppearance is built
+                reads_frames=cfg.encoder.kind != "none" and self.appearance_factory is None,
             )
         ctx_boxes, ctx_fmt = (
             io.read_context(context_file, cfg.context.format)
@@ -496,8 +553,18 @@ class TrackRefiner:
             "features": None,
         }
         before = table_summary(work, fps_val)
-        appearance = self._appearance(work, video_file, ctx_boxes, fps_val)
-        stages = _Stages(cfg, fps_val, frame_size, appearance, ctx_boxes, ctx_fmt, hint_map)
+        appearance, store = self._appearance(
+            work,
+            video_file,
+            ctx_boxes,
+            fps_val,
+            key_parts={
+                "tracks_sha": track_sha,
+                "video": (inputs["video"] or {}).get("fingerprint"),
+                "context_sha": context_sha,
+            },
+            features_path=paths["features"],
+        )
         desc = (
             "Refining"
             if video_index is None or video_tot is None
@@ -505,10 +572,22 @@ class TrackRefiner:
         )
         if message:
             desc += f" {message}"
-        with tqdm(total=5, desc=desc, unit=" stage", disable=not verbose) as pbar:
-            work, events = stages.run(
-                work, tick=lambda name: (pbar.set_postfix_str(name), pbar.update(1))
-            )
+        try:
+            if store is not None:
+                appearance.prefetch_coarse()
+            stages = _Stages(cfg, fps_val, frame_size, appearance, ctx_boxes, ctx_fmt, hint_map)
+            with tqdm(total=5, desc=desc, unit=" stage", disable=not verbose) as pbar:
+                work, events = stages.run(
+                    work, tick=lambda name: (pbar.set_postfix_str(name), pbar.update(1))
+                )
+        except BaseException:
+            # keep the embeddings computed so far, so a rerun does not encode them again;
+            # the ledger and the output are written only on success
+            _save_on_failure(store, paths["features"])
+            raise
+        if store is not None:
+            sha = store.save(paths["features"])
+            inputs["features"] = _file_record(paths["features"], sha, cache_key=store.key)
         work, id_map = renumber(work)
         summary = {
             "before": before,
@@ -629,11 +708,59 @@ class TrackRefiner:
             results.append(str(out))
         return results
 
-    def _appearance(self, work, video, context, fps) -> Appearance | None:
+    def _encoder(self):
+        """Return the encoder, reused while the settings and the weights file are unchanged."""
+        cfg = self.config.encoder
+        # a weights file replaced in place under the same path must not reuse the old model
+        identity = None
+        if self.encoder_factory is None:
+            identity = weights_identity(cfg, self.config.target)
+        key = (
+            cfg.kind,
+            cfg.model,
+            cfg.weights,
+            cfg.device,
+            cfg.batch_size,
+            self.config.target,
+            identity,
+        )
+        if self._encoder_memo is None or self._encoder_memo[0] != key:
+            factory = self.encoder_factory or make_encoder
+            self._encoder_memo = (key, factory(cfg, self.config.target))
+        return self._encoder_memo[1]
+
+    def _appearance(self, work, video, context, fps, *, key_parts, features_path):
+        """Return ``(appearance, store)``; ``store`` is the feature cache to save, or None.
+
+        With a store, ``appearance`` is a ``VideoAppearance`` whose coarse pass has not run yet.
+        """
         if self.appearance_factory is not None:
-            return self.appearance_factory(
+            app = self.appearance_factory(
                 work=work, video=video, context=context, fps=fps, config=self.config
             )
-        if video is not None and self.config.encoder.kind != "none":
-            log.warning("appearance encoders arrive in dnt.refine Plan 2; running motion-only")
-        return None
+            return app, None
+        cfg = self.config.encoder
+        if video is None or cfg.kind == "none":
+            return None, None
+        encoder = self._encoder()
+        key = features_key(
+            **key_parts,
+            encoder=encoder,
+            sample_every=cfg.sample_every,
+            occlusion_iou=cfg.occlusion_iou,
+            crop_pad=CROP_PAD,
+        )
+        loaded = FeatureStore.load(features_path, key, dim=encoder.dim)
+        store = loaded if loaded is not None else FeatureStore(key)
+        occluded = occlusion_flags(work, context, cfg.occlusion_iou)
+        app = VideoAppearance(
+            work,
+            occluded,
+            video,
+            encoder,
+            store,
+            sample_every=cfg.sample_every,
+            batch_size=cfg.batch_size,
+            crop_pad=CROP_PAD,
+        )
+        return app, store  # the caller runs app.prefetch_coarse()

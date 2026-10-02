@@ -1,5 +1,46 @@
 # Changelog
 
+## Unreleased
+
+### New
+- `dnt.refine` looks at appearance. With a video and `encoder.kind` of `dino` (DINOv2, the
+  default) or `reid` (torchreid OSNet), `refine` crops each box, skips crops that other boxes
+  occlude, and embeds the rest. Stage 1 (ID-switch splits) and stage 3 (links) score with the
+  embeddings, so a split or link that scores high enough is applied. The embeddings are cached
+  next to the output as `OUT.features.npz`, and a rerun on the same inputs reuses them. New
+  extras: `pip install 'dnt[refine-dino]'`, `'dnt[refine-reid]'`, or `'dnt[refine]'` for both.
+  The first `dino` run downloads the model from the Hugging Face Hub (network needed;
+  `transformers` caches it). `reid` finds torchreid's `FeatureExtractor` in the PyPI
+  `torchreid` package and in deep-person-reid installed from GitHub
+  (`pip install git+https://github.com/KaiyangZhou/deep-person-reid.git`), the alternative when
+  the PyPI package does not provide it.
+- This release scores with motion only unless a video and an appearance encoder are given, and
+  applies only the edits it is sure of: in-vehicle and duplicate false-track drops, rider
+  reclasses whose subtype a ReClass hint settles, links across short gaps and static waits with
+  a clear assignment margin, orphan drops, and filling. With an encoder, ID-switch splits and
+  links are also scored by appearance and applied when they score high enough. Other edits are
+  capped below auto-accept, recorded as `HUMAN_PENDING`, and not applied yet: ID-switch splits
+  found from motion alone, links across occlusions, links with an ambiguous assignment margin,
+  and false-track drops of static objects or of mixed tracks. Rider reclasses whose subtype no
+  ReClass hint settles are pending too, however high they score, because only a hint can choose
+  the subtype in this release. In-vehicle drops need a context file with the vehicles' boxes
+  (`context_file=`, or `--context`); without one the in-vehicle cue is skipped. VLM
+  verification, review pages, and applying review decisions follow in later releases.
+
+### Changed
+- `refine` with a video now needs the encoder's package (`pip install 'dnt[refine-dino]'`) or
+  `encoder.kind: none`. Before, it logged a warning and ran on motion alone. `dnt-refine run`
+  exits with code 2 and names the extra when the package is missing. `TrackRefiner` accepts
+  `encoder_factory=` to supply your own encoder.
+- A context box now counts as a row's own detection, and is left out of the occlusion mask and
+  of the link stage's occluders, when the frame's rows and context boxes, matched one to one,
+  pair it with that row at IoU 0.5 or more. Before, it needed IoU 0.9 with any row, so a
+  detection file of the same run as context flagged about a fifth of the rows as occluded.
+  Stage 3 drops the rows' own detections from `context` with the same one-to-one matching
+  (`refine` does it before the stage; `score_candidates` called directly now expects `context`
+  without them), so a detection file of the same run is supported as context: on three real
+  pedestrian clips the share of rows flagged as occluded fell from about 20% to 7-11%.
+
 ## 0.3.4 — 2026-10-01
 
 ### New

@@ -181,19 +181,43 @@ def frame_runs(frames) -> list[tuple[int, int]]:
     return [(int(r[0]), int(r[-1])) for r in cluster_by_gap(f, 1)]
 
 
-#: A context box whose IoU with a work box of the same frame reaches this is taken to be that
-#: row's own detection (for example, a detection file from the same run passed as context), not
-#: another object. Such boxes are left out of the occlusion mask and of stage 3's witness
-#: occluders (final-review ruling R22); the stage 2 context cues still see them.
-CONTEXT_DUPLICATE_IOU = 0.9
+#: Per frame, the work boxes and the context boxes are matched one to one (the assignment with
+#: the largest total IoU). A context box matched to a work box with IoU >= this is taken to be
+#: that row's own detection (for example, a detection file from the same run passed as context),
+#: not another object. Such boxes are left out of the occlusion mask and of stage 3's witness
+#: occluders (final-review rulings R22 and R6); the stage 2 context cues still see them.
+CONTEXT_MATCH_IOU = 0.5
 
 
 def context_duplicates(
-    work: pd.DataFrame, context: pd.DataFrame | None, thr: float = CONTEXT_DUPLICATE_IOU
+    work: pd.DataFrame, context: pd.DataFrame | None, thr: float = CONTEXT_MATCH_IOU
 ) -> np.ndarray:
-    """Return, per context row, whether its box has IoU >= ``thr`` with a work box that frame."""
+    """Return, per context row, whether it is a work row's own detection.
+
+    In each frame the work boxes and the context boxes are matched one to one, maximizing the
+    total IoU (``scipy.optimize.linear_sum_assignment``). A context box is a row's own detection
+    when it is matched and the pair's IoU is >= ``thr``. One to one means a second box over the
+    same row stays an occluder: only the row's best match is its own detection.
+
+    Parameters
+    ----------
+    work : pandas.DataFrame
+        Work rows (``frame, x, y, w, h``).
+    context : pandas.DataFrame or None
+        Context boxes (``frame, x, y, w, h``).
+    thr : float
+        Lowest IoU of a matched pair that counts as the row's own detection.
+
+    Returns
+    -------
+    numpy.ndarray
+        Boolean array, one entry per context row.
+
+    """
     if context is None or not len(context):
         return np.zeros(0 if context is None else len(context), dtype=bool)
+    from scipy.optimize import linear_sum_assignment
+
     dup = np.zeros(len(context), dtype=bool)
     frames = context["frame"].to_numpy(int)
     ctx_boxes = context[["x", "y", "w", "h"]].to_numpy(float)
@@ -202,15 +226,20 @@ def context_duplicates(
     bounds = np.flatnonzero(np.diff(frames[order])) + 1
     for idx in np.split(order, bounds):
         own = by_frame.get(int(frames[idx[0]]))
-        if own is not None:
-            dup[idx] = iou_matrix(ctx_boxes[idx], own).max(axis=1) >= thr
+        if own is None:
+            continue
+        # absurd finite coordinates can overflow to an IoU of NaN, which the assignment rejects
+        m = np.nan_to_num(iou_matrix(ctx_boxes[idx], own), nan=0.0)
+        rows, cols = linear_sum_assignment(m, maximize=True)
+        matched = m[rows, cols] >= thr
+        dup[idx[rows[matched]]] = True
     return dup
 
 
 def drop_context_duplicates(
-    work: pd.DataFrame, context: pd.DataFrame | None, thr: float = CONTEXT_DUPLICATE_IOU
+    work: pd.DataFrame, context: pd.DataFrame | None, thr: float = CONTEXT_MATCH_IOU
 ) -> pd.DataFrame | None:
-    """Return ``context`` without the boxes ``context_duplicates`` finds."""
+    """Return ``context`` without the work rows' own detections (``context_duplicates``)."""
     if context is None or not len(context):
         return context
     return context.loc[~context_duplicates(work, context, thr)]
@@ -219,14 +248,15 @@ def drop_context_duplicates(
 def occlusion_flags(work: pd.DataFrame, context: pd.DataFrame | None, thr: float) -> pd.Series:
     """Return True where a row's box has IoU >= ``thr`` with another box in its frame (spec 5.3).
 
-    The other boxes are the frame's other work rows and its context boxes, except context boxes
-    that duplicate a work box (IoU >= ``CONTEXT_DUPLICATE_IOU``): those are the rows' own
-    detections, so a detection file of the same run does not flag every row.
+    The other boxes are the frame's other work rows and its context boxes, except the rows' own
+    detections (``context_duplicates``, the same rule as ``drop_context_duplicates``), so a
+    detection file of the same run does not flag every row.
     """
     flags = pd.Series(False, index=work.index)
     ctx: dict[int, np.ndarray] = {}
-    if context is not None and len(context):
-        ctx = {int(f): g[["x", "y", "w", "h"]].to_numpy(float) for f, g in context.groupby("frame")}
+    others = drop_context_duplicates(work, context)
+    if others is not None and len(others):
+        ctx = {int(f): g[["x", "y", "w", "h"]].to_numpy(float) for f, g in others.groupby("frame")}
     for f, g in work.groupby("frame"):
         boxes = g[["x", "y", "w", "h"]].to_numpy(float)
         best = np.zeros(len(boxes))
@@ -234,10 +264,8 @@ def occlusion_flags(work: pd.DataFrame, context: pd.DataFrame | None, thr: float
             m = iou_matrix(boxes, boxes)
             np.fill_diagonal(m, 0.0)
             best = m.max(axis=1)
-        others = ctx.get(int(f))
-        if others is not None and len(others):
-            m = iou_matrix(boxes, others)
-            m[:, m.max(axis=0) >= CONTEXT_DUPLICATE_IOU] = 0.0  # the rows' own detections
-            best = np.maximum(best, m.max(axis=1))
+        occluders = ctx.get(int(f))
+        if occluders is not None and len(occluders):
+            best = np.maximum(best, iou_matrix(boxes, occluders).max(axis=1))
         flags.loc[g.index] = best >= thr
     return flags

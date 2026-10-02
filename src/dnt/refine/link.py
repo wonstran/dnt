@@ -18,7 +18,6 @@ from .events import ACCEPTED, REJECTED, Decision, Event, EventKind
 from .features import Appearance, track_embeddings
 from .primitives import (
     box_centers,
-    drop_context_duplicates,
     iou_matrix,
     majority_class,
     ramp,
@@ -618,13 +617,13 @@ _BOUND_SLACK = 1e-9
 class _Occluders:
     """Boxes from the work table (owner = track) and the context (owner = -1), sorted by frame.
 
-    Context boxes that duplicate a work box of their frame (``primitives.context_duplicates``)
-    are the rows' own detections, not occluders, and are left out.
+    ``context`` must already be without the rows' own detections: the refiner removes them once,
+    against the input rows (``primitives.drop_context_duplicates``). Matching again here,
+    against edited rows, would take a genuine occluder for the own detection removed before.
     """
 
     def __init__(self, work, context):
         """Index boxes by frame."""
-        context = drop_context_duplicates(work, context)
         parts = [work[["frame", "x", "y", "w", "h"]].assign(owner=work["track"].astype(int))]
         if context is not None and len(context):
             parts.append(context[["frame", "x", "y", "w", "h"]].assign(owner=-1))
@@ -837,7 +836,8 @@ def score_candidates(
 
     With ``min_score``, occlusion-witnessed pairs that cannot score ``min_score`` are left out
     before their witness scan; every other candidate is the same as without it. Stage 3 passes
-    ``link.reject_below``, below which a candidate never enters assignment.
+    ``link.reject_below``, below which a candidate never enters assignment. ``context`` holds
+    the occluder boxes, without the rows' own detections (``primitives.drop_context_duplicates``).
     """
     lc = cfg.link
     motion_only = appearance is None

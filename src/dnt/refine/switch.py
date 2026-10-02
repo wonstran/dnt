@@ -10,7 +10,7 @@ import pandas as pd
 from .apply import lineage_of_rows
 from .config import RefineConfig, to_frames
 from .events import Event, EventKind
-from .features import Appearance, track_embeddings
+from .features import Appearance, dense_track_embeddings, track_embeddings
 from .primitives import iou_matrix, kalman_nis, ramp
 
 STAGE = "switch"
@@ -81,7 +81,13 @@ def _two_means(emb: np.ndarray, iters: int = 20) -> np.ndarray:
     return labels
 
 
+_SILHOUETTE_MAX = 600
+
+
 def _silhouette(emb: np.ndarray, labels: np.ndarray) -> float:
+    if len(emb) > _SILHOUETTE_MAX:  # bounds the n x n distance matrix; deterministic subsample
+        pick = np.linspace(0, len(emb) - 1, _SILHOUETTE_MAX).astype(int)
+        emb, labels = emb[pick], labels[pick]
     d = 1.0 - emb @ emb.T
     vals = []
     for i in range(len(emb)):
@@ -186,6 +192,7 @@ def _score_track(g, contact, cfg: RefineConfig, fps, appearance, lin, delta, w):
     z = np.full(n, np.nan)
     bim = np.zeros(n)
     sil = None
+    med = mad = float("nan")
     if not motion_only:
         change_a = _appearance_change(frames, ef, emb, w)
         fin = np.isfinite(change_a)
@@ -223,6 +230,8 @@ def _score_track(g, contact, cfg: RefineConfig, fps, appearance, lin, delta, w):
         "motion_only": motion_only,
         "ef": ef,
         "emb": emb,
+        "med": med,
+        "mad": mad,
     }
 
 
@@ -264,6 +273,152 @@ def _pair_contact(work, ti, tj, t, delta, thr) -> bool:
     return False
 
 
+def _lineage_windows(lin, f0: int, f1: int) -> list[tuple[int, int, int]]:
+    """Return the ``(raw_id, lo, hi)`` pieces of ``[f0, f1]`` that lie inside the lineage."""
+    out = []
+    for r, a, b in lin:
+        lo, hi = max(int(a), f0), min(int(b), f1)
+        if lo <= hi:
+            out.append((int(r), lo, hi))
+    return out
+
+
+def _span(info, i: int, radius: int, w: int) -> tuple[int, int, int, int]:
+    """Rows ``lo..hi`` around candidate row ``i``, and the frame range their sides need.
+
+    ``radius`` counts observed rows, so across a gap the rows can span more frames than it.
+    """
+    fr = info["frames"]
+    lo, hi = max(1, i - radius), min(len(fr) - 1, i + radius)
+    return lo, hi, int(fr[lo]) - w, int(fr[hi]) + w - 1
+
+
+def _relocate(info, i: int, sc, lo: int, hi: int, w: int, ef_d, emb_d, eligible) -> int:
+    """Rescore rows ``lo..hi`` on dense samples, store the best eligible row's values, return it.
+
+    The best row has the highest ``S``, then the highest raw appearance change (``S`` saturates
+    for strong changes), then the smallest distance from ``i``, then the earliest frame.
+    ``eligible(j)`` says whether a row may hold the cut; the original row ``i`` always may.
+    The search radius counts observed rows, so across a gap it can span more frames than the
+    NMS spacing; this is why ``eligible`` checks the spacing explicitly. A row without dense side
+    means is skipped, except row ``i``, which then competes with its stored coarse values.
+    """
+    if not np.isfinite(info["med"]):
+        return i
+    best = None
+    for j in range(lo, hi + 1):
+        if not eligible(j):
+            continue
+        m = _side_means(ef_d, emb_d, int(info["frames"][j]), w)
+        if m is None:
+            if j == i:  # no dense side means (e.g. just after a gap): keep the coarse values
+                key = (float(info["S"][i]), float(info["A"][i]), 0, -i)
+                if best is None or key > best[0]:
+                    best = (key, i, None)
+            continue
+        a = 1.0 - float(m[0] @ m[1])
+        z = (a - info["med"]) / (1.4826 * info["mad"] + sc.mad_floor)
+        app = max(float(ramp(z, *sc.ramps["z_app"])), float(info["bim"][j]))
+        gate = any(bool(v[j]) for v in info["fired"].values())
+        s = (sc.w_app * app + sc.w_mot * float(info["mot"][j])) if gate else 0.0
+        key = (s, a, -abs(j - i), -j)
+        if best is None or key > best[0]:
+            best = (key, j, (a, z, app, s))
+    if best is None:
+        return i
+    _, j, vals = best
+    if vals is None:  # row i won on its stored coarse values: nothing to write back
+        return i
+    a, z, app, s = vals
+    info["A"][j], info["z"][j], info["app"][j], info["S"][j] = a, z, app, s
+    return j
+
+
+def _sides_ok(info, t: int, fps: float, min_side: float) -> bool:
+    """Return whether both sides of a cut at frame ``t`` keep ``min_side`` seconds of samples."""
+    s = info["samples"]
+    return (
+        _covered_seconds(s[s < t], fps, info["motion_only"]) >= min_side
+        and _covered_seconds(s[s >= t], fps, info["motion_only"]) >= min_side
+    )
+
+
+def _merge_dense(ef, emb, parts):
+    """Merge dense ``(frames, embeddings)`` parts into a track's samples: sorted, one per frame."""
+    fs, es = [], []
+    if len(ef):
+        fs.append(ef)
+        es.append(emb)
+    for f, e in parts:
+        if len(f):
+            fs.append(f)
+            es.append(e)
+    if not any(len(f) for f, _ in parts):
+        return ef, emb
+    f = np.concatenate(fs)
+    e = np.vstack(es)
+    order = np.argsort(f, kind="stable")
+    f, e = f[order], e[order]
+    keep = np.concatenate([[True], np.diff(f) > 0])
+    return f[keep], e[keep]
+
+
+def _dense_rescore(appearance, infos, cands, cfg: RefineConfig, w: int, fps: float, nms: int):
+    """Rescore each candidate on dense embeddings and move it to its best row (spec 5.3).
+
+    A move must keep the rules that chose the candidate: ``switch.min_side_seconds`` of samples
+    on each side, and ``nms`` frames from every other candidate of the track. The search radius
+    counts observed rows, so across a gap it can span more frames than ``nms``, which is why the
+    spacing is checked explicitly. ``info["samples"]`` must stay the COARSE sample array while
+    candidates move (``_sides_ok`` relies on it): the dense samples are merged into
+    ``info["ef"]``/``info["emb"]`` only after a track's loop.
+    """
+    if appearance is None or not hasattr(appearance, "dense_embeddings"):
+        return
+    sc = cfg.switch
+    radius = max(1, int(cfg.encoder.sample_every))
+    wanted = []
+    for tid, idx in cands.items():
+        info, lin = infos[tid]
+        for i in idx:
+            _, _, f0, f1 = _span(info, i, radius, w)
+            wanted += _lineage_windows(lin, f0, f1)
+    prefetch = getattr(appearance, "prefetch_dense", None)
+    if prefetch is not None and wanted:
+        prefetch(wanted)
+    for tid, idx in cands.items():
+        info, lin = infos[tid]
+        fr = info["frames"]
+        order = sorted(
+            idx,
+            key=lambda i, info=info, fr=fr: (
+                -float(info["S"][i]),
+                -float(info["A"][i]),
+                -float(info["mot"][i]),
+                int(fr[i]),
+            ),
+        )
+        pos = {i: int(fr[i]) for i in idx}  # candidate -> its current frame
+        moved, parts = [], []
+        for i in order:
+            lo, hi, f0, f1 = _span(info, i, radius, w)
+            ef_d, emb_d = dense_track_embeddings(appearance, lin, f0, f1)
+            others = [f for k, f in pos.items() if k != i]
+
+            def eligible(j, info=info, fr=fr, others=others):
+                t = int(fr[j])
+                return all(abs(t - o) >= nms for o in others) and _sides_ok(
+                    info, t, fps, sc.min_side_seconds
+                )
+
+            j = _relocate(info, i, sc, lo, hi, w, ef_d, emb_d, eligible)
+            pos[i] = int(fr[j])
+            moved.append(j)
+            parts.append((ef_d, emb_d))
+        cands[tid] = sorted(set(moved))
+        info["ef"], info["emb"] = _merge_dense(info["ef"], info["emb"], parts)
+
+
 def propose_splits(
     work: pd.DataFrame, cfg: RefineConfig, fps: float, appearance: Appearance | None = None
 ) -> SwitchResult:
@@ -271,8 +426,10 @@ def propose_splits(
 
     Every observed frame of a track is scored from an appearance change, a motion break and an
     opportunity gate. Local maxima survive non-maximum suppression when both sides have enough
-    samples. Swap pairs (two contacting tracks whose tails cross) get a score boost. Without an
-    appearance provider the score is motion only and capped. Tracks are never edited.
+    samples. With an appearance provider that has ``dense_embeddings``, each candidate found on
+    the coarse samples is rescored on dense samples and moved to its best frame (spec 5.3). Swap
+    pairs (two contacting tracks whose tails cross) get a score boost. Without an appearance
+    provider the score is motion only and capped. Tracks are never edited.
 
     Parameters
     ----------
@@ -309,11 +466,12 @@ def propose_splits(
         )
         if info is None:
             continue
-        idx = _candidates(info, fps, cfg, nms)
         infos[int(tid)] = (info, lin)
-        cands[int(tid)] = idx
+        cands[int(tid)] = _candidates(info, fps, cfg, nms)
+    _dense_rescore(appearance, infos, cands, cfg, w, fps, nms)
+    for tid, idx in cands.items():
         if idx:
-            result.candidates[int(tid)] = [int(info["frames"][i]) for i in idx]
+            result.candidates[tid] = [int(infos[tid][0]["frames"][i]) for i in idx]
 
     boost: dict[tuple[int, int], tuple[float, int, float]] = {}
     if appearance is not None:

@@ -87,8 +87,11 @@ def test_occlusion_flags_use_same_frame_boxes_and_context():
     work = pd.DataFrame({"frame": [0, 0, 1], "track": [1, 2, 1],
                          "x": [0.0, 2.0, 0.0], "y": [0.0, 0.0, 0.0],
                          "w": [10.0, 10.0, 10.0], "h": [10.0, 10.0, 10.0]})
-    ctx = pd.DataFrame({"frame": [1], "track": [-1], "x": [1.0], "y": [0.0], "w": [10.0],
+    # the context box overlaps frame 1's row with IoU 0.38: below CONTEXT_MATCH_IOU, so it is
+    # another object, not the row's own detection
+    ctx = pd.DataFrame({"frame": [1], "track": [-1], "x": [5.0], "y": [0.0], "w": [10.0],
                         "h": [10.0], "cls": [2]})
+    assert 0.3 <= P.iou_matrix([0.0, 0.0, 10.0, 10.0], [5.0, 0.0, 10.0, 10.0])[0, 0] < 0.5
     flags = P.occlusion_flags(work, ctx, 0.3)
     assert flags.tolist() == [True, True, True]
     assert P.occlusion_flags(work, None, 0.3).tolist() == [True, True, False]
@@ -107,15 +110,113 @@ def test_a_same_run_detection_context_does_not_flag_the_rows_own_boxes():
     ious = [P.iou_matrix(a, b)[0, 0] for a, b in zip(
         work[["x", "y", "w", "h"]].to_numpy()[:, None], dets[["x", "y", "w", "h"]].to_numpy()[:, None],
         strict=True)]
-    assert min(ious) >= P.CONTEXT_DUPLICATE_IOU  # every detection duplicates its row
+    assert min(ious) >= P.CONTEXT_MATCH_IOU  # every detection matches its row
     assert not P.occlusion_flags(work, dets, 0.3).any()  # 0% occluded (was 100%)
     assert P.context_duplicates(work, dets).all()
     assert P.drop_context_duplicates(work, dets).empty
-    # a genuine occluder (a different box, IoU below 0.9) still flags the row it covers
+    # a genuine occluder (a second box over row 10, which has its own detection) still flags it
     other = pd.DataFrame({"frame": [5], "track": [-1], "x": [100.0 + 10.0 + 8.0], "y": [200.0],
                           "w": [30.0], "h": [60.0], "cls": [0]})
     assert 0.3 <= P.iou_matrix(work.loc[10, ["x", "y", "w", "h"]].to_numpy(float),
                                other[["x", "y", "w", "h"]].to_numpy(float))[0, 0] < 0.9
-    flags = P.occlusion_flags(work, pd.concat([dets, other], ignore_index=True), 0.3)
+    both = pd.concat([dets, other], ignore_index=True)
+    flags = P.occlusion_flags(work, both, 0.3)
     assert flags[flags].index.tolist() == [10]
-    assert P.context_duplicates(work, other).tolist() == [False]
+    assert P.context_duplicates(work, both).tolist() == [True] * len(dets) + [False]
+
+
+# ---- final review I2 (ruling R6): own detections are matched one to one, at IoU >= 0.5 --------
+
+_COLS = ["frame", "x", "y", "w", "h"]
+
+
+def _boxes(*rows):
+    """``(frame, x, y, w, h)`` rows; every box is 40x40 unless given."""
+    return pd.DataFrame([r if len(r) == 5 else (*r, 40.0, 40.0) for r in rows],
+                        columns=_COLS, dtype=float).astype({"frame": int})
+
+
+def _iou(a, b):
+    return float(P.iou_matrix(np.asarray(a, float)[1:], np.asarray(b, float)[1:])[0, 0])
+
+
+def test_an_own_detection_below_the_old_cutoff_does_not_flag_its_row():
+    row, det = (0, 0.0, 0.0), (0, 7.0, 0.0)  # a tracker box that lags its detection
+    assert 0.5 <= _iou((*row, 40, 40), (*det, 40, 40)) < 0.9  # IoU 0.71
+    work, ctx = _boxes(row), _boxes(det)
+    assert P.occlusion_flags(work, ctx, 0.3).tolist() == [False]
+    assert P.context_duplicates(work, ctx).tolist() == [True]
+    assert P.drop_context_duplicates(work, ctx).empty
+
+
+def test_a_different_box_below_the_match_iou_still_flags():
+    row, other = (0, 0.0, 0.0), (0, 17.0, 0.0)
+    assert 0.3 <= _iou((*row, 40, 40), (*other, 40, 40)) < 0.5  # IoU 0.41
+    work, ctx = _boxes(row), _boxes(other)
+    assert P.occlusion_flags(work, ctx, 0.3).tolist() == [True]
+    assert P.context_duplicates(work, ctx).tolist() == [False]
+    assert len(P.drop_context_duplicates(work, ctx)) == 1
+
+
+def test_one_to_one_keeps_a_second_box_over_a_row_as_an_occluder():
+    # the row's own detection (IoU 0.9) and another box (IoU 0.6): only the better one is own
+    row, own, other = (0, 0.0, 0.0), (0, 2.0, 0.0), (0, 10.0, 0.0)
+    assert _iou((*row, 40, 40), (*own, 40, 40)) >= 0.9
+    assert 0.5 <= _iou((*row, 40, 40), (*other, 40, 40)) < 0.7
+    work = _boxes(row)
+    for ctx, own_mask in ((_boxes(own, other), [True, False]), (_boxes(other, own), [False, True])):
+        assert P.context_duplicates(work, ctx).tolist() == own_mask
+        assert P.occlusion_flags(work, ctx, 0.3).tolist() == [True]
+        assert P.drop_context_duplicates(work, ctx)["x"].tolist() == [10.0]
+
+
+def test_two_rows_and_two_detections_are_matched_crosswise():
+    # row A's best box is d1, but the assignment with the largest total IoU gives d1 to row B
+    # and d2 to row A, and both pairs reach 0.5; a per-row best match would leave d2 unmatched
+    a, b, d1, d2 = (0, 0.0, 0.0), (0, -8.0, 0.0), (0, -2.0, 0.0), (0, 13.0, 0.0)
+    m = {(r, d): _iou((*r, 40, 40), (*d, 40, 40)) for r in (a, b) for d in (d1, d2)}
+    assert m[a, d1] > m[a, d2] >= 0.5 and m[b, d1] >= 0.5 > m[b, d2]
+    assert m[a, d2] + m[b, d1] > m[a, d1] + m[b, d2]
+    work, ctx = _boxes(a, b), _boxes(d1, d2)
+    assert P.context_duplicates(work, ctx).tolist() == [True, True]
+    assert P.drop_context_duplicates(work, ctx).empty
+
+
+def test_own_detection_matching_with_empty_frames_and_tables():
+    work = _boxes((0, 0.0, 0.0), (2, 0.0, 0.0))
+    ctx = _boxes((1, 0.0, 0.0), (2, 1.0, 0.0), (3, 0.0, 0.0))  # frames 1 and 3 have no rows
+    assert P.context_duplicates(work, ctx).tolist() == [False, True, False]
+    assert P.occlusion_flags(work, ctx, 0.3).tolist() == [False, False]
+    assert P.context_duplicates(work, None).shape == (0,)
+    assert P.context_duplicates(work, ctx.iloc[:0]).shape == (0,)
+    assert P.drop_context_duplicates(work, None) is None
+    assert P.occlusion_flags(work, ctx.iloc[:0], 0.3).tolist() == [False, False]
+    empty = work.iloc[:0]
+    assert P.context_duplicates(empty, ctx).tolist() == [False, False, False]
+    assert P.occlusion_flags(empty, ctx, 0.3).empty
+
+
+def test_own_detection_matching_with_more_boxes_than_rows_and_more_rows_than_boxes():
+    # one row, three boxes: its own detection, an occluder at IoU 0.6, and a box far away
+    work = _boxes((0, 0.0, 0.0))
+    ctx = _boxes((0, 10.0, 0.0), (0, 300.0, 0.0), (0, 1.0, 0.0))
+    assert P.context_duplicates(work, ctx).tolist() == [False, False, True]
+    assert P.occlusion_flags(work, ctx, 0.3).tolist() == [True]
+    # three rows far apart, one box: it is only the nearest row's own detection
+    work = _boxes((0, 0.0, 0.0), (0, 200.0, 0.0), (0, 400.0, 0.0))
+    ctx = _boxes((0, 203.0, 0.0))
+    assert P.context_duplicates(work, ctx).tolist() == [True]
+    assert P.occlusion_flags(work, ctx, 0.3).tolist() == [False, False, False]
+    # the same box far from every row is nobody's detection and occludes nobody
+    assert P.context_duplicates(work, _boxes((0, 100.0, 0.0))).tolist() == [False]
+
+
+def test_own_detection_matching_survives_coordinates_that_overflow():
+    # x + w overflows to inf, so the IoU is NaN: the assignment must not reject the matrix
+    for big in (1e200, 1e300, 1e308):
+        work = _boxes((0, big, 0.0, big, 10.0))
+        ctx = _boxes((0, big, 0.0, big, 10.0))
+        with np.errstate(all="ignore"):
+            assert P.context_duplicates(work, ctx).shape == (1,)
+            assert P.drop_context_duplicates(work, ctx) is not None
+            assert P.occlusion_flags(work, ctx, 0.3).shape == (1,)
