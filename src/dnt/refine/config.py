@@ -94,6 +94,7 @@ class SwitchConfig:
     bimodal_purity: float = 0.9
     bimodal_silhouette_min: float = 0.25
     swap_boost: float = 0.2
+    min_crop_px: int = 40
     ramps: dict[str, list[float]] = field(
         default_factory=lambda: {
             "z_app": [2.0, 5.0],
@@ -145,7 +146,7 @@ class LinkConfig:
 
     enabled: bool = True
     mode: str = "scored"
-    accept_above: float = 0.80
+    accept_above: float = 0.62
     reject_below: float = 0.40
     max_gap: float = 1.0
     max_gap_static: float = 10.0
@@ -155,9 +156,9 @@ class LinkConfig:
     max_heading_change: float = 120.0
     speed_factor: float = 1.5
     min_feasible_speed: float = 0.5
-    occluded_score_cap: float = 0.75
+    occluded_score_cap: float = 0.60
     margin_min: float = 0.10
-    ambiguous_cap: float = 0.75
+    ambiguous_cap: float = 0.60
     max_passes: int = 3
     weights_occluded: dict[str, float] = field(
         default_factory=lambda: {"mot": 0.25, "app": 0.60, "gap": 0.15}
@@ -185,6 +186,7 @@ class LinkConfig:
     speed_seconds: float = 1.0
     heading_min_speed: float = 0.2
     n_alternatives: int = 2
+    min_crop_px: int = 0
 
 
 @dataclass(kw_only=True)
@@ -313,6 +315,10 @@ class RefineConfig:
             p.append(f"encoder.kind must be one of {ENCODERS}")
         if self.vlm.backend not in BACKENDS:
             p.append(f"vlm.backend must be one of {BACKENDS}")
+        for name in ("switch", "link"):
+            mcp = getattr(self, name).min_crop_px
+            if isinstance(mcp, bool) or not isinstance(mcp, int) or mcp < 0:
+                p.append(f"{name}.min_crop_px must be a whole number of pixels >= 0, not {mcp!r}")
         if self.link.mode not in ("scored", "legacy"):
             p.append("link.mode must be 'scored' or 'legacy'")
         if self.context.format not in ("auto", "tracks", "dets"):

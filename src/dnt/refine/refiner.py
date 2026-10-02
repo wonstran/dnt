@@ -276,6 +276,25 @@ def fill_stage(
     return out, events
 
 
+def embed_min_crop_px(cfg: RefineConfig) -> int:
+    """Return the smallest box (longer side, px) any stage uses, so the one to embed down to."""
+    return min(cfg.switch.min_crop_px, cfg.link.min_crop_px)
+
+
+def stage_views(appearance, cfg: RefineConfig):
+    """Return the ``(stage 1, stage 3)`` appearance, each with its stage's ``min_crop_px``.
+
+    A provider without ``view`` (for example a custom one from an ``appearance_factory``) is
+    used unchanged by both stages. A ``VideoAppearance`` (also one from a factory) gets a view
+    per stage, so it raises ValueError when its own ``min_crop_px`` is above
+    ``min(switch.min_crop_px, link.min_crop_px)``: those boxes were never embedded.
+    """
+    view = getattr(appearance, "view", None)
+    if appearance is None or view is None:
+        return appearance, appearance
+    return view(cfg.switch.min_crop_px), view(cfg.link.min_crop_px)
+
+
 class _Stages:
     """Runs stages 1-4 on a work table and collects their events (spec 3)."""
 
@@ -290,6 +309,7 @@ class _Stages:
             ctx_fmt,
             hints,
         )
+        self.switch_app, self.link_app = stage_views(appearance, cfg)
         self.link_ctx = ctx_boxes
         self.seq: Counter = Counter()
         self.events: list[Event] = []
@@ -326,7 +346,7 @@ class _Stages:
         cfg = self.cfg
         if not cfg.switch.enabled or work.empty:
             return work, set(), {}
-        res = propose_splits(work, cfg, self.fps, self.appearance)
+        res = propose_splits(work, cfg, self.fps, self.switch_app)
         self._route(res.events, Band.of(cfg.switch), "switch")
 
         def raw_at(track, frame):
@@ -381,7 +401,7 @@ class _Stages:
             work,
             cfg,
             self.fps,
-            appearance=self.appearance,
+            appearance=self.link_app,
             context=self.link_ctx,
             frame_size=self.frame_size,
             occluded=occluded,
@@ -749,6 +769,7 @@ class TrackRefiner:
             sample_every=cfg.sample_every,
             occlusion_iou=cfg.occlusion_iou,
             crop_pad=CROP_PAD,
+            min_crop_px=embed_min_crop_px(self.config),
         )
         loaded = FeatureStore.load(features_path, key, dim=encoder.dim)
         store = loaded if loaded is not None else FeatureStore(key)
@@ -761,6 +782,19 @@ class TrackRefiner:
             store,
             sample_every=cfg.sample_every,
             batch_size=cfg.batch_size,
+            min_crop_px=embed_min_crop_px(self.config),
             crop_pad=CROP_PAD,
         )
+        for name in ("switch", "link"):
+            mcp = getattr(self.config, name).min_crop_px
+            clean, small = (v := app.view(mcp)).coarse_clean, v.coarse_too_small
+            log.info(
+                "appearance: %s uses %d clean coarse samples; %d more are smaller than "
+                "%s.min_crop_px = %d px",
+                name,
+                clean,
+                small,
+                name,
+                mcp,
+            )
         return app, store  # the caller runs app.prefetch_coarse()

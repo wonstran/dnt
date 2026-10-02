@@ -11,7 +11,7 @@ from ._video import BLUE, RED, RED_DIR, ColorEncoder, make_color_video, video_ro
 
 
 def _make(tmp_path, tracks, colors, *, occluded=None, every=5, batch=4, n_frames=60, enc=None,
-          store=None):
+          store=None, min_crop=40):
     rows = [r for t in tracks for r in t]
     vrows = [v for t, c in zip(tracks, colors, strict=True) for v in video_rows(t, c)]
     video = make_color_video(tmp_path / "v.mp4", vrows, n_frames)
@@ -19,7 +19,8 @@ def _make(tmp_path, tracks, colors, *, occluded=None, every=5, batch=4, n_frames
     occ = pd.Series(False, index=work.index) if occluded is None else occluded(work)
     enc = enc or ColorEncoder()
     store = store or FeatureStore("k")
-    app = VideoAppearance(work, occ, video, enc, store, sample_every=every, batch_size=batch)
+    app = VideoAppearance(work, occ, video, enc, store, sample_every=every, batch_size=batch,
+                          min_crop_px=min_crop)
     assert len(rows) == len(work)
     return app, enc, store, video
 
@@ -144,7 +145,7 @@ def test_a_saved_store_serves_the_coarse_samples_without_the_video(tmp_path):
     enc2 = ColorEncoder()
     app2 = VideoAppearance(
         work, pd.Series(False, index=work.index), tmp_path / "gone.mp4", enc2, loaded,
-        sample_every=5, batch_size=4,
+        sample_every=5, batch_size=4, min_crop_px=40,
     )
     again = app2.clean_embeddings(1, 0, 59)
     assert enc2.calls == 0 and np.array_equal(first[1], again[1])
@@ -189,7 +190,7 @@ def test_unreadable_crops_are_recorded_in_the_store_and_survive_a_save(tmp_path,
     monkeypatch.setattr(video_appearance, "FrameReader", lambda p: opened.append(p) or real(p))
     app2 = VideoAppearance(
         work, pd.Series(False, index=work.index), tmp_path / "gone.mp4", enc, loaded,
-        sample_every=5, batch_size=4,
+        sample_every=5, batch_size=4, min_crop_px=40,
     )
     assert app2.dense_embeddings(2, 0, 29)[0].size == 0  # the video is not even needed
     assert opened == [] and enc.crops == 0 and not loaded.dirty
@@ -320,7 +321,7 @@ def test_occluded_must_be_a_series(tmp_path):
     with pytest.raises(ValueError, match="occluded must be a pandas Series"):
         VideoAppearance(
             work, np.zeros(len(work), bool), tmp_path / "v.mp4", ColorEncoder(), FeatureStore("k"),
-            sample_every=5, batch_size=4,
+            sample_every=5, batch_size=4, min_crop_px=40,
         )
 
 
@@ -330,7 +331,7 @@ def test_the_work_index_must_be_unique(tmp_path):
     with pytest.raises(ValueError, match="unique index"):
         VideoAppearance(
             work, pd.Series(False, index=work.index), tmp_path / "v.mp4", ColorEncoder(),
-            FeatureStore("k"), sample_every=5, batch_size=4,
+            FeatureStore("k"), sample_every=5, batch_size=4, min_crop_px=40,
         )
 
 
@@ -339,5 +340,125 @@ def test_occluded_must_cover_every_row_of_work(tmp_path):
     with pytest.raises(ValueError, match="does not cover 2 row"):
         VideoAppearance(
             work, pd.Series(False, index=work.index[:3]), tmp_path / "v.mp4", ColorEncoder(),
-            FeatureStore("k"), sample_every=5, batch_size=4,
+            FeatureStore("k"), sample_every=5, batch_size=4, min_crop_px=40,
         )
+
+
+# ---- the provider's min_crop_px: boxes too small to embed are treated like occluded rows ------
+
+
+def _sized(track, frames, w, h, x0=100.0):
+    return box_rows(track, frames, x0, 60.0, vx=1.0, w=w, h=h)
+
+
+def test_boxes_below_min_crop_px_are_never_embedded_and_boxes_at_it_are(tmp_path):
+    # longer side 39 px for frames 0-12, exactly 40 px from frame 13 on
+    rows = _sized(1, range(13), 20.0, 39.0) + _sized(1, range(13, 60), 20.0, 40.0, x0=113.0)
+    app, enc, store, _ = _make(tmp_path, [rows], [RED], min_crop=40)
+    f, e = app.clean_embeddings(1, 0, 59)
+    # ordinals count every observed frame, the small ones too: 15, 20, ..., not 13, 18, ...
+    assert list(f) == list(range(15, 60, 5)) and (e @ RED_DIR).min() > 0.98
+    assert enc.crops == 9
+    fd, _ = app.dense_embeddings(1, 8, 18)
+    assert list(fd) == list(range(13, 19))  # the dense path skips small boxes too
+    assert enc.crops == 9 + 5  # 13, 14, 16, 17, 18; frame 15 was a coarse sample
+    # small rows are neither embedded nor recorded as skipped crops
+    assert sorted(store._d[1]) == [*range(13, 19), *range(20, 60, 5)]
+    assert not any(store.is_skipped(1, k) for k in range(60))
+
+
+def test_min_crop_px_compares_the_longer_side_of_the_box(tmp_path):
+    wide = _sized(1, range(20), 45.0, 20.0)  # short but wide: longer side 45
+    narrow = _sized(2, range(20), 39.0, 39.0, x0=200.0)  # both sides below 40
+    app, enc, *_ = _make(tmp_path, [wide, narrow], [RED, BLUE], min_crop=40)
+    assert list(app.clean_embeddings(1, 0, 19)[0]) == [0, 5, 10, 15]
+    assert app.clean_embeddings(2, 0, 19)[0].size == 0
+    assert app.dense_embeddings(2, 0, 19)[0].size == 0 and enc.crops == 4
+
+
+def test_min_crop_px_zero_turns_the_size_rule_off(tmp_path):
+    rows = _sized(1, range(30), 12.0, 25.0)
+    app, enc, *_ = _make(tmp_path, [rows], [RED], min_crop=0)
+    assert list(app.clean_embeddings(1, 0, 29)[0]) == [0, 5, 10, 15, 20, 25]
+    assert list(app.dense_embeddings(1, 0, 4)[0]) == [0, 1, 2, 3, 4]
+    assert enc.crops == 6 + 4 and app.coarse_too_small == 0 and app.coarse_clean == 6
+
+
+def test_coarse_sample_counters_tell_small_boxes_from_occluded_ones(tmp_path):
+    small = _sized(1, range(30), 12.0, 25.0)  # coarse ordinals 0, 5, ..., 25: six samples
+    big = _sized(2, range(30), 40.0, 80.0, x0=200.0)
+    app, enc, *_ = _make(
+        tmp_path, [small, big], [RED, BLUE], min_crop=40,
+        occluded=lambda w: (w["track"] == 1) & (w["frame"] < 10),  # frames 0 and 5 occluded
+    )
+    assert app.coarse_too_small == 4 and app.coarse_clean == 6
+    app.prefetch_coarse()
+    assert enc.crops == 6
+
+
+def test_a_negative_min_crop_px_is_rejected(tmp_path):
+    work = _bare_work()
+    with pytest.raises(ValueError, match="min_crop_px must be at least 0"):
+        VideoAppearance(
+            work, pd.Series(False, index=work.index), tmp_path / "v.mp4", ColorEncoder(),
+            FeatureStore("k"), sample_every=5, batch_size=4, min_crop_px=-1,
+        )
+
+
+# ---- views: a stage's own min_crop_px over the provider's embeddings ------------------------
+
+
+def _mixed(track=1):
+    """Longer side 39 px for frames 0-12, 40 px from frame 13 on."""
+    return _sized(track, range(13), 20.0, 39.0) + _sized(track, range(13, 60), 20.0, 40.0, x0=113.0)
+
+
+def test_a_view_leaves_out_small_boxes_and_keeps_the_ordinals(tmp_path):
+    app, *_ = _make(tmp_path, [_mixed()], [RED], min_crop=0)
+    v40, v0 = app.view(40), app.view(0)
+    f, e = v40.clean_embeddings(1, 0, 59)
+    assert list(f) == list(range(15, 60, 5)) and (e @ RED_DIR).min() > 0.98  # not 13, 18, ...
+    assert list(v0.clean_embeddings(1, 0, 59)[0]) == list(range(0, 60, 5))
+    assert np.array_equal(v0.clean_embeddings(1, 0, 59)[1], app.clean_embeddings(1, 0, 59)[1])
+    assert list(v40.dense_embeddings(1, 8, 18)[0]) == list(range(13, 19))
+    assert list(v0.dense_embeddings(1, 8, 18)[0]) == list(range(8, 19))
+    assert (v40.coarse_clean, v40.coarse_too_small) == (9, 3)
+    assert (v0.coarse_clean, v0.coarse_too_small) == (12, 0)
+
+
+def test_a_view_embeds_what_the_provider_would_so_the_order_of_calls_does_not_matter(tmp_path):
+    calls = [
+        lambda a: a.view(40).dense_embeddings(1, 8, 18),
+        lambda a: a.view(0).dense_embeddings(1, 8, 18),
+        lambda a: a.view(40).clean_embeddings(1, 0, 59),
+        lambda a: a.view(0).clean_embeddings(1, 0, 59),
+    ]
+    results = []
+    for order in (calls, calls[::-1]):
+        (tmp_path / "v.mp4").unlink(missing_ok=True)
+        app, _, store, _ = _make(tmp_path, [_mixed()], [RED], min_crop=0, store=FeatureStore("k"))
+        out = [None] * len(order)
+        for k, call in enumerate(order):
+            out[k] = call(app)
+        results.append((out if order is calls else out[::-1], sorted(store._d[1])))
+    (a, keys_a), (b, keys_b) = results
+    for (fa, ea), (fb, eb) in zip(a, b, strict=True):
+        assert np.array_equal(fa, fb) and np.array_equal(ea, eb)
+    assert keys_a == keys_b and set(range(8, 19)) <= set(keys_a)
+
+
+def test_what_is_embedded_does_not_depend_on_the_view_that_asks(tmp_path):
+    # a view asks the provider for every clean frame of the window, small ones included, so
+    # the cache holds the same embeddings whichever stage filter asked for them
+    app, _, store, _ = _make(tmp_path, [_mixed()], [RED], min_crop=0)
+    assert list(app.view(40).dense_embeddings(1, 8, 18)[0]) == list(range(13, 19))
+    assert sorted(store._d[1]) == list(range(8, 19))
+
+
+def test_a_view_never_embeds_a_box_the_provider_leaves_out(tmp_path):
+    app, enc, store, _ = _make(tmp_path, [_mixed()], [RED], min_crop=40)
+    assert list(app.view(40).dense_embeddings(1, 0, 20)[0]) == list(range(13, 21))
+    assert list(app.view(50).dense_embeddings(1, 0, 20)[0]) == []
+    assert enc.crops == 8 and not any(store.has(1, k) for k in range(13))
+    with pytest.raises(ValueError, match=r"\(39\) cannot be below the provider's \(40\)"):
+        app.view(39)

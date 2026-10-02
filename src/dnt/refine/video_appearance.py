@@ -19,7 +19,20 @@ class VideoAppearance:
 
     A raw track's *coarse* samples are the observed frames with ordinal ``0, k, 2k, ...``
     (``k = sample_every``); *dense* samples are all of its observed frames. A sample is used
-    only if its row is not occluded and its crop is not empty.
+    only if its row is clean (not occluded, and its box's longer side is at least
+    ``min_crop_px``) and its crop is not empty. Rows that are not clean still count for the
+    ordinals.
+
+    ``view(min_crop_px)`` gives a stage its own, stricter size rule over the same embeddings.
+
+    Attributes
+    ----------
+    coarse_clean : int
+        Coarse samples of all raw tracks whose rows are clean.
+    coarse_too_small : int
+        Coarse samples whose rows are not occluded but whose boxes are smaller than
+        ``min_crop_px``, so they are not embedded.
+
     """
 
     def __init__(
@@ -32,6 +45,7 @@ class VideoAppearance:
         *,
         sample_every: int,
         batch_size: int,
+        min_crop_px: int,
         crop_pad: float = CROP_PAD,
     ):
         """Index the raw tracks of ``work``.
@@ -53,6 +67,9 @@ class VideoAppearance:
             Coarse stride, in observed frames.
         batch_size : int
             Crops per ``encoder.encode`` call.
+        min_crop_px : int
+            Rows whose box has a longer side (``max(w, h)``, in pixels) below this are treated
+            like occluded rows: never cropped or embedded. ``0`` turns the rule off.
         crop_pad : float
             Box enlargement before cropping.
 
@@ -66,29 +83,60 @@ class VideoAppearance:
             raise ValueError(
                 f"occluded does not cover {len(missing)} row(s) of work (first label: {missing[0]})"
             )
+        if int(min_crop_px) < 0:
+            raise ValueError(f"min_crop_px must be at least 0, got {min_crop_px}")
         self.video_file = video_file
         self.encoder = encoder
         self.store = store
         self.batch_size = max(1, int(batch_size))
         self.crop_pad = float(crop_pad)
-        self._tr: dict[int, tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]] = {}
+        self.min_crop_px = int(min_crop_px)
+        self.coarse_clean = 0
+        self.coarse_too_small = 0
+        self._tr: dict[int, tuple[np.ndarray, ...]] = {}
         w = work.sort_values(["raw_id", "frame"])
         w = w.assign(_occ=occluded.loc[w.index].to_numpy(bool))
         every = max(1, int(sample_every))
         for raw_id, g in w.groupby("raw_id", sort=True):
-            self._tr[int(raw_id)] = (
-                g["frame"].to_numpy(int),
-                g[["x", "y", "w", "h"]].to_numpy(float),
-                ~g["_occ"].to_numpy(bool),
-                np.arange(len(g)) % every == 0,
-            )
+            boxes = g[["x", "y", "w", "h"]].to_numpy(float)
+            visible = ~g["_occ"].to_numpy(bool)
+            side = boxes[:, 2:4].max(axis=1)  # the longer side, as in the track file
+            clean = visible & _big_enough(side, self.min_crop_px)
+            coarse = np.arange(len(g)) % every == 0  # ordinals count every observed frame
+            self._tr[int(raw_id)] = (g["frame"].to_numpy(int), boxes, clean, coarse, visible, side)
+        self.coarse_clean, self.coarse_too_small = self._coarse_counts(self.min_crop_px)
 
-    def _rows(self, raw_id: int, f0: int, f1: int, dense: bool):
+    def _coarse_counts(self, min_crop_px: int) -> tuple[int, int]:
+        """Return the coarse samples that are clean, and those only too small, for a minimum."""
+        clean = small = 0
+        for _, _, _, coarse, visible, side in self._tr.values():
+            big = _big_enough(side, min_crop_px)
+            clean += int((coarse & visible & big).sum())
+            small += int((coarse & visible & ~big).sum())
+        return clean, small
+
+    def view(self, min_crop_px: int) -> AppearanceView:
+        """Return a view that also leaves out boxes whose longer side is below ``min_crop_px``.
+
+        The view shares this provider's store and rows. It asks the provider for the same
+        embeddings as the provider itself would, and filters them when it collects them, so
+        what it returns does not depend on the order of calls.
+
+        Raises
+        ------
+        ValueError
+            If ``min_crop_px`` is below the provider's own ``min_crop_px``: those boxes were
+            never embedded.
+
+        """
+        return AppearanceView(self, min_crop_px)
+
+    def _rows(self, raw_id: int, f0: int, f1: int, dense: bool, min_crop_px: int = 0):
         tr = self._tr.get(int(raw_id))
         if tr is None:
             return None
-        frames, boxes, clean, coarse = tr
-        m = (frames >= f0) & (frames <= f1) & clean
+        frames, boxes, clean, coarse, _, side = tr
+        m = (frames >= f0) & (frames <= f1) & clean & _big_enough(side, min_crop_px)
         if not dense:
             m &= coarse
         return frames, boxes, np.flatnonzero(m)
@@ -138,8 +186,8 @@ class VideoAppearance:
         crops.clear()
         owners.clear()
 
-    def _collect(self, raw_id: int, f0: int, f1: int, dense: bool):
-        rows = self._rows(raw_id, f0, f1, dense)
+    def _collect(self, raw_id: int, f0: int, f1: int, dense: bool, min_crop_px: int = 0):
+        rows = self._rows(raw_id, f0, f1, dense, min_crop_px)
         if rows is None:
             return np.empty(0, dtype=int), np.empty((0, 0))
         frames, _, idx = rows
@@ -166,3 +214,45 @@ class VideoAppearance:
     def prefetch_dense(self, windows: Sequence[tuple[int, int, int]]) -> None:
         """Embed the clean frames of ``(raw_id, f0, f1)`` windows in one pass over the video."""
         self._ensure(list(windows), dense=True)
+
+
+def _big_enough(side: np.ndarray, min_crop_px: int) -> np.ndarray:
+    """Return which boxes have a longer side of at least ``min_crop_px`` (all of them for 0)."""
+    if min_crop_px <= 0:
+        return np.ones(len(side), dtype=bool)
+    return side >= min_crop_px
+
+
+class AppearanceView:
+    """A ``VideoAppearance`` seen by one stage, with that stage's minimum box size (spec 5.3).
+
+    It implements ``clean_embeddings``, ``dense_embeddings`` and ``prefetch_dense`` over the
+    provider's store and rows. Rows whose box has a longer side below ``min_crop_px`` are left
+    out when the embeddings are collected; the coarse ordinals still count every observed row.
+    Embedding is the provider's: a view never embeds a row the provider leaves out.
+    """
+
+    def __init__(self, provider: VideoAppearance, min_crop_px: int):
+        """Wrap ``provider``; ``min_crop_px`` must be at least the provider's own value."""
+        if int(min_crop_px) < provider.min_crop_px:
+            raise ValueError(
+                f"a view's min_crop_px ({min_crop_px}) cannot be below the provider's "
+                f"({provider.min_crop_px}): smaller boxes were never embedded"
+            )
+        self.provider = provider
+        self.min_crop_px = int(min_crop_px)
+        self.coarse_clean, self.coarse_too_small = provider._coarse_counts(self.min_crop_px)
+
+    def clean_embeddings(self, raw_id: int, f0: int, f1: int) -> tuple[np.ndarray, np.ndarray]:
+        """Return the coarse samples of ``raw_id`` within ``[f0, f1]`` that are large enough."""
+        self.provider._ensure([(raw_id, f0, f1)], dense=False)
+        return self.provider._collect(raw_id, f0, f1, dense=False, min_crop_px=self.min_crop_px)
+
+    def dense_embeddings(self, raw_id: int, f0: int, f1: int) -> tuple[np.ndarray, np.ndarray]:
+        """Return every large-enough clean observed frame of ``raw_id`` within ``[f0, f1]``."""
+        self.provider._ensure([(raw_id, f0, f1)], dense=True)
+        return self.provider._collect(raw_id, f0, f1, dense=True, min_crop_px=self.min_crop_px)
+
+    def prefetch_dense(self, windows: Sequence[tuple[int, int, int]]) -> None:
+        """Embed the clean frames of ``(raw_id, f0, f1)`` windows in one pass (the provider's)."""
+        self.provider.prefetch_dense(windows)

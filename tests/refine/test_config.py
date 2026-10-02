@@ -153,3 +153,63 @@ def test_a_null_fill_max_gap_and_small_positive_durations_are_valid():
     cfg = RefineConfig.from_dict({"fill": {"max_gap": None}, "link": {"max_passes": 1},
                                   "switch": {"min_side_seconds": 0.1}})
     assert cfg.fill.max_gap is None and cfg.link.max_passes == 1
+
+
+# ---- switch.min_crop_px and link.min_crop_px ------------------------------------------------
+
+
+def test_min_crop_px_defaults_per_stage_and_round_trips_through_yaml(tmp_path):
+    for target in ("person", "vehicle"):
+        cfg = RefineConfig.defaults(target)
+        assert cfg.switch.min_crop_px == 40 and cfg.link.min_crop_px == 0
+        assert not hasattr(cfg.encoder, "min_crop_px")
+        cfg.to_yaml(tmp_path / "c.yaml")
+        data = yaml.safe_load((tmp_path / "c.yaml").read_text())
+        assert data["switch"]["min_crop_px"] == 40 and data["link"]["min_crop_px"] == 0
+        assert "min_crop_px" not in data["encoder"]
+        back = RefineConfig.from_yaml(tmp_path / "c.yaml")
+        assert back == cfg
+    cfg = RefineConfig.from_dict({"switch": {"min_crop_px": 0}, "link": {"min_crop_px": 64}})
+    assert cfg.switch.min_crop_px == 0 and cfg.link.min_crop_px == 64
+
+
+def test_encoder_min_crop_px_is_not_a_config_key():
+    with pytest.raises(ValueError, match=r"unknown config key 'encoder\.min_crop_px'"):
+        RefineConfig.from_dict({"encoder": {"min_crop_px": 40}})
+
+
+@pytest.mark.parametrize("stage", ["switch", "link"])
+@pytest.mark.parametrize("value", [-1, 2.5, 40.0, True, "40", None])
+def test_min_crop_px_must_be_a_non_negative_int(stage, value):
+    with pytest.raises(ValueError, match=rf"{stage}\.min_crop_px"):
+        RefineConfig.from_dict({stage: {"min_crop_px": value}})
+
+
+@pytest.mark.parametrize("stage", ["switch", "link"])
+@pytest.mark.parametrize("value", [-1, 2.5, True, "40", None])
+def test_a_directly_assigned_min_crop_px_is_validated(stage, value):
+    cfg = RefineConfig.defaults()
+    getattr(cfg, stage).min_crop_px = value
+    with pytest.raises(ValueError, match=rf"{stage}\.min_crop_px must be a whole number of pixels"):
+        cfg.validate()
+
+
+
+# ---- link defaults ---------------------------------------------------------------------------
+
+
+def test_link_band_defaults():
+    lc = RefineConfig.defaults().link
+    assert (lc.accept_above, lc.reject_below) == (0.62, 0.40)
+    assert lc.ambiguous_cap == 0.60 and lc.occluded_score_cap == 0.60
+
+
+@pytest.mark.parametrize("data, match", [
+    ({"link": {"ambiguous_cap": 0.62}}, "ambiguous_cap"),
+    ({"link": {"occluded_score_cap": 0.62}}, "occluded_score_cap"),
+    ({"link": {"accept_above": 0.60}}, "must be below link.accept_above"),
+])
+def test_link_caps_must_stay_below_the_new_accept_above(data, match):
+    with pytest.raises(ValueError, match=match):
+        RefineConfig.from_dict(data)
+    RefineConfig.from_dict({"link": {"ambiguous_cap": 0.61, "occluded_score_cap": 0.61}})

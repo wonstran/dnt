@@ -18,7 +18,8 @@ log = logging.getLogger(__name__)
 
 #: Bumped whenever the crop or embedding code changes, so old caches are not reused.
 #: Version 2 added the keys of skipped (empty or unreadable) crops to the file.
-FEATURES_VERSION = 2
+#: Version 3 added the smallest embedded box size (``min_crop_px``) to the key.
+FEATURES_VERSION = 3
 
 
 class Appearance(Protocol):
@@ -131,7 +132,7 @@ def dense_track_embeddings(
 
 
 def features_key(
-    *, tracks_sha, video, context_sha, encoder, sample_every, occlusion_iou, crop_pad
+    *, tracks_sha, video, context_sha, encoder, sample_every, occlusion_iou, crop_pad, min_crop_px
 ) -> str:
     """Return the SHA-256 key of every input that can change an embedding (spec 5.3).
 
@@ -147,6 +148,9 @@ def features_key(
         Anything with ``name``, ``model_name``, ``weights_sha`` and ``preprocess_id``.
     sample_every, occlusion_iou, crop_pad : float
         Sampling stride, occlusion threshold, and crop padding.
+    min_crop_px : int
+        Minimum longer box side, in pixels, of an embedded crop (``0``: no minimum); the
+        smallest of the stages' values, never a stage's own filter.
 
     Returns
     -------
@@ -163,6 +167,7 @@ def features_key(
         "sample_every": int(sample_every),
         "occlusion_iou": float(occlusion_iou),
         "crop_pad": float(crop_pad),
+        "min_crop_px": int(min_crop_px),
     }
     return hashlib.sha256(json.dumps(parts, sort_keys=True).encode()).hexdigest()
 

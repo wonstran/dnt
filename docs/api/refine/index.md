@@ -35,6 +35,17 @@ Command line: `dnt-refine run TRACKS --fps 10 --config refine.yaml --out clean.c
     file with the vehicles' boxes (`context_file=`, or `--context`); without one the in-vehicle
     cue is skipped. VLM verification and applying review decisions follow in later releases.
 
+## Link band
+
+A link is applied when its score reaches `link.accept_above` (0.62 by default, in motion-only
+mode too). Links across occlusions and links with an ambiguous assignment margin are capped at
+`link.occluded_score_cap` and `link.ambiguous_cap` (0.60 by default), so they stay pending.
+Raise `link.accept_above` to apply fewer links; config validation keeps both caps below it.
+The score is multiplied by a border prior, `0.8 + 0.2 * b`, where `b` is 0 for a pair that ends
+or starts near the image border. With `accept_above` 0.62, such border links can now be
+applied too: on the three audited clips, 2 of the 8 applied links (beginning 98->134, middle
+221->222) were border links, and both were among the audited, correct ones.
+
 ## Appearance
 
 With a video, `refine` also compares what tracks look like. It crops each box, skips crops that
@@ -62,6 +73,28 @@ The first `dino` run downloads the model from the Hugging Face Hub, so it needs 
 `pip install git+https://github.com/KaiyangZhou/deep-person-reid.git`.
 The embeddings are saved as `OUT.features.npz` next to the output and reused when the track
 file, video, context file, and encoder model, weights, and sampling settings are unchanged.
+Each stage has a minimum box size. Stage 1 ignores the appearance of boxes whose longer side
+is below `switch.min_crop_px` (40 px by default); stage 3 does the same with
+`link.min_crop_px` (0 by default: every clean crop). A track whose boxes are all smaller gets
+no ID-switch proposal at all, and a link whose ends have no crop left is scored with
+appearance unknown. On three 640x480 pedestrian clips, where most boxes were smaller than
+40 px, the ID-switch splits found from small crops cut single pedestrians, while most links
+scored from small crops were correct. On three 640x480 pedestrian clips (beginning, evening, middle), stage 1 proposed 2, 20 and
+5 splits with the earlier default (no filter), 0, 3 and 1 with `switch.min_crop_px: 40`, and
+42, 209 and 85 in motion-only mode (`encoder.kind: none`); the filter removed 58-70% of the
+coarse samples. The filtered counts are approximate: dense frames missing from the cached
+embeddings were left out.
+Set a value to `0` to use every crop in that stage when your boxes are mostly larger than the
+default (distant pedestrians stay small at any resolution); a higher value uses fewer, larger
+crops. `refine` logs how many samples each stage uses.
+
+```yaml
+switch:
+  min_crop_px: 40   # stage 1 ignores the appearance of smaller boxes (longer side, px)
+link:
+  min_crop_px: 0    # stage 3 compares every clean crop
+```
+
 For vehicles, `reid` needs `encoder.weights`. The cache key includes a digest of the weights
 that were actually loaded, so a model that changes under the same name never reuses old
 embeddings.

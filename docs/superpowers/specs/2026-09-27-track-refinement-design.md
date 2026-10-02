@@ -375,9 +375,9 @@ For each stage, `accept_above` and `reject_below`, with `reject_below < accept_a
 **Exceptions**
 - **Static screen.** The static-object score is capped at `screen.static_score_cap` (default 0.80). Keep the cap below `screen.accept_above`, so static tracks never auto-drop (§6.2).
 - **Rider subtype.** A `RECLASS` whose rider score is `AUTO_ACCEPT` still needs one VLM call to choose the subtype, unless a ReClass hint has already settled it (§6.2). That call only picks the subtype and cannot overturn the rider decision. If the VLM answers with a non-rider option (for example `pedestrian`), the algorithm and the VLM disagree, and the event becomes `HUMAN_PENDING`. It also becomes `HUMAN_PENDING` if `params.new_cls` is still `None` after verification.
-- **Link ambiguity.** In stage 3, a pair whose margin over the next-best alternative is below `link.margin_min` (default 0.1) is capped at `link.ambiguous_cap` (default 0.75, below `link.accept_above`). An ambiguous pair is never auto-accepted. Ambiguity alone also never auto-rejects a pair: if its score reaches `reject_below`, it goes to the VLM (§6.3).
+- **Link ambiguity.** In stage 3, a pair whose margin over the next-best alternative is below `link.margin_min` (default 0.1) is capped at `link.ambiguous_cap` (default 0.60, below `link.accept_above`). An ambiguous pair is never auto-accepted. Ambiguity alone also never auto-rejects a pair: if its score reaches `reject_below`, it goes to the VLM (§6.3).
 - **Mixed screen.** A partial `DROP` or `RECLASS` (§6.2) is capped at `screen.mixed_score_cap` (default 0.75), so it is never auto-applied.
-- **Occluded link.** A link through the occlusion-witness gate (§6.3) is capped at `link.occluded_score_cap` (default 0.75). Keep the cap below `link.accept_above`, so these links are never auto-accepted. Waiting in a queue also produces occlusion, so a witness makes a link plausible, not certain.
+- **Occluded link.** A link through the occlusion-witness gate (§6.3) is capped at `link.occluded_score_cap` (default 0.60). Keep the cap below `link.accept_above`, so these links are never auto-accepted. Waiting in a queue also produces occlusion, so a witness makes a link plausible, not certain.
 
 ## 5. Shared primitives
 
@@ -405,6 +405,7 @@ For each stage, `accept_above` and `reject_below`, with `reject_below < accept_a
 
 - The encoder embeds a crop every `encoder.sample_every` observed frames (default 5). Stage 1 finds candidates on these coarse samples, then embeds every observed frame within ±`switch.window` of each candidate and recomputes that candidate's score on the dense samples.
 - A crop is used only if the box's maximum IoU with every other box in that frame (in the input file and in the context file) is below `encoder.occlusion_iou` (default 0.3). Crops that fail are marked `occluded` and excluded from appearance statistics.
+- **Minimum box size, per stage.** Stage 1 ignores the appearance samples of boxes whose longer side, `max(w, h)` in pixels as in the track file, is below `switch.min_crop_px` (default 40). Stage 3 does the same with `link.min_crop_px` (default 0: every clean crop). `0` turns a stage's filter off. In that stage a filtered row is treated like an occluded one, and the coarse ordinals still count every observed row. Stage 1 skips a track or side without enough samples, so a track of small boxes gets no `SPLIT` event at all (section 6.1); on three 640x480 pedestrian clips this left 0, 3 and 1 split proposals where no filter gave 2, 20 and 5 and motion-only mode 42, 209 and 85 (filtered counts approximate: uncached dense frames were left out). Stage 3 uses `c_app = 0.5` for a side without samples (section 6.3). Rows below the smaller of the two values are never embedded. The other rows are embedded whichever stage asks for them, so no stored embedding depends on the stages' filters beyond that smallest value. Which dense frames get embedded does depend on them: they follow the stage 1 candidates, and so `switch.min_crop_px`, which is not in the key. Frames missing from a cache are embedded on demand when the video is available. On three 640x480 pedestrian clips, the ID-switch splits found from small crops cut single pedestrians, while most audited links scored from small crops were correct; hence the two defaults. `refine` logs at INFO how many coarse samples each stage uses and how many its filter leaves out.
 - The mask is computed from the **raw** input boxes and the context boxes. It does not change when decisions change, so embeddings stay valid across re-proposals.
 - Embeddings are L2-normalized.
 - **The embedded samples do not depend on decisions.** They are the coarse samples, which depend only on the raw tracks and `sample_every`, plus the dense samples around every stage 1 candidate, whatever its decision. Stage 1's proposals are deterministic and never change on replay. So the cache that `refine` writes covers every embedding any replay can request, including the first and last clean samples of tails created by splits that are accepted later.
@@ -413,7 +414,7 @@ For each stage, `accept_above` and `reject_below`, with `reject_below < accept_a
   - the video's **fingerprint**: the SHA-256 of the **entire file**, read in 8 MiB chunks, plus the file size and frame count;
   - the context file's SHA-256, or `none`;
   - encoder kind, model name, and a digest of the weights actually loaded (the SHA-256 of the weights file; for a Hub model, which has no file path, the SHA-256 of the loaded parameters, so a model name that later resolves to different weights misses the cache);
-  - `sample_every` and `occlusion_iou`;
+  - `sample_every`, `occlusion_iou`, and the smallest embedded box size, `min(switch.min_crop_px, link.min_crop_px)`;
   - crop preprocessing: padding factor, resize target, and normalization;
   - `FEATURES_VERSION`, a constant bumped whenever the crop or embedding code changes.
 
@@ -890,10 +891,11 @@ switch:
   motion_only_cap: 0.70
   class_change_gate: true
   size_gate: 1.5
+  min_crop_px: 40            # appearance of boxes with a smaller longer side (px) is ignored
 link:
   enabled: true
   mode: scored               # scored | legacy (§6.3)
-  accept_above: 0.80
+  accept_above: 0.62         # 0.80 before; see the note below the block
   reject_below: 0.40
   max_gap: 1.0               # seconds
   max_gap_static: 10.0       # seconds
@@ -903,9 +905,9 @@ link:
   max_heading_change: 120    # degrees
   speed_factor: 1.5
   min_feasible_speed: 0.5    # h/s
-  occluded_score_cap: 0.75
+  occluded_score_cap: 0.60
   margin_min: 0.10
-  ambiguous_cap: 0.75
+  ambiguous_cap: 0.60
   max_passes: 3
   weights_occluded: {mot: 0.25, app: 0.60, gap: 0.15}
   class_groups: []           # vehicle default: [[2, 7]]
@@ -917,6 +919,7 @@ link:
   legacy_weights: {d: 1.0, iou: 1.0, s: 0.3}
   legacy_cost_hi: 3.0
   weights: {mot: 0.45, app: 0.40, gap: 0.15}
+  min_crop_px: 0             # as switch.min_crop_px, for stage 3; 0: every clean crop
 orphan:
   enabled: true
   min_seconds: 0.5
@@ -942,6 +945,8 @@ vlm:
   cache_dir: ~/.cache/dnt/vlm
 ```
 
+The link band was lowered from `accept_above: 0.80` (caps 0.75) after a review of three real 640x480 pedestrian clips: of eleven pending links scoring 0.63-0.75, nine looked correct. The caps stay below `accept_above`, so occluded and ambiguous links still never auto-accept. The same band applies in motion-only mode, where the score is renormalized without appearance.
+
 **Validation, run when the config loads**
 - `0 ≤ reject_below < accept_above ≤ 1` for every stage.
 - `static_score_cap < screen.accept_above`, so static tracks can never auto-drop (§6.2).
@@ -951,6 +956,7 @@ vlm:
 - No class appears in more than one `link.class_groups` group.
 - `screen.mixed_score_cap < screen.accept_above`, `link.ambiguous_cap < link.accept_above`, and `screen.segment_at < switch.reject_below`.
 - `reid` with the `vehicle` target has `weights` set.
+- `switch.min_crop_px` and `link.min_crop_px` are integers `>= 0`.
 - A non-`none` VLM backend has `model` set (except `anthropic`, which has a default).
 
 **Deferred until `refine` or `apply` starts, and only for components the run will use** (§5.5): the encoder's extra (needed only with a video and `encoder.kind` other than `none`) and the VLM backend's extra (needed only with a non-`none` backend and a video).

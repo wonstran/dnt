@@ -30,6 +30,7 @@ BASE = dict(
     sample_every=5,
     occlusion_iou=0.3,
     crop_pad=1.1,
+    min_crop_px=40,
 )
 
 
@@ -53,6 +54,8 @@ def test_key_is_a_stable_sha256():
         {"sample_every": 4},
         {"occlusion_iou": 0.2},
         {"crop_pad": 1.2},
+        {"min_crop_px": 0},
+        {"min_crop_px": 41},
     ],
 )
 def test_key_changes_with_every_input(change):
@@ -201,8 +204,20 @@ def test_an_archive_without_the_skipped_keys_is_a_miss(tmp_path, names):
     assert FeatureStore.load(p, "k") is None
 
 
-def test_the_features_version_is_2():
-    assert features.FEATURES_VERSION == 2
+def test_the_features_version_is_3():
+    assert features.FEATURES_VERSION == 3
+
+
+def test_a_cache_written_under_features_version_2_is_a_miss(tmp_path, monkeypatch):
+    # version 3 stopped embedding small boxes; a version 2 cache holds embeddings of them
+    with monkeypatch.context() as m:
+        m.setattr(features, "FEATURES_VERSION", 2)
+        old_key = features_key(**BASE)
+    p = tmp_path / "v2.features.npz"
+    _store(old_key).save(p)
+    assert FeatureStore.load(p, old_key) is not None
+    assert features_key(**BASE) != old_key
+    assert FeatureStore.load(p, features_key(**BASE)) is None
 
 
 def test_skipped_keys_are_recorded_saved_sorted_and_loaded(tmp_path):
