@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import logging
 import math
 import os
@@ -58,7 +59,14 @@ def _check(answer: VLMAnswer, options: list[str]) -> None:
 
 
 class VLMRunner:
-    """Ask many questions of one backend, within a budget, on one long-lived event loop."""
+    """Ask many questions of one backend, within a budget, on one long-lived event loop.
+
+    Batches are serialized: if several threads call ``ask_many`` at once, the batches run one
+    after the other (each holds a lock for its whole run), so the admission of a batch always
+    sees the final ``calls + retries`` of every earlier batch and ``max_calls`` stays a hard
+    limit. A caller whose wait is interrupted (for example by Ctrl+C) cancels its batch on the
+    loop, and ``close()`` cancels any batch still running.
+    """
 
     def __init__(self, cfg, backend, cache: AnswerCache | None = None, *, sleep=None):
         """``cfg`` is a ``VLMConfig``; ``sleep`` replaces ``asyncio.sleep`` in tests."""
@@ -75,6 +83,7 @@ class VLMRunner:
         self._loop: asyncio.AbstractEventLoop | None = None
         self._thread: threading.Thread | None = None
         self._closed = False
+        self._batch_lock = asyncio.Lock()  # one batch at a time, so admission sees every spend
 
     # ---- the long-lived loop ----
 
@@ -83,8 +92,15 @@ class VLMRunner:
         asyncio.set_event_loop(loop)
         loop.call_soon(ready.set)
         loop.run_forever()
-        loop.run_until_complete(loop.shutdown_asyncgens())
-        loop.close()
+        try:
+            tasks = asyncio.all_tasks(loop)  # leave nothing pending on a loop that is closing
+            for task in tasks:
+                task.cancel()
+            if tasks:
+                loop.run_until_complete(asyncio.gather(*tasks, return_exceptions=True))
+            loop.run_until_complete(loop.shutdown_asyncgens())
+        finally:
+            loop.close()
 
     def _ensure_loop(self) -> asyncio.AbstractEventLoop:
         with self._lock:
@@ -101,8 +117,24 @@ class VLMRunner:
                 self._loop, self._thread = loop, thread
             return self._loop
 
+    async def _shutdown(self) -> None:
+        """Cancel every running batch, then close the backend's client (runs on the loop)."""
+        me = asyncio.current_task()
+        tasks = [t for t in asyncio.all_tasks() if t is not me]
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        aclose = getattr(self.backend, "aclose", None)
+        if aclose is not None:
+            await aclose()
+
     def close(self) -> None:
-        """Close the backend's client on the loop that used it, then stop the loop (idempotent)."""
+        """Cancel running batches, close the backend's client on its loop, stop the loop.
+
+        A thread blocked in ``ask_many`` gets a ``RuntimeError`` instead of waiting forever.
+        Calling it again does nothing.
+        """
         with self._lock:
             if self._closed:
                 return
@@ -110,12 +142,10 @@ class VLMRunner:
             loop, thread = self._loop, self._thread
         if loop is None:
             return
-        aclose = getattr(self.backend, "aclose", None)
-        if aclose is not None:
-            try:
-                asyncio.run_coroutine_threadsafe(aclose(), loop).result(timeout=10.0)
-            except Exception as err:
-                log.warning("could not close the VLM backend cleanly: %s", err)
+        try:
+            asyncio.run_coroutine_threadsafe(self._shutdown(), loop).result(timeout=10.0)
+        except Exception as err:
+            log.warning("could not close the VLM backend cleanly: %s", self._scrub(str(err)))
         loop.call_soon_threadsafe(loop.stop)
         thread.join(timeout=10.0)
 
@@ -238,6 +268,10 @@ class VLMRunner:
         return Verdict(best, conf, first.reason, dict(counts), all_cached, None, raws)
 
     async def _gather(self, questions: list[Question]) -> list[Verdict]:
+        async with self._batch_lock:  # a later batch is admitted only after this one has finished
+            return await self._run_batch(questions)
+
+    async def _run_batch(self, questions: list[Question]) -> list[Verdict]:
         n = max(1, int(self.cfg.votes))
         temperature = float(self.cfg.vote_temperature) if n > 1 else 0.0
         # Admission, in list order and before anything is sent: cached votes are free, and a
@@ -260,7 +294,11 @@ class VLMRunner:
                 self.budget_skipped += 1
                 return Verdict(None, 0.0, "", {}, False, "budget", [])
             async with sem:
-                v = await self._one(q, n, temperature, *plan, slack)
+                try:
+                    v = await self._one(q, n, temperature, *plan, slack)
+                except Exception as exc:  # one bad reply must not abort its siblings
+                    err = self._scrub(f"{type(exc).__name__}: {exc}")
+                    v = Verdict(None, 0.0, "", {}, False, err, [])
             if v.error == "budget":
                 self.budget_skipped += 1
             elif v.error is not None:
@@ -271,8 +309,19 @@ class VLMRunner:
         return list(await asyncio.gather(*tasks))
 
     def ask_many(self, questions: list[Question]) -> list[Verdict]:
-        """Ask every question and return the verdicts in order (blocks until all are done)."""
+        """Ask every question and return the verdicts in order (blocks until all are done).
+
+        If the wait is interrupted the batch is cancelled on the loop, so it stops spending
+        calls. If the runner is closed meanwhile, ``RuntimeError`` is raised.
+        """
         if not questions:
             return []
         loop = self._ensure_loop()
-        return asyncio.run_coroutine_threadsafe(self._gather(questions), loop).result()
+        fut = asyncio.run_coroutine_threadsafe(self._gather(questions), loop)
+        try:
+            return fut.result()
+        except concurrent.futures.CancelledError:
+            raise RuntimeError("the VLM runner was closed while the batch was running") from None
+        except BaseException:
+            fut.cancel()
+            raise

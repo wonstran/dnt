@@ -2,6 +2,7 @@ import asyncio
 import http.server
 import json
 import threading
+import time
 
 import pytest
 
@@ -151,7 +152,7 @@ def test_a_timeout_is_retried():
                 await asyncio.sleep(1.0)
             return parse_answer(reply(), options)
 
-    r, _ = runner(None, backend=Slow(), timeout_s=0.05)
+    r, _ = runner(None, backend=Slow(), timeout_s=0.2)
     (v,) = r.ask_many([q()])
     assert v.answer == "different" and Slow.n == 2
 
@@ -418,3 +419,121 @@ def test_pooled_http_connections_also_work_from_a_notebook_loop(local_server):
 
     first, second = asyncio.run(main())
     assert first[0].error is None and second[0].error is None
+
+
+# ---- overlapping callers, interruption, closing under load (fix round 1) ----
+
+
+class _Slow:
+    """A backend that takes ``delay`` seconds per call and records every invocation."""
+
+    name, model = "slow", "m"
+
+    def __init__(self, delay=0.2):
+        self.delay = delay
+        self.calls = 0
+        self.started = threading.Event()
+
+    async def ask(self, image, prompt, options, temperature, *, tag=""):
+        self.calls += 1
+        self.started.set()
+        await asyncio.sleep(self.delay)
+        return VLMAnswer(options[0], 1.0, tag, "")
+
+
+def test_overlapping_ask_many_calls_share_one_budget():
+    b = _Slow()
+    r, _ = runner(None, backend=b, max_calls=2, max_concurrency=1)
+    out = {}
+
+    def call(name):
+        out[name] = r.ask_many([q(f"LINK:{name}{i}") for i in range(3)])
+
+    first = threading.Thread(target=call, args=("a",))
+    first.start()
+    assert b.started.wait(5)  # the first batch is running (one of its two calls is in flight)
+    second = threading.Thread(target=call, args=("b",))
+    second.start()
+    first.join(10)
+    second.join(10)
+    assert not first.is_alive() and not second.is_alive()
+    assert b.calls <= 2 and r.calls + r.retries == b.calls
+    answered = [v for vs in out.values() for v in vs if v.error is None]
+    assert len(answered) == b.calls and all(
+        v.error == "budget" for vs in out.values() for v in vs if v.error is not None
+    )
+
+
+def test_an_interrupted_wait_cancels_the_batch(monkeypatch):
+    import dnt.refine.vlm.runner as mod
+
+    b = _Slow()
+    r, _ = runner(None, backend=b, max_calls=3, max_concurrency=1)
+    real = asyncio.run_coroutine_threadsafe
+
+    class Interrupted:
+        def __init__(self, fut):
+            self.fut = fut
+
+        def result(self, *args):
+            assert b.started.wait(5)
+            raise KeyboardInterrupt  # Ctrl+C while waiting
+
+        def cancel(self):
+            return self.fut.cancel()
+
+    monkeypatch.setattr(mod.asyncio, "run_coroutine_threadsafe", lambda c, lp: Interrupted(real(c, lp)))
+    with pytest.raises(KeyboardInterrupt):
+        r.ask_many([q(f"LINK:{i}") for i in range(3)])
+    monkeypatch.undo()
+    time.sleep(0.7)  # the old batch would have made two more calls by now
+    assert b.calls == 1
+    r.ask_many([q(f"LINK:n{i}") for i in range(3)])  # what is left of the cap is 2
+    assert b.calls <= 3 and r.calls + r.retries == b.calls
+
+
+def test_close_releases_a_thread_blocked_in_a_running_batch():
+    started = threading.Event()
+
+    class Hang:
+        name, model = "hang", "m"
+
+        async def ask(self, image, prompt, options, temperature, *, tag=""):
+            started.set()
+            await asyncio.sleep(60)
+
+    r, _ = runner(None, backend=Hang())
+    caught = []
+
+    def call():
+        try:
+            r.ask_many([q()])
+        except BaseException as exc:
+            caught.append(exc)
+
+    t = threading.Thread(target=call)
+    t.start()
+    assert started.wait(5)
+    thread = r._thread
+    t0 = time.monotonic()
+    r.close()
+    t.join(5)
+    assert time.monotonic() - t0 < 5 and not t.is_alive()
+    assert len(caught) == 1 and isinstance(caught[0], RuntimeError) and "closed" in str(caught[0])
+    assert not thread.is_alive()
+    assert not [x for x in threading.enumerate() if x.name == "dnt-vlm-loop"]
+
+
+def test_a_reply_that_cannot_be_cached_fails_only_its_own_question(tmp_path):
+    class Odd:
+        name, model = "odd", "m"
+
+        async def ask(self, image, prompt, options, temperature, *, tag=""):
+            raw = b"bytes are not json" if tag == "LINK:bad" else "ok"
+            return VLMAnswer(options[0], 1.0, "r", raw)
+
+    r, _ = runner(None, backend=Odd(), cache=AnswerCache(tmp_path))
+    vs = r.ask_many([q("LINK:a"), q("LINK:bad"), q("LINK:c")])
+    assert [v.error is None for v in vs] == [True, False, True]
+    assert vs[1].answer is None and vs[1].error.startswith("TypeError")
+    assert vs[0].answer == vs[2].answer == OPTS[0] and r.failures == 1
