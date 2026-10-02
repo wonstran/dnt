@@ -56,7 +56,7 @@ class DinoEncoder:
         model : str
             Hugging Face model id.
         weights : str or None
-            Local model directory or file used instead of ``model`` when given.
+            Local model directory used instead of ``model`` when given.
         device : str
             ``auto``, ``cpu``, ``cuda[:N]``, ``xpu`` or ``mps`` (unavailable ones fall back).
         batch_size : int

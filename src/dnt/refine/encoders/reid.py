@@ -47,7 +47,10 @@ class ReidEncoder:
         return self._dim
 
     def _embed(self, crops: list[np.ndarray]) -> np.ndarray:
-        feats = self._extractor(list(crops)).detach().cpu().numpy().astype(np.float32)
+        # the torchreid extractor treats ndarray input as BGR (it applies cv2.COLOR_BGR2RGB),
+        # while our crops are RGB, so hand it BGR
+        bgr = [np.ascontiguousarray(c[..., ::-1]) for c in crops]
+        feats = self._extractor(bgr).detach().cpu().numpy().astype(np.float32)
         return feats / np.maximum(np.linalg.norm(feats, axis=1, keepdims=True), 1e-12)
 
     def encode(self, crops: list[np.ndarray]) -> np.ndarray:
