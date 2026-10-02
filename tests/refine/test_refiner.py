@@ -842,7 +842,9 @@ def test_summary_counts_on_a_two_class_table(tmp_path):
     assert res.summary["before"] == before
     assert res.summary["after"] == {**before, "interpolated_rows": 5}
     assert res.summary["events"] == {"fill/FILL/AUTO_ACCEPT": 1}
-    assert res.summary["vlm"] == {"calls": 0, "cache_hits": 0, "failures": 0}
+    assert res.summary["vlm"] == {
+        "calls": 0, "retries": 0, "cache_hits": 0, "failures": 0, "budget_skipped": 0
+    }
     assert Ledger.read(res.ledger_path).header["summary"] == res.summary
     # an even count of tracks: the median is the mean of the two middle durations
     d = tmp_path / "four"

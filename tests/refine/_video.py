@@ -69,3 +69,20 @@ class ColorEncoder:
             n = np.linalg.norm(v)
             out.append(v / n if n > 1e-6 else np.array([1.0, 0.0, 0.0]))
         return np.asarray(out, dtype=np.float32).reshape(-1, 3)
+
+
+def takeover_scene(tmp_path, n_tracks=1, name="t.txt", video="v.mp4", first_id=1):
+    """Per track: a red object for 60 frames, then a bigger blue one takes the ID over."""
+    from ._fixtures import box_rows, table
+
+    rows, vrows = [], []
+    for k in range(n_tracks):
+        y = 30.0 + 70.0 * k
+        red = box_rows(first_id + k, range(60), 20.0, y, vx=2.0, w=20.0, h=40.0)
+        blue = box_rows(first_id + k, range(60, 120), 140.0, y, vx=2.0, w=35.0, h=40.0)
+        rows += red + blue
+        vrows += video_rows(red, RED) + video_rows(blue, BLUE)
+    vid = make_color_video(tmp_path / video, vrows, 120)
+    src = tmp_path / name
+    table(rows).to_csv(src, index=False, header=False)
+    return src, vid
