@@ -34,7 +34,8 @@ def main(argv: list[str] | None = None) -> int:
     """Run ``dnt-refine``; return the process exit code.
 
     Returns 0 on success (a JSON summary goes to stdout) and 2 when the inputs are invalid
-    (``ValueError`` or ``FileNotFoundError``; the message goes to stderr).
+    (``ValueError`` or ``FileNotFoundError``) or the encoder's package is missing
+    (``ImportError``); the message goes to stderr.
     """
     args = build_parser().parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")

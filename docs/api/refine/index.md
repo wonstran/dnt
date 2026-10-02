@@ -9,7 +9,10 @@ Used like `Detector` and `Tracker`:
 ```python
 from dnt.refine import RefineConfig, TrackRefiner
 
-refiner = TrackRefiner(config=RefineConfig.defaults("vehicle"))  # or config_yaml="veh.yaml"
+cfg = RefineConfig.defaults("vehicle")
+# motion only; the default encoder (dino) needs pip install 'dnt[refine-dino]' (see Appearance)
+cfg.encoder.kind = "none"
+refiner = TrackRefiner(config=cfg)  # or config_yaml="veh.yaml"
 tracks = refiner.refine("cam1_track.txt", "cam1_refined.txt", video_file="cam1.mp4")
 refiner.refine_batch(track_files, video_files=video_files, output_path="refined/")
 ```
@@ -53,9 +56,14 @@ encoder:
 
 `encoder.kind: none`, or no video, scores with motion only and needs no extra. A video with the
 default `dino` encoder and no package installed raises `ImportError` before any work starts.
+The first `dino` run downloads the model from the Hugging Face Hub, so it needs network access;
+`transformers` caches it for later runs. If `kind: reid` reports that torchreid has no
+`FeatureExtractor`, install deep-person-reid from GitHub instead:
+`pip install git+https://github.com/KaiyangZhou/deep-person-reid.git`.
 The embeddings are saved as `OUT.features.npz` next to the output and reused when the track
-file, video, context file, and encoder settings are unchanged. For vehicles, `reid` needs
-`encoder.weights`. The cache key includes a digest of the weights that were actually loaded, so a
-model that changes under the same name never reuses old embeddings.
+file, video, context file, and encoder model, weights, and sampling settings are unchanged.
+For vehicles, `reid` needs `encoder.weights`. The cache key includes a digest of the weights
+that were actually loaded, so a model that changes under the same name never reuses old
+embeddings.
 
 ::: dnt.refine

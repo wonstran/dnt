@@ -9,6 +9,11 @@
   embeddings, so a split or link that scores high enough is applied. The embeddings are cached
   next to the output as `OUT.features.npz`, and a rerun on the same inputs reuses them. New
   extras: `pip install 'dnt[refine-dino]'`, `'dnt[refine-reid]'`, or `'dnt[refine]'` for both.
+  The first `dino` run downloads the model from the Hugging Face Hub (network needed;
+  `transformers` caches it). `reid` finds torchreid's `FeatureExtractor` in the PyPI
+  `torchreid` package and in deep-person-reid installed from GitHub
+  (`pip install git+https://github.com/KaiyangZhou/deep-person-reid.git`), the alternative when
+  the PyPI package does not provide it.
 - This release scores with motion only unless a video and an appearance encoder are given, and
   applies only the edits it is sure of: in-vehicle and duplicate false-track drops, rider
   reclasses whose subtype a ReClass hint settles, links across short gaps and static waits with
