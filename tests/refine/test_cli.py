@@ -297,33 +297,49 @@ def _note_block(text, start_marker):
     return " ".join(" ".join(block).split())
 
 
+def _newest_changelog_section(log):
+    """Return the heading and the text of the newest section of the changelog."""
+    assert log.startswith("# Changelog\n\n## ")
+    newest = log.split("\n## ", 2)[1]  # the text after "# Changelog" up to the second heading
+    return "## " + newest.split("\n", 1)[0], newest
+
+
 def test_docs_and_changelog_state_the_limitation_accurately():
     index = (ROOT / "docs/api/refine/index.md").read_text()
     log = (ROOT / "docs/changelog.md").read_text()
-    assert log.startswith("# Changelog\n\n## Unreleased\n")
-    unreleased = log.split("## Unreleased", 1)[1].split("\n## ", 1)[0]
+    heading, newest = _newest_changelog_section(log)
     notes = {
         "index.md": _note_block(index, '!!! note "Current limitations"'),
-        "changelog": _note_block(unreleased, "- This release scores with motion only"),
+        "changelog": _note_block(newest, "- This release scores with motion only"),
     }
     for where, note in notes.items():
         for word in ("HUMAN_PENDING", "motion", "occlusion", "ambiguous", "static",
                      "not applied yet" if where == "changelog" else "never applied yet"):
             assert word in note, (where, word)
         assert "static objects" in note and "mixed tracks" in note, where
-        assert "ID-switch splits" in note and "ambiguous assignment margin" in note, where
+        assert "ambiguous assignment margin" in note, where
+        # the exact phrases: what is applied, and what stays pending without an encoder
+        assert "static waits" in note, where
+        assert "ID-switch splits found from motion alone" in note, where
+        assert "With an encoder, ID-switch splits and links are also scored by appearance" in note
         # final review M9: hint-less rider reclasses stay pending; in-vehicle needs context
         assert "Rider reclasses whose subtype no ReClass hint settles are pending too" in note
         assert "In-vehicle drops need a context file" in note and "`--context`" in note, where
-    assert "dnt-refine run" in index and "dnt-refine run" in unreleased
-    assert log.index("## Unreleased") < log.index("## 0.3.3")
+    assert "dnt-refine run" in index and "dnt-refine run" in newest
+    assert log.index(heading) < log.index("## 0.3.3")
     # final review M8: the root CHANGELOG.md mirrors docs/changelog.md
     assert (ROOT / "CHANGELOG.md").read_text() == log
     # plan 2: the appearance feature is documented where users look for it
     assert "refine-dino" in index and "encoder.kind: none" in index and "features.npz" in index
-    assert "refine-dino" in unreleased and "encoder_factory" in unreleased
+    assert "refine-dino" in newest and "encoder_factory" in newest
     assert "api/refine/appearance.md" in (ROOT / "mkdocs.yml").read_text()
     assert (ROOT / "docs/api/refine/appearance.md").is_file()
+
+
+def test_the_newest_changelog_section_is_found_under_any_heading():
+    log = "# Changelog\n\n## 0.3.5 - 2026-11-01\n\n### New\n- a\n\n## 0.3.4\n\n- b\n"
+    assert _newest_changelog_section(log) == ("## 0.3.5 - 2026-11-01",
+                                              "0.3.5 - 2026-11-01\n\n### New\n- a\n")
 
 
 def test_missing_encoder_package_is_a_clean_error(tmp_path, capsys, synthetic_video, monkeypatch):
