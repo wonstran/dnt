@@ -46,7 +46,12 @@
   proposal at all, and a link whose ends have no crop left is scored with appearance unknown.
   On three real 640x480 pedestrian clips, the two ID-switch splits applied on one clip came
   from small crops and each cut a single pedestrian (with the new default neither is
-  proposed), while most links scored from small crops were correct. The feature cache key now
+  proposed), while most links scored from small crops were correct.
+  On the three clips (beginning, evening, middle), stage 1 proposed 2, 20 and 5 splits with
+  the earlier default, 0, 3 and 1 with `switch.min_crop_px: 40`, and 42, 209 and 85 in
+  motion-only mode; the filter removed 58-70% of the coarse samples (filtered counts are
+  approximate: dense frames missing from the cached embeddings were left out).
+  The feature cache key now
   includes the smaller of the two values and `FEATURES_VERSION` is 3, so caches of earlier runs
   are recomputed.
 - Stage 3 applies more links: `link.accept_above` is 0.62 (was 0.80), and `link.ambiguous_cap`
@@ -57,7 +62,10 @@
   Links across occlusions and links with an ambiguous assignment margin still stay pending,
   because their caps stay below the threshold. The new threshold applies in motion-only mode
   too (`encoder.kind: none`, or no video), where the score is renormalized without appearance;
-  on the three clips it applied one more link there.
+  on the three clips it applied one more link there. The score is multiplied by a border
+  prior, `0.8 + 0.2 * b` with `b` 0 for a pair near the image border, so links near the border
+  can now be applied too: 2 of the 8 applied links on the audited clips (beginning 98->134,
+  middle 221->222) were border links, and both were among the audited, correct ones.
 
 ## 0.3.4 — 2026-10-01
 

@@ -284,8 +284,10 @@ def embed_min_crop_px(cfg: RefineConfig) -> int:
 def stage_views(appearance, cfg: RefineConfig):
     """Return the ``(stage 1, stage 3)`` appearance, each with its stage's ``min_crop_px``.
 
-    A provider without ``view`` (for example one from an ``appearance_factory``) is used
-    unchanged by both stages.
+    A provider without ``view`` (for example a custom one from an ``appearance_factory``) is
+    used unchanged by both stages. A ``VideoAppearance`` (also one from a factory) gets a view
+    per stage, so it raises ValueError when its own ``min_crop_px`` is above
+    ``min(switch.min_crop_px, link.min_crop_px)``: those boxes were never embedded.
     """
     view = getattr(appearance, "view", None)
     if appearance is None or view is None:
@@ -785,7 +787,7 @@ class TrackRefiner:
         )
         for name in ("switch", "link"):
             mcp = getattr(self.config, name).min_crop_px
-            clean, small = app._coarse_counts(mcp)
+            clean, small = (v := app.view(mcp)).coarse_clean, v.coarse_too_small
             log.info(
                 "appearance: %s uses %d clean coarse samples; %d more are smaller than "
                 "%s.min_crop_px = %d px",
