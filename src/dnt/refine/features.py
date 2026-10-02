@@ -1,11 +1,24 @@
-"""The appearance interface the stages use (spec 5.3); real providers arrive in Plan 2."""
+"""The appearance interface the stages use (spec 5.3), array providers, and the embedding cache."""
 
 from __future__ import annotations
 
+import hashlib
+import json
+import logging
+import os
+import zipfile
 from collections.abc import Mapping, Sequence
+from pathlib import Path
 from typing import Protocol
 
 import numpy as np
+
+from .io import sha256_file
+
+log = logging.getLogger(__name__)
+
+#: Bumped whenever the crop or embedding code changes, so old caches are not reused.
+FEATURES_VERSION = 1
 
 
 class Appearance(Protocol):
@@ -13,6 +26,22 @@ class Appearance(Protocol):
 
     def clean_embeddings(self, raw_id: int, f0: int, f1: int) -> tuple[np.ndarray, np.ndarray]:
         """Return ``(frames, embeddings)`` for ``raw_id`` within ``[f0, f1]``, sorted by frame."""
+        ...
+
+
+class DenseAppearance(Appearance, Protocol):
+    """An ``Appearance`` that can also give every clean frame around a stage 1 candidate.
+
+    ``clean_embeddings`` then returns the coarse samples only. Stage 1 finds candidates on them
+    and calls ``prefetch_dense`` once with every window it will need, then ``dense_embeddings``.
+    """
+
+    def dense_embeddings(self, raw_id: int, f0: int, f1: int) -> tuple[np.ndarray, np.ndarray]:
+        """Return every clean observed frame of ``raw_id`` within ``[f0, f1]``, sorted."""
+        ...
+
+    def prefetch_dense(self, windows: Sequence[tuple[int, int, int]]) -> None:
+        """Compute the embeddings of ``(raw_id, f0, f1)`` windows in one pass."""
         ...
 
 
@@ -43,9 +72,38 @@ class ArrayAppearance:
         return f[m], e[m]
 
 
-def track_embeddings(appearance: Appearance, lineage) -> tuple[np.ndarray, np.ndarray]:
-    """Return a track's clean samples across its lineage spans, sorted by frame."""
-    parts = [appearance.clean_embeddings(int(r), int(a), int(b)) for r, a, b in lineage]
+class CoarseArrayAppearance(ArrayAppearance):
+    """``ArrayAppearance`` that behaves like a video provider: coarse by default, dense on request.
+
+    ``clean_embeddings`` returns every ``every``-th stored sample (by ordinal within the raw
+    track); ``dense_embeddings`` returns all stored samples.
+    """
+
+    def __init__(self, table: Mapping[int, tuple[Sequence[int], np.ndarray]], every: int = 5):
+        """Store the samples; ``every`` is the coarse stride."""
+        if int(every) < 1:
+            raise ValueError("every must be at least 1")
+        super().__init__(table)
+        self._every = int(every)
+
+    def clean_embeddings(self, raw_id: int, f0: int, f1: int) -> tuple[np.ndarray, np.ndarray]:
+        """Return the coarse samples of ``raw_id`` within ``[f0, f1]``."""
+        if int(raw_id) not in self._t:
+            return np.empty(0, dtype=int), np.empty((0, 0))
+        f, e = self._t[int(raw_id)]
+        m = (np.arange(len(f)) % self._every == 0) & (f >= f0) & (f <= f1)
+        return f[m], e[m]
+
+    def dense_embeddings(self, raw_id: int, f0: int, f1: int) -> tuple[np.ndarray, np.ndarray]:
+        """Return every stored sample of ``raw_id`` within ``[f0, f1]``."""
+        return ArrayAppearance.clean_embeddings(self, raw_id, f0, f1)
+
+    def prefetch_dense(self, windows: Sequence[tuple[int, int, int]]) -> None:
+        """Do nothing: the samples are already in memory."""
+        return None
+
+
+def _join(parts) -> tuple[np.ndarray, np.ndarray]:
     parts = [p for p in parts if len(p[0])]
     if not parts:
         return np.empty(0, dtype=int), np.empty((0, 0))
@@ -53,3 +111,177 @@ def track_embeddings(appearance: Appearance, lineage) -> tuple[np.ndarray, np.nd
     e = np.vstack([p[1] for p in parts])
     order = np.argsort(f, kind="stable")
     return f[order], e[order]
+
+
+def track_embeddings(appearance: Appearance, lineage) -> tuple[np.ndarray, np.ndarray]:
+    """Return a track's clean (coarse) samples across its lineage spans, sorted by frame."""
+    return _join([appearance.clean_embeddings(int(r), int(a), int(b)) for r, a, b in lineage])
+
+
+def dense_track_embeddings(
+    appearance: DenseAppearance, lineage, f0: int, f1: int
+) -> tuple[np.ndarray, np.ndarray]:
+    """Return a track's dense samples within ``[f0, f1]`` across its lineage spans, sorted."""
+    parts = []
+    for r, a, b in lineage:
+        lo, hi = max(int(a), int(f0)), min(int(b), int(f1))
+        if lo <= hi:
+            parts.append(appearance.dense_embeddings(int(r), lo, hi))
+    return _join(parts)
+
+
+def features_key(
+    *, tracks_sha, video, context_sha, encoder, sample_every, occlusion_iou, crop_pad
+) -> str:
+    """Return the SHA-256 key of every input that can change an embedding (spec 5.3).
+
+    Parameters
+    ----------
+    tracks_sha : str
+        SHA-256 of the input track file.
+    video : dict
+        Video fingerprint with ``sha256``, ``size`` and ``frame_count``.
+    context_sha : str or None
+        SHA-256 of the context file, or ``None``.
+    encoder : object
+        Anything with ``name``, ``model_name``, ``weights_sha`` and ``preprocess_id``.
+    sample_every, occlusion_iou, crop_pad : float
+        Sampling stride, occlusion threshold, and crop padding.
+
+    Returns
+    -------
+    str
+        Hex digest.
+
+    """
+    parts = {
+        "version": FEATURES_VERSION,
+        "tracks": tracks_sha,
+        "video": [video["sha256"], int(video["size"]), int(video["frame_count"])],
+        "context": context_sha or "none",
+        "encoder": [encoder.name, encoder.model_name, encoder.weights_sha, encoder.preprocess_id],
+        "sample_every": int(sample_every),
+        "occlusion_iou": float(occlusion_iou),
+        "crop_pad": float(crop_pad),
+    }
+    return hashlib.sha256(json.dumps(parts, sort_keys=True).encode()).hexdigest()
+
+
+def _checked(ids, frames, emb, dim) -> np.ndarray | None:
+    """Return the embeddings as float32 if the cache arrays are usable, else ``None``.
+
+    Usable means: 1-D integer ids and frames, a 2-D float matrix with one row each, the width
+    ``dim`` when it is given (and at least one column otherwise), finite values *after* the
+    conversion to float32, and no duplicate ``(raw_id, frame)`` pair.
+    """
+    if ids.ndim != 1 or frames.ndim != 1 or emb.ndim != 2:
+        return None
+    if ids.dtype.kind not in "iu" or frames.dtype.kind not in "iu" or emb.dtype.kind != "f":
+        return None
+    if not (len(ids) == len(frames) == emb.shape[0]):
+        return None
+    if len(ids) and (emb.shape[1] == 0 or (dim is not None and emb.shape[1] != dim)):
+        return None
+    with np.errstate(over="ignore", invalid="ignore"):
+        out = emb.astype(np.float32)
+    if not bool(np.isfinite(out).all()):
+        return None
+    if len(set(zip(ids.tolist(), frames.tolist(), strict=True))) != len(ids):
+        return None
+    return out
+
+
+class FeatureStore:
+    """Embeddings per (raw track id, frame), saved as a deterministic ``.npz`` under a key."""
+
+    def __init__(self, key: str):
+        """Create an empty store for cache key ``key``."""
+        self.key = key
+        self.dirty = False
+        self._dim: int | None = None
+        self._d: dict[int, dict[int, np.ndarray]] = {}
+
+    def __len__(self) -> int:
+        """Return the number of stored embeddings."""
+        return sum(len(v) for v in self._d.values())
+
+    def has(self, raw_id: int, frame: int) -> bool:
+        """Return whether ``(raw_id, frame)`` has an embedding."""
+        return int(frame) in self._d.get(int(raw_id), {})
+
+    def put(self, raw_id: int, frame: int, emb) -> None:
+        """Store one embedding; every embedding of a store has the same width."""
+        e = np.asarray(emb, dtype=np.float32)
+        if e.ndim != 1 or (self._dim is not None and e.shape[0] != self._dim):
+            raise ValueError(
+                f"embedding of shape {e.shape} does not match the store's width {self._dim}"
+            )
+        self._dim = int(e.shape[0])
+        self._d.setdefault(int(raw_id), {})[int(frame)] = e
+        self.dirty = True
+
+    def get(self, raw_id: int, frames: Sequence[int]) -> np.ndarray:
+        """Return the embeddings of ``frames`` of ``raw_id`` as a ``(len(frames), D)`` array."""
+        rows = self._d[int(raw_id)]
+        return np.stack([rows[int(f)] for f in frames])
+
+    def save(self, path) -> str:
+        """Write the store atomically and return the file's SHA-256."""
+        ids, frames, embs = [], [], []
+        for rid in sorted(self._d):
+            for f in sorted(self._d[rid]):
+                ids.append(rid)
+                frames.append(f)
+                embs.append(self._d[rid][f])
+        dim = embs[0].shape[0] if embs else 0
+        arrays = {
+            "key": np.array(self.key),
+            "raw_id": np.asarray(ids, dtype=np.int64),
+            "frame": np.asarray(frames, dtype=np.int64),
+            "emb": np.asarray(embs, dtype=np.float32).reshape(len(ids), dim),
+        }
+        p = Path(path)
+        tmp = p.with_name(p.name + ".tmp")
+        with tmp.open("wb") as fh:
+            np.savez(fh, **arrays)
+        os.replace(tmp, p)
+        self.dirty = False
+        return sha256_file(p)
+
+    @classmethod
+    def load(cls, path, key: str, dim: int | None = None) -> FeatureStore | None:
+        """Return the stored cache, or ``None`` if it is missing, damaged, or for other inputs.
+
+        Parameters
+        ----------
+        path : path-like
+            The ``.features.npz`` file.
+        key : str
+            The cache key the file must carry.
+        dim : int, optional
+            The encoder's embedding width; a file with another width is a miss.
+
+        """
+        p = Path(path)
+        if not p.is_file():
+            return None
+        try:
+            with np.load(p, allow_pickle=False) as z:
+                key_array = z["key"]
+                ids, frames, emb = z["raw_id"], z["frame"], z["emb"]
+        except (OSError, ValueError, KeyError, EOFError, zipfile.BadZipFile) as err:
+            log.info("feature cache %s is unreadable (%s); recomputing", p, err)
+            return None
+        if key_array.ndim != 0 or key_array.dtype.kind != "U" or str(key_array) != key:
+            log.info("feature cache %s was built with different inputs; recomputing", p)
+            return None
+        emb32 = _checked(ids, frames, emb, dim)
+        if emb32 is None:
+            log.info("feature cache %s is malformed or has another width; recomputing", p)
+            return None
+        store = cls(key)
+        for r, f, e in zip(ids.tolist(), frames.tolist(), emb32, strict=True):
+            store._d.setdefault(r, {})[f] = e
+        if len(emb32):
+            store._dim = int(emb32.shape[1])
+        return store
