@@ -51,11 +51,15 @@ def install_fake_transformers(monkeypatch):
     return seen
 
 
-def install_fake_torchreid(monkeypatch):
+def install_fake_torchreid(monkeypatch, layout="torchreid.utils"):
     """Install a fake ``torchreid`` whose extractor embeds a crop by its mean color.
 
     Like the real ``FeatureExtractor`` it treats ndarray inputs as BGR and converts them to RGB
     itself. ``seen["batches"]`` collects the number of images of every call.
+
+    ``layout`` is the module that provides ``FeatureExtractor``: ``"torchreid.utils"``
+    (KaiyangZhou's deep-person-reid), ``"torchreid.reid.utils"`` (the PyPI ``torchreid``
+    package), or ``None`` (a ``torchreid`` without it).
     """
     seen = {"n": 0, "loads": 0, "batches": []}
 
@@ -72,10 +76,17 @@ def install_fake_torchreid(monkeypatch):
                 [[float(im[..., c].mean()) + 1.0 for c in range(3)] + [1.0] for im in rgb]
             )
 
-    utils = _module("torchreid.utils")
-    utils.FeatureExtractor = FeatureExtractor
     top = _module("torchreid")
-    top.utils = utils
     monkeypatch.setitem(sys.modules, "torchreid", top)
-    monkeypatch.setitem(sys.modules, "torchreid.utils", utils)
+    if layout is not None:
+        utils = _module(layout)
+        utils.FeatureExtractor = FeatureExtractor
+        monkeypatch.setitem(sys.modules, layout, utils)
+        if layout == "torchreid.utils":
+            top.utils = utils
+        else:
+            parent = _module("torchreid.reid")
+            parent.utils = utils
+            top.reid = parent
+            monkeypatch.setitem(sys.modules, "torchreid.reid", parent)
     return seen

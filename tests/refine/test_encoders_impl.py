@@ -32,9 +32,10 @@ def fake_transformers(monkeypatch):
     return install_fake_transformers(monkeypatch)
 
 
-@pytest.fixture
-def fake_torchreid(monkeypatch):
-    return install_fake_torchreid(monkeypatch)
+@pytest.fixture(params=["torchreid.utils", "torchreid.reid.utils"])
+def fake_torchreid(monkeypatch, request):
+    # deep-person-reid from GitHub has torchreid.utils; the PyPI package has torchreid.reid.utils
+    return install_fake_torchreid(monkeypatch, layout=request.param)
 
 
 def test_letterbox_keeps_the_aspect_ratio_and_pads_with_the_mean():
@@ -145,6 +146,22 @@ def test_reid_receives_bgr_arrays_for_rgb_crops(fake_torchreid, tmp_path):
     red, blue = enc.encode([RED, BLUE])  # RGB crops: red has R only, blue has B only
     assert red[0] == red[:3].max() and red[0] > red[2]
     assert blue[2] == blue[:3].max() and blue[2] > blue[0]
+
+
+def test_reid_without_a_feature_extractor_names_both_layouts_and_the_github_install(
+    monkeypatch, tmp_path
+):
+    install_fake_torchreid(monkeypatch, layout=None)
+    weights = tmp_path / "w.pt"
+    weights.write_bytes(b"w")
+    with pytest.raises(ImportError) as info:
+        ReidEncoder("osnet_x1_0", str(weights), "cpu", 2)
+    msg = str(info.value)
+    assert "FeatureExtractor" in msg
+    assert "torchreid.utils" in msg and "torchreid.reid.utils" in msg
+    assert "dnt[refine-reid]" in msg
+    assert "pip install git+https://github.com/KaiyangZhou/deep-person-reid.git" in msg
+    assert "encoder.kind: none" in msg
 
 
 @pytest.mark.parametrize("batch_size", [1, 2, 3, 7])

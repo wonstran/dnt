@@ -2,9 +2,39 @@
 
 from __future__ import annotations
 
+import importlib
+
 import numpy as np
 
 from . import weights_digest
+
+#: Where ``FeatureExtractor`` lives: KaiyangZhou's deep-person-reid, then the PyPI repackaging.
+_EXTRACTOR_MODULES = ("torchreid.utils", "torchreid.reid.utils")
+
+
+def _feature_extractor_class():
+    """Return torchreid's ``FeatureExtractor`` class from whichever layout is installed.
+
+    Raises
+    ------
+    ImportError
+        If neither ``torchreid.utils`` nor ``torchreid.reid.utils`` provides it.
+
+    """
+    tried = []
+    for name in _EXTRACTOR_MODULES:
+        try:
+            return importlib.import_module(name).FeatureExtractor
+        except (ImportError, AttributeError) as exc:
+            tried.append(f"{name} ({exc})")
+    raise ImportError(
+        "encoder.kind='reid' needs torchreid's FeatureExtractor, which was not found in "
+        + "; ".join(tried)
+        + ". pip install 'dnt[refine-reid]' may install a repackaged torchreid without it; "
+        "install the original instead with "
+        "pip install git+https://github.com/KaiyangZhou/deep-person-reid.git, "
+        "or set encoder.kind: none to run without appearance."
+    )
 
 
 class ReidEncoder:
@@ -28,15 +58,15 @@ class ReidEncoder:
             Crops per forward pass.
 
         """
-        from torchreid.utils import FeatureExtractor
-
         from ..._device import resolve_device
+
+        feature_extractor = _feature_extractor_class()
 
         self.model_name = model
         self.device = resolve_device(device)
         self.batch_size = max(1, int(batch_size))
         self.weights_sha = weights_digest(weights)
-        self._extractor = FeatureExtractor(
+        self._extractor = feature_extractor(
             model_name=model, model_path=str(weights), device=self.device, verbose=False
         )
         self._dim = int(self._embed([np.zeros((64, 32, 3), np.uint8)]).shape[1])
