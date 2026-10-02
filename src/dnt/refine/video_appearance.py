@@ -57,6 +57,15 @@ class VideoAppearance:
             Box enlargement before cropping.
 
         """
+        if not isinstance(occluded, pd.Series):
+            raise ValueError(f"occluded must be a pandas Series, got {type(occluded).__name__}")
+        if not work.index.is_unique or not occluded.index.is_unique:
+            raise ValueError("work and occluded must each have a unique index")
+        missing = work.index.difference(occluded.index)
+        if len(missing):
+            raise ValueError(
+                f"occluded does not cover {len(missing)} row(s) of work (first label: {missing[0]})"
+            )
         self.video_file = video_file
         self.encoder = encoder
         self.store = store

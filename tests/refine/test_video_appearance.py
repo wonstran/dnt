@@ -224,3 +224,81 @@ def test_crops_of_one_frame_are_encoded_in_raw_id_order(tmp_path):
     app, enc, *_ = _make(tmp_path, tracks, [RED, BLUE], batch=64, enc=Recording())
     app.prefetch_dense([(2, 0, 3), (1, 0, 3)])  # asked for in the opposite order
     assert enc.order == ["red", "blue"] * 4
+
+
+class _ShortEncoder(ColorEncoder):
+    """Drops the last row of the ``fail_on``-th call (1-based), like a broken encoder."""
+
+    def __init__(self, fail_on=1):
+        super().__init__()
+        self.fail_on = fail_on
+
+    def encode(self, crops):
+        out = super().encode(crops)
+        return out[:-1] if self.calls == self.fail_on else out
+
+
+def test_an_encoder_returning_the_wrong_row_count_stores_nothing_of_that_chunk(tmp_path):
+    app, _, store, _ = _make(
+        tmp_path, [_walker(1, range(12))], [RED], every=1, batch=4, enc=_ShortEncoder(fail_on=2)
+    )
+    with pytest.raises(ValueError, match="embeddings for"):
+        app.clean_embeddings(1, 0, 11)
+    assert len(store) == 4  # the first, whole chunk only; nothing of the failed one
+
+
+def test_a_retry_after_a_failed_chunk_embeds_only_the_missing_samples(tmp_path):
+    app, _, store, _ = _make(
+        tmp_path, [_walker(1, range(12))], [RED], every=1, batch=4, enc=_ShortEncoder(fail_on=2)
+    )
+    with pytest.raises(ValueError, match="embeddings for"):
+        app.clean_embeddings(1, 0, 11)
+    good = ColorEncoder()
+    app.encoder = good
+    f, e = app.clean_embeddings(1, 0, 11)
+    assert list(f) == list(range(12)) and e.shape == (12, 3)
+    assert good.crops == 8 and len(store) == 12
+
+
+def test_dirty_is_set_exactly_when_something_was_stored(tmp_path):
+    app, _, store, _ = _make(
+        tmp_path, [_walker(1, range(12))], [RED], every=1, batch=4, enc=_ShortEncoder(fail_on=1)
+    )
+    with pytest.raises(ValueError, match="embeddings for"):
+        app.clean_embeddings(1, 0, 11)
+    assert len(store) == 0 and store.dirty is False
+    app, _, store, _ = _make(tmp_path, [_walker(1, range(12))], [RED], enc=ColorEncoder())
+    app.clean_embeddings(1, 0, 11)
+    assert len(store) > 0 and store.dirty is True
+
+
+def _bare_work():
+    return io.to_work(table(_walker(1, range(5)))).work
+
+
+def test_occluded_must_be_a_series(tmp_path):
+    work = _bare_work()
+    with pytest.raises(ValueError, match="occluded must be a pandas Series"):
+        VideoAppearance(
+            work, np.zeros(len(work), bool), tmp_path / "v.mp4", ColorEncoder(), FeatureStore("k"),
+            sample_every=5, batch_size=4,
+        )
+
+
+def test_the_work_index_must_be_unique(tmp_path):
+    work = _bare_work()
+    work.index = [0, 0, 1, 2, 3]
+    with pytest.raises(ValueError, match="unique index"):
+        VideoAppearance(
+            work, pd.Series(False, index=work.index), tmp_path / "v.mp4", ColorEncoder(),
+            FeatureStore("k"), sample_every=5, batch_size=4,
+        )
+
+
+def test_occluded_must_cover_every_row_of_work(tmp_path):
+    work = _bare_work()
+    with pytest.raises(ValueError, match="does not cover 2 row"):
+        VideoAppearance(
+            work, pd.Series(False, index=work.index[:3]), tmp_path / "v.mp4", ColorEncoder(),
+            FeatureStore("k"), sample_every=5, batch_size=4,
+        )
