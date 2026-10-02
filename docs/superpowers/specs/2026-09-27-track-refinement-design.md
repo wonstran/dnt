@@ -372,6 +372,8 @@ For each stage, `accept_above` and `reject_below`, with `reject_below < accept_a
 | `< reject_below` | `AUTO_REJECT` (still written to the ledger, so audits can sample rejections) |
 | otherwise | VLM (§7). With `vlm.backend: none`, `HUMAN_PENDING` |
 
+Only `SPLIT`, `LINK`, `DROP`, and `RECLASS` events go to a VLM. Orphan events (`DROP{orphan}`), `FILL`, and `SMOOTH` never do: an orphan in the uncertain band is `HUMAN_PENDING` whatever the backend.
+
 **Exceptions**
 - **Static screen.** The static-object score is capped at `screen.static_score_cap` (default 0.80). Keep the cap below `screen.accept_above`, so static tracks never auto-drop (§6.2).
 - **Rider subtype.** A `RECLASS` whose rider score is `AUTO_ACCEPT` still needs one VLM call to choose the subtype, unless a ReClass hint has already settled it (§6.2). That call only picks the subtype and cannot overturn the rider decision. If the VLM answers with a non-rider option (for example `pedestrian`), the algorithm and the VLM disagree, and the event becomes `HUMAN_PENDING`. It also becomes `HUMAN_PENDING` if `params.new_cls` is still `None` after verification.
@@ -705,13 +707,13 @@ Each routed event gets **one composite JPEG**, built by `evidence.py`:
 - A grid of labeled tiles on a neutral background.
 - Crops are padded to 1.5× the box and upscaled so their height is at least 160 px.
 - Context frames are downscaled to 768 px wide, with the event's boxes drawn and labeled "A" or "B".
-- Frames are fetched in one pass per stage, sorted by frame index, with sequential reads and seeking only across large jumps.
+- Evidence is built in chunks of 64 events. Within a chunk the frames are fetched in one pass, sorted by frame index, with sequential reads and seeking only across large jumps. A frame that cannot be read is skipped with a warning (a tile is left out, and an event with no tile left gets no image); a video that cannot be opened gives no image for any event.
 
 | Event | Tiles |
 |---|---|
 | DROP / RECLASS | 6 crops spread evenly across the track's observed frames, plus 1 context frame at mid-life |
 | SPLIT at t | Row A: 3 clean crops before t. Row B: 3 clean crops after t. Plus the context frame at t, with nearby tracks drawn |
-| LINK i→j | Row A: i's last 3 clean crops. Row B: j's first 3 clean crops. Plus context frames at `t_e` and `t_s`. For occlusion-witnessed links, also a context frame at the middle of the gap, with the hidden box `B_t` drawn dashed and the occluder labeled |
+| LINK i→j | Row A: i's last 3 clean crops. Row B: j's first 3 clean crops. Plus context frames at `t_e` ("A ends") and `t_s` ("B starts"). For occlusion-witnessed links, also a context frame at the middle of the gap ("hidden path"), with the interpolated hidden box drawn dashed and labeled "?". The occluder is not labeled: the link stage does not export its box |
 
 | FILL (audit only, never sent to a VLM) | The last observed crop before the gap and the first after it, plus the context frame at mid-gap with the filled box drawn |
 | SMOOTH (audit only) | The context frame at `max_shift_frame`, with the original box and the smoothed box drawn |
@@ -772,8 +774,13 @@ class VLMAnswer:
 class VLMBackend(Protocol):
     name: str
     model: str
-    async def ask(self, image_jpeg: bytes, prompt: str, options: list[str], temperature: float) -> VLMAnswer: ...
+    async def ask(
+        self, image_jpeg: bytes, prompt: str, options: list[str], temperature: float,
+        *, tag: str = "",
+    ) -> VLMAnswer: ...
 ```
+
+`tag` names the question (kind and event ID) for scripted test backends; the real backends ignore it. A backend raises `VLMTransientError` for a failure worth retrying (a timeout, HTTP 429 or 5xx, a dropped connection); any other exception is final for that question. A reply that is not a valid answer raises `ValueError` (§7.2).
 
 - **`openai_compat`**
   - Settings: `base_url` and `model`.
@@ -783,19 +790,22 @@ class VLMBackend(Protocol):
   - Extra: `dnt[refine-vlm] = ["openai>=1.40", "anthropic>=0.40"]`.
 - **`anthropic`**
   - Anthropic Messages API, sending the image as a base64 image block.
-  - The key comes from `ANTHROPIC_API_KEY`.
-  - The default model ID is pinned at implementation time, using the current Anthropic model reference. Config can override it.
+  - The key comes from `vlm.api_key_env` (default `ANTHROPIC_API_KEY`).
+  - The default model ID is pinned at `claude-sonnet-5-5` (`DEFAULT_ANTHROPIC_MODEL`); check it against the current Anthropic model reference when releasing. `vlm.model` overrides it.
 - **`fake`**: scripted answers keyed by event ID or kind. Used in tests.
 - **`none`**: no backend. Events in the uncertain band become `HUMAN_PENDING`.
 
 ### 7.4 Budget, concurrency, caching, failures
 
-- **Budget.** `vlm.max_calls` per `refine` run (default 500; votes count individually). Events in the uncertain band are sent in order of `|algo_score − band midpoint|`, closest first. Once the budget is spent, the rest become `HUMAN_PENDING` with `vlm.error: "budget"`. Rider-subtype calls come out of the same budget.
-- **Concurrency.** An `asyncio` semaphore enforces `vlm.max_concurrency` (default 4). The public API stays synchronous and runs its own event loop.
-- **Cache.** `vlm.cache_dir` (default `~/.cache/dnt/vlm`) stores one JSON file per SHA-256 of (image bytes, prompt, options, backend, model, temperature, vote index). A cache hit costs nothing against the budget and sets `vlm.cached: true`.
+- **Budget.** `vlm.max_calls` (default 500) is a hard limit on backend invocations per `refine` run: `calls` + `retries` never exceed it. Each vote that is sent counts one call, and each retry (after a transient failure, or after an invalid reply) counts one retry; cache hits cost nothing.
+  - Whole questions are admitted in priority order, before anything is sent: events in the uncertain band go in order of `|algo_score − band midpoint|`, closest first, and rider-subtype calls come out of the same budget. A question is admitted only if all its uncached votes fit in what is left. A question that does not fit is skipped with `vlm.error: "budget"` and stays `HUMAN_PENDING`; a later question that does fit still runs.
+  - Retries draw from the allowance left after admission. When none is left, the event stays `HUMAN_PENDING` with `vlm.error: "budget"`.
+  - The summary reports `calls`, `retries`, and `budget_skipped` (§8.3).
+- **Concurrency.** An `asyncio` semaphore enforces `vlm.max_concurrency` (default 4). The public API stays synchronous: the runner keeps one event loop alive on its own thread for its whole life, runs one batch at a time on it, and closes the backend's client on that same loop. An interrupted wait (for example Ctrl+C) cancels the batch; `close()` while a batch runs makes `ask_many` raise `RuntimeError`.
+- **Cache.** `vlm.cache_dir` (default `~/.cache/dnt/vlm`) stores one JSON file per SHA-256 of (image bytes, prompt, options, backend, model, temperature, vote index). A cache hit costs nothing against the budget and sets `vlm.cached: true`. A cached answer is validated like a fresh reply (an option, a finite confidence in [0, 1]); a damaged entry is a miss.
 - **Failures.**
-  - Timeouts (`vlm.timeout_s`, default 60), HTTP 429, and HTTP 5xx are retried with exponential backoff: 3 attempts, starting at 2 s.
-  - When the retries run out, or on any other error, the event becomes `HUMAN_PENDING` with `vlm.error`.
+  - Timeouts (`vlm.timeout_s`, default 60), HTTP 429, and HTTP 5xx are retried with exponential backoff: 3 attempts, starting at 2 s, each retry drawing from the budget above.
+  - When the retries run out, or on any other error, the event becomes `HUMAN_PENDING` with `vlm.error`. A failure of one question, including a reply that cannot be serialized, is that question's error only.
   - VLM errors never abort the run and never apply an edit.
 
 ## 8. Human review, audit, and summary
@@ -810,13 +820,15 @@ class VLMBackend(Protocol):
 - for `LINK` events, the recorded next-best alternatives,
 - for partial screen events, the supported and unsupported segments,
 - accept and reject controls, plus a class picker for `RECLASS` and for screen events that the VLM redirected,
-- a copy-to-clipboard `Labeler.draw_track_clips(...)` snippet covering the event's tracks and frame span ±2 s, for events that need motion to judge. `dnt.refine` does not import `Labeler`; it only prints the snippet.
+- a copy-to-clipboard `Labeler.draw_track_clips(...)` snippet, present only when a video was given. It writes one clip per track of the event, each spanning that track's own first to last frame ±2 s. `dnt.refine` does not import `Labeler`; it only prints the snippet.
 
 An **Export decisions** button downloads `decisions.json` in the §4.2 format.
 
-The page makes no network requests. Its choices are saved in `localStorage` while the person works, as a convenience only. The exported file is what counts.
+The page makes no network requests. Its choices are saved in `localStorage` while the person works, as a convenience only. They are namespaced by a run key (a hash of the run's inputs and settings) and a saved choice is restored only if the event's `proposal_key` is unchanged. The exported file is what counts.
 
-Cards can be filtered by stage and sorted by score.
+Cards can be filtered by stage and sorted by score (high or low first) or kept in order.
+
+The image directory is named after the page (`OUT.review/`). It holds a `.dnt-review.json` manifest of the images the page wrote. A rerun deletes only the images that manifest lists, never overwrites a file that is not listed in it, and removes the directory only when it is empty afterwards. With no pending event the page, its listed images, and the manifest are removed.
 
 ### 8.2 Audit
 
@@ -837,7 +849,7 @@ The summary is written to the ledger header, printed at the end of the run, and 
 - observed and interpolated row counts,
 - median observed track duration,
 - event counts per (stage, kind, decision),
-- VLM calls, cache hits, and failures.
+- the `vlm` counters: `calls`, `retries`, `cache_hits`, `failures`, and `budget_skipped`.
 
 ## 9. Configuration
 
@@ -967,7 +979,7 @@ Durations in config are in seconds and are converted to frames with `fps`.
 
 | Situation | Behavior |
 |---|---|
-| No `video` | Motion-only mode: no embeddings, and appearance weights set to 0 (§6.1, §6.3). The VLM backend is forced to `none` with a warning. Everything in the uncertain band becomes `HUMAN_PENDING`, and no review images are made (cards show signals only). No encoder or VLM extra is needed. |
+| No `video` | Motion-only mode: no embeddings, and appearance weights set to 0 (§6.1, §6.3). The VLM backend is forced to `none` with a warning. Everything in the uncertain band becomes `HUMAN_PENDING`, and no review images are made: a signals-only review page (cards show signals, no image or clip snippet) is still written. No encoder or VLM extra is needed. |
 | `encoder.kind: none` with a video | Motion-only scoring, as above, but the VLM and the evidence images are still available. |
 | No `context` | In-vehicle and two-wheeler-overlap cues are skipped and recorded as `null` in `signals`. The vehicle-duplicate cue still runs, because it uses the vehicle file itself. |
 | Context file with neither 8 nor 10 columns, when `context.format: auto` | `ValueError` naming the file and the column count. |

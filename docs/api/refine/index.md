@@ -26,14 +26,16 @@ Command line: `dnt-refine run TRACKS --fps 10 --config refine.yaml --out clean.c
     reclasses whose subtype a ReClass hint settles, links across short gaps and static waits
     with a clear assignment margin, orphan drops, and gap filling. With an encoder, ID-switch
     splits and links are also scored by appearance and applied when they score high enough.
-    Other edits are proposed but never applied yet, because their scores are capped below
-    auto-accept: ID-switch splits found from motion alone, links across occlusions, links with
-    an ambiguous assignment margin, and false-track drops of static objects or of mixed tracks.
-    Rider reclasses whose subtype no ReClass hint settles are pending too, however high they
-    score, because only a hint can choose the subtype in this release. They appear in the
-    ledger as `HUMAN_PENDING` and leave the tracks unchanged. In-vehicle drops need a context
-    file with the vehicles' boxes (`context_file=`, or `--context`); without one the in-vehicle
-    cue is skipped. VLM verification and applying review decisions follow in later releases.
+    Without a VLM backend (the default), other edits are proposed but never applied yet,
+    because their scores are capped below auto-accept: ID-switch splits found from motion alone,
+    links across occlusions, links with an ambiguous assignment margin, and false-track drops of
+    static objects or of mixed tracks. Rider reclasses whose subtype no ReClass hint settles are
+    pending too, however high they score, unless a VLM backend names the subtype. They appear in
+    the ledger as `HUMAN_PENDING` and leave the tracks unchanged. With a VLM backend and a video
+    (see Verification with a VLM below), the VLM decides these edits when it is sure; the rest
+    stay `HUMAN_PENDING` and go on a review page. In-vehicle drops need a context file with the
+    vehicles' boxes (`context_file=`, or `--context`); without one the in-vehicle cue is
+    skipped. Applying review decisions follows in a later release.
 
 ## Link band
 
@@ -98,5 +100,105 @@ link:
 For vehicles, `reid` needs `encoder.weights`. The cache key includes a digest of the weights
 that were actually loaded, so a model that changes under the same name never reuses old
 embeddings.
+
+## Verification with a VLM
+
+With a video and a vision-language model (VLM), `refine` can settle the edits whose scores fall
+in the uncertain band (between `accept_above` and `reject_below` of their stage), and the rider
+reclasses that still lack a subtype. For each one it builds a composite image (crops of the
+tracks, plus context frames unless `vlm.send_context_frames` is `false`), asks the model to pick
+one option, and maps the answer to a decision. Only ID-switch splits, links, false-track drops,
+and reclasses are asked about; orphan drops, fills, and smoothing never are.
+
+Install the client library for your backend (neither is a required dependency):
+
+```bash
+pip install 'dnt[refine-vlm]'   # openai and anthropic
+```
+
+Set the backend in the `vlm` block of the config file (`--config`, or `config_yaml=`), or in
+`cfg.vlm` in code. A local server that speaks the OpenAI chat API (vLLM, Ollama, ...) needs `base_url` and `model`.
+Its key is optional (`vlm.api_key_env` names the variable; `OPENAI_API_KEY` by default):
+
+```yaml
+vlm:
+  backend: openai_compat
+  base_url: http://localhost:8000/v1
+  model: Qwen/Qwen2.5-VL-7B-Instruct
+  min_conf: 0.7
+```
+
+Anthropic needs the key in `ANTHROPIC_API_KEY` (or the variable named by `vlm.api_key_env`);
+`model` defaults to `claude-sonnet-5-5`:
+
+```yaml
+vlm:
+  backend: anthropic
+  model: claude-sonnet-5-5   # optional
+  max_calls: 200
+```
+
+The images you send leave your machine for a remote backend; set `vlm.send_context_frames:
+false` to send only the crops. Keys are read from the environment and never written to the
+ledger or the config.
+
+The model must reply with an option, a confidence, and a reason. The answer maps to a decision
+only when its confidence reaches `vlm.min_conf`; `unsure`, a lower confidence, a tie between
+votes, or an error leaves the event `HUMAN_PENDING`.
+
+| Event | Answer | Decision |
+|---|---|---|
+| ID-switch split | `different` | `VLM_ACCEPT`: the split is applied |
+| ID-switch split | `same_individual` | `VLM_REJECT` |
+| Link | `same_individual` | `VLM_ACCEPT`: the link is applied |
+| Link | `different` | `VLM_REJECT` |
+| Person screen | `pedestrian` | `VLM_REJECT` |
+| Person screen | `person_in_vehicle` | `VLM_ACCEPT` as a drop (in-vehicle) |
+| Person screen | `not_a_person` | `VLM_ACCEPT` as a drop (static) |
+| Person screen | `cyclist`, `motorcycle_rider`, `scooter_rider` | `VLM_ACCEPT` as a reclass to the `reclass_map` class (`HUMAN_PENDING` if the map has no entry) |
+| Vehicle screen | `vehicle` | `VLM_REJECT` |
+| Vehicle screen | `part_or_duplicate_of_another_vehicle` | `VLM_ACCEPT` for a duplicate drop; `HUMAN_PENDING` for any other event |
+| Vehicle screen | `not_a_vehicle` | `VLM_ACCEPT` as a drop (static) |
+| Rider reclass without a subtype | a rider answer | the reclass is applied with that subtype |
+| Rider reclass without a subtype | any other answer | `HUMAN_PENDING`: the VLM and the rider score disagree |
+
+An answer can redirect the edit: for a proposed static drop, `cyclist` applies a reclass
+instead. The event keeps its proposal; only its `edit` changes.
+
+**Budget.** `vlm.max_calls` (500 by default) is a hard limit on requests to the backend:
+the `calls` and `retries` counts never add up to more. A question is asked only if all its
+uncached votes fit in what is left, in order of how close the event's score is to the middle of
+its band; a question that does not fit stays `HUMAN_PENDING` with `vlm.error: "budget"`, and a
+later one that fits still runs. A retry (after a timeout, HTTP 429 or 5xx, or an invalid reply)
+uses what admission left over; with nothing left, the event stays pending with the same error.
+`refiner.last_result.summary["vlm"]` reports `calls`, `retries`, `cache_hits`, `failures`, and
+`budget_skipped`.
+
+**Cache.** Each answer is stored under `vlm.cache_dir` (`~/.cache/dnt/vlm` by default), keyed
+by the image, prompt, options, backend, model, temperature, and vote number. A rerun on the same
+inputs asks nothing and costs no budget; a damaged entry is ignored.
+
+**Votes.** With `vlm.votes` above 1, each question is asked that many times at
+`vlm.vote_temperature`. The majority answer wins, its confidence is the share of votes it got
+(the model's own confidence is ignored), and a tie is `HUMAN_PENDING`. Every vote counts against
+`max_calls`.
+
+**Failures** never stop a run and never apply an edit: a timeout, a rate limit, a server error,
+an invalid reply, a missing evidence image, or an exhausted budget leaves the event
+`HUMAN_PENDING` with the reason in its `vlm.error`. Without a video the backend is ignored with
+a warning. With a video, a backend whose package is missing raises `ImportError` before any work
+starts, naming `pip install 'dnt[refine-vlm]'`.
+
+**Review page.** Events left `HUMAN_PENDING` (except fills and smoothing) are collected on
+`OUT.review.html`, with their images in `OUT.review/`. One card per event shows the evidence
+image, the signals, the VLM's answer and reason, and accept and reject choices (with a class
+picker for reclasses). Cards can be filtered by stage and sorted by score. A copy button gives
+a `Labeler.draw_track_clips(...)` snippet that cuts one clip per track of the event, each from
+the track's first to last frame plus 2 s on each side (it is left out when there is no video).
+The page makes no network requests and keeps your choices in the browser, namespaced by run.
+**Export decisions** downloads them as `decisions.json`; applying that file arrives in a later
+release. A rerun deletes only the images listed in `OUT.review/.dnt-review.json`, the page's own
+manifest, and never overwrites another file. Without a video the page is still written, with
+signals only.
 
 ::: dnt.refine

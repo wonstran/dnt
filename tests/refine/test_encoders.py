@@ -113,9 +113,17 @@ def test_extras_are_declared_and_not_required():
     extras = meta["optional-dependencies"]
     assert extras["refine-dino"] == ["transformers>=4.40"]
     assert extras["refine-reid"] == ["torchreid", "tensorboard"]
-    assert set(extras["refine"]) == {"transformers>=4.40", "torchreid", "tensorboard"}
+    assert extras["refine-vlm"] == ["openai>=1.40", "anthropic>=0.40"]
+    assert set(extras["refine"]) == {
+        "transformers>=4.40",
+        "torchreid",
+        "tensorboard",
+        "openai>=1.40",
+        "anthropic>=0.40",
+    }
     required = " ".join(meta["dependencies"])
-    assert not any(n in required for n in ("transformers", "torchreid", "tensorboard"))
+    names = ("transformers", "torchreid", "tensorboard", "openai", "anthropic")
+    assert not any(n in required for n in names)
 
 
 def test_importing_the_package_loads_no_encoder_library():

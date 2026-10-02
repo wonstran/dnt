@@ -49,7 +49,8 @@ dev = ["pytest", "pytest-cov", "ruff", "build"]
 docs = ["mkdocs-material", "mkdocstrings[python]", "mkdocs-with-pdf", "qrcode"]
 refine-dino = ["transformers>=4.40"]
 refine-reid = ["torchreid", "tensorboard"]
-refine = ["transformers>=4.40", "torchreid", "tensorboard"]
+refine-vlm = ["openai>=1.40", "anthropic>=0.40"]
+refine = ["transformers>=4.40", "torchreid", "tensorboard", "openai>=1.40", "anthropic>=0.40"]
 
 [project.scripts]
 dnt-refine = "dnt.refine.cli:main"

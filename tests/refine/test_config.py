@@ -213,3 +213,31 @@ def test_link_caps_must_stay_below_the_new_accept_above(data, match):
     with pytest.raises(ValueError, match=match):
         RefineConfig.from_dict(data)
     RefineConfig.from_dict({"link": {"ambiguous_cap": 0.61, "occluded_score_cap": 0.61}})
+
+
+@pytest.mark.parametrize(
+    "key,value",
+    [
+        ("votes", 0), ("votes", 1.5), ("votes", True),
+        ("min_conf", -0.1), ("min_conf", 1.1), ("min_conf", True),
+        ("max_calls", -1), ("max_calls", 2.5),
+        ("max_concurrency", 0), ("max_concurrency", False),
+        ("timeout_s", 0), ("timeout_s", -3),
+        ("vote_temperature", -0.5),
+        ("cache_dir", ""), ("cache_dir", 7),
+    ],
+)
+def test_vlm_settings_are_validated(key, value):
+    cfg = RefineConfig.defaults()
+    setattr(cfg.vlm, key, value)
+    with pytest.raises(ValueError, match=f"vlm.{key}"):
+        cfg.validate()
+
+
+def test_good_vlm_settings_validate_and_round_trip(tmp_path):
+    cfg = RefineConfig.defaults()
+    cfg.vlm.backend, cfg.vlm.model = "openai_compat", "qwen"
+    cfg.vlm.votes, cfg.vlm.min_conf, cfg.vlm.max_calls = 3, 0.0, 0
+    cfg.validate()
+    cfg.to_yaml(tmp_path / "c.yaml")
+    assert RefineConfig.from_yaml(tmp_path / "c.yaml").vlm.votes == 3

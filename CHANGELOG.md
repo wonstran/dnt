@@ -14,20 +14,45 @@
   `torchreid` package and in deep-person-reid installed from GitHub
   (`pip install git+https://github.com/KaiyangZhou/deep-person-reid.git`), the alternative when
   the PyPI package does not provide it.
+- VLM verification. With a video and `vlm.backend` set to `openai_compat` (any OpenAI-compatible
+  server, such as vLLM or Ollama) or `anthropic`, `refine` builds an evidence image for each
+  ID-switch split, link, false-track drop, or reclass in the uncertain band (and for each rider
+  reclass without a subtype) and asks the model to choose an option. A confident answer decides
+  the event (`VLM_ACCEPT` or `VLM_REJECT`) and can redirect the edit, for example a static drop
+  into a reclass; `unsure`, a low confidence (`vlm.min_conf`), a vote tie, or any error leaves
+  it `HUMAN_PENDING`. `vlm.max_calls` is a hard limit on requests, retries included; answers are
+  cached under `vlm.cache_dir`; `vlm.votes` asks a question several times. The run summary has
+  a `vlm` entry with `calls`, `retries`, `cache_hits`, `failures`, and `budget_skipped`. Events
+  still pending are collected on a static review page, `OUT.review.html`, with their images in
+  `OUT.review/`; **Export decisions** downloads `decisions.json`, which a later release will
+  apply. New extra: `pip install 'dnt[refine-vlm]'` (`openai` and `anthropic`; also part of
+  `'dnt[refine]'`). Neither is a required dependency. See "Verification with a VLM" in the
+  Track Refinement docs.
 - This release scores with motion only unless a video and an appearance encoder are given, and
   applies only the edits it is sure of: in-vehicle and duplicate false-track drops, rider
   reclasses whose subtype a ReClass hint settles, links across short gaps and static waits with
   a clear assignment margin, orphan drops, and filling. With an encoder, ID-switch splits and
-  links are also scored by appearance and applied when they score high enough. Other edits are
-  capped below auto-accept, recorded as `HUMAN_PENDING`, and not applied yet: ID-switch splits
-  found from motion alone, links across occlusions, links with an ambiguous assignment margin,
-  and false-track drops of static objects or of mixed tracks. Rider reclasses whose subtype no
-  ReClass hint settles are pending too, however high they score, because only a hint can choose
-  the subtype in this release. In-vehicle drops need a context file with the vehicles' boxes
-  (`context_file=`, or `--context`); without one the in-vehicle cue is skipped. VLM
-  verification, review pages, and applying review decisions follow in later releases.
+  links are also scored by appearance and applied when they score high enough. Without a VLM
+  backend (the default), other edits are capped below auto-accept, recorded as `HUMAN_PENDING`,
+  and not applied yet: ID-switch splits found from motion alone, links across occlusions, links
+  with an ambiguous assignment margin, and false-track drops of static objects or of mixed
+  tracks. Rider reclasses whose subtype no ReClass hint settles are pending too, however high
+  they score, unless a VLM backend names the subtype. With a VLM backend and a video, the VLM
+  decides these edits when it is sure; the rest stay `HUMAN_PENDING` and go on a review page.
+  In-vehicle drops need a context file with the vehicles' boxes (`context_file=`, or
+  `--context`); without one the in-vehicle cue is skipped. Applying review decisions follows in
+  a later release.
 
 ### Changed
+- With a VLM backend and a video, the edits that stay capped below auto-accept without one
+  (motion-only ID-switch splits, links across occlusions or with an ambiguous margin, static
+  and mixed false-track drops, and rider reclasses without a subtype) are decided by the VLM
+  when it is sure; the rest stay `HUMAN_PENDING`. With `vlm.backend: none` (the default),
+  nothing changes. The `refine` extra now also installs `openai` and `anthropic`; the new
+  `refine-vlm` extra installs just those two.
+- Config validation now rejects bad `vlm` settings: `votes` below 1, `min_conf` outside [0, 1],
+  a negative `max_calls`, `max_concurrency` below 1, `timeout_s` or `vote_temperature` out of
+  range, and an empty `cache_dir`.
 - The `refine-reid` and `refine` extras now also install `tensorboard`, which PyPI torchreid
   imports but does not declare.
 - `refine` with a video now needs the encoder's package (`pip install 'dnt[refine-dino]'`) or
