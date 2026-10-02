@@ -52,6 +52,7 @@ encoder:
   model: facebook/dinov2-small
   device: auto      # cuda, xpu, mps, then cpu
   sample_every: 5   # embed every 5th observed frame; stage 1 densifies around candidates
+  min_crop_px: 40   # boxes whose longer side is smaller (in pixels) are not embedded
 ```
 
 `encoder.kind: none`, or no video, scores with motion only and needs no extra. A video with the
@@ -62,6 +63,14 @@ The first `dino` run downloads the model from the Hugging Face Hub, so it needs 
 `pip install git+https://github.com/KaiyangZhou/deep-person-reid.git`.
 The embeddings are saved as `OUT.features.npz` next to the output and reused when the track
 file, video, context file, and encoder model, weights, and sampling settings are unchanged.
+Boxes whose longer side is below `encoder.min_crop_px` (40 px by default) are not embedded:
+they are treated like occluded boxes, so stage 1 looks for ID switches only where a track has
+larger boxes, and stage 3 scores a link whose ends have no clean crop with appearance unknown.
+On 640x480 pedestrian footage, where most boxes were smaller than 40 px, encoders saw such
+crops upsampled many times, and the ID-switch splits found from them cut single pedestrians.
+Set `min_crop_px: 0` to embed every box (for example on high-resolution footage, where small
+boxes still show detail); a higher value keeps fewer, larger crops. `refine` logs how many
+samples the rule drops.
 For vehicles, `reid` needs `encoder.weights`. The cache key includes a digest of the weights
 that were actually loaded, so a model that changes under the same name never reuses old
 embeddings.

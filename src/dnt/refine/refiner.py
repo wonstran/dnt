@@ -749,6 +749,7 @@ class TrackRefiner:
             sample_every=cfg.sample_every,
             occlusion_iou=cfg.occlusion_iou,
             crop_pad=CROP_PAD,
+            min_crop_px=cfg.min_crop_px,
         )
         loaded = FeatureStore.load(features_path, key, dim=encoder.dim)
         store = loaded if loaded is not None else FeatureStore(key)
@@ -761,6 +762,14 @@ class TrackRefiner:
             store,
             sample_every=cfg.sample_every,
             batch_size=cfg.batch_size,
+            min_crop_px=cfg.min_crop_px,
             crop_pad=CROP_PAD,
+        )
+        log.info(
+            "appearance: %d coarse samples are clean; %d more are not embedded because their "
+            "box is smaller than encoder.min_crop_px = %d px",
+            app.coarse_clean,
+            app.coarse_too_small,
+            cfg.min_crop_px,
         )
         return app, store  # the caller runs app.prefetch_coarse()

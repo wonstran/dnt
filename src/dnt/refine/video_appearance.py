@@ -19,7 +19,18 @@ class VideoAppearance:
 
     A raw track's *coarse* samples are the observed frames with ordinal ``0, k, 2k, ...``
     (``k = sample_every``); *dense* samples are all of its observed frames. A sample is used
-    only if its row is not occluded and its crop is not empty.
+    only if its row is clean (not occluded, and its box's longer side is at least
+    ``min_crop_px``) and its crop is not empty. Rows that are not clean still count for the
+    ordinals.
+
+    Attributes
+    ----------
+    coarse_clean : int
+        Coarse samples of all raw tracks whose rows are clean.
+    coarse_too_small : int
+        Coarse samples whose rows are not occluded but whose boxes are smaller than
+        ``min_crop_px``, so they are not embedded.
+
     """
 
     def __init__(
@@ -32,6 +43,7 @@ class VideoAppearance:
         *,
         sample_every: int,
         batch_size: int,
+        min_crop_px: int,
         crop_pad: float = CROP_PAD,
     ):
         """Index the raw tracks of ``work``.
@@ -53,6 +65,9 @@ class VideoAppearance:
             Coarse stride, in observed frames.
         batch_size : int
             Crops per ``encoder.encode`` call.
+        min_crop_px : int
+            Rows whose box has a longer side (``max(w, h)``, in pixels) below this are treated
+            like occluded rows: never cropped or embedded. ``0`` turns the rule off.
         crop_pad : float
             Box enlargement before cropping.
 
@@ -66,22 +81,31 @@ class VideoAppearance:
             raise ValueError(
                 f"occluded does not cover {len(missing)} row(s) of work (first label: {missing[0]})"
             )
+        if int(min_crop_px) < 0:
+            raise ValueError(f"min_crop_px must be at least 0, got {min_crop_px}")
         self.video_file = video_file
         self.encoder = encoder
         self.store = store
         self.batch_size = max(1, int(batch_size))
         self.crop_pad = float(crop_pad)
+        self.min_crop_px = int(min_crop_px)
+        self.coarse_clean = 0
+        self.coarse_too_small = 0
         self._tr: dict[int, tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]] = {}
         w = work.sort_values(["raw_id", "frame"])
         w = w.assign(_occ=occluded.loc[w.index].to_numpy(bool))
         every = max(1, int(sample_every))
         for raw_id, g in w.groupby("raw_id", sort=True):
-            self._tr[int(raw_id)] = (
-                g["frame"].to_numpy(int),
-                g[["x", "y", "w", "h"]].to_numpy(float),
-                ~g["_occ"].to_numpy(bool),
-                np.arange(len(g)) % every == 0,
-            )
+            boxes = g[["x", "y", "w", "h"]].to_numpy(float)
+            visible = ~g["_occ"].to_numpy(bool)
+            small = np.zeros(len(g), dtype=bool)
+            if self.min_crop_px > 0:
+                small = boxes[:, 2:4].max(axis=1) < self.min_crop_px
+            clean = visible & ~small
+            coarse = np.arange(len(g)) % every == 0  # ordinals count every observed frame
+            self.coarse_clean += int((coarse & clean).sum())
+            self.coarse_too_small += int((coarse & visible & small).sum())
+            self._tr[int(raw_id)] = (g["frame"].to_numpy(int), boxes, clean, coarse)
 
     def _rows(self, raw_id: int, f0: int, f1: int, dense: bool):
         tr = self._tr.get(int(raw_id))

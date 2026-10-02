@@ -153,3 +153,33 @@ def test_a_null_fill_max_gap_and_small_positive_durations_are_valid():
     cfg = RefineConfig.from_dict({"fill": {"max_gap": None}, "link": {"max_passes": 1},
                                   "switch": {"min_side_seconds": 0.1}})
     assert cfg.fill.max_gap is None and cfg.link.max_passes == 1
+
+
+# ---- encoder.min_crop_px --------------------------------------------------------------------
+
+
+def test_min_crop_px_defaults_to_40_and_round_trips_through_yaml(tmp_path):
+    for target in ("person", "vehicle"):
+        cfg = RefineConfig.defaults(target)
+        assert cfg.encoder.min_crop_px == 40
+        cfg.to_yaml(tmp_path / "c.yaml")
+        text = (tmp_path / "c.yaml").read_text()
+        assert "min_crop_px: 40" in text
+        back = RefineConfig.from_yaml(tmp_path / "c.yaml")
+        assert back == cfg and back.encoder.min_crop_px == 40
+    assert RefineConfig.from_dict({"encoder": {"min_crop_px": 0}}).encoder.min_crop_px == 0
+    assert RefineConfig.from_dict({"encoder": {"min_crop_px": 64}}).encoder.min_crop_px == 64
+
+
+@pytest.mark.parametrize("value", [-1, 2.5, 40.0, True, "40", None])
+def test_min_crop_px_must_be_a_non_negative_int(value):
+    with pytest.raises(ValueError, match=r"encoder\.min_crop_px"):
+        RefineConfig.from_dict({"encoder": {"min_crop_px": value}})
+
+
+@pytest.mark.parametrize("value", [-1, 2.5, True, "40", None])
+def test_a_directly_assigned_min_crop_px_is_validated(value):
+    cfg = RefineConfig.defaults()
+    cfg.encoder.min_crop_px = value
+    with pytest.raises(ValueError, match=r"encoder\.min_crop_px must be a whole number of pixels"):
+        cfg.validate()

@@ -431,3 +431,83 @@ def test_a_failed_cache_save_leaves_no_ledger_and_no_output(tmp_path, monkeypatc
     with pytest.raises(OSError, match="disk full"):
         _run(src, tmp_path / "o.txt", video, ColorEncoder())
     assert sorted(p.name for p in tmp_path.iterdir()) == ["t.txt", "v.mp4"]
+
+
+# ---- encoder.min_crop_px --------------------------------------------------------------------
+
+
+def _small_scene(tmp_path, side=30.0, name="s.txt", video="s.mp4"):
+    """The takeover scene with boxes whose longer side is ``side`` px (same width ratio)."""
+    red = box_rows(1, range(60), 20.0, 100.0, vx=2.0, w=side / 2, h=side)
+    blue = box_rows(1, range(60, 120), 140.0, 100.0, vx=2.0, w=side * 0.875, h=side)
+    vid = make_color_video(tmp_path / video, video_rows(red, RED) + video_rows(blue, BLUE), 120)
+    src = tmp_path / name
+    table(red + blue).to_csv(src, index=False, header=False)
+    return src, vid
+
+
+def test_a_takeover_of_small_boxes_is_not_split_from_appearance(tmp_path, caplog):
+    src, video = _small_scene(tmp_path)
+    enc = ColorEncoder()
+    with caplog.at_level("INFO", logger="dnt.refine.refiner"):
+        res = _run(src, tmp_path / "o.txt", video, enc)
+    # no crop is clean, so stage 1 has no appearance samples for the track and skips it
+    assert enc.calls == 0
+    assert not [e for e in res.events if e.kind is EventKind.SPLIT]
+    assert res.tracks["track"].nunique() == 1
+    assert "0 coarse samples are clean; 24 more are not embedded" in caplog.text
+    assert "encoder.min_crop_px = 40 px" in caplog.text
+
+
+def test_min_crop_px_zero_splits_the_small_takeover_from_appearance_as_before(tmp_path):
+    src, video = _small_scene(tmp_path)
+    enc = ColorEncoder()
+    res = _run(src, tmp_path / "o.txt", video, enc, cfg=_cfg(min_crop_px=0))
+    splits = [e for e in res.events if e.kind is EventKind.SPLIT]
+    assert enc.crops > 0 and len(splits) == 1
+    ev = splits[0]
+    assert ev.params["cut_frame"] == 60 and ev.signals["motion_only"] is False
+    assert ev.decision is Decision.AUTO_ACCEPT and ev.applied
+    spans = res.tracks.groupby("track")["frame"].agg(["min", "max"]).to_numpy().tolist()
+    assert spans == [[0, 59], [60, 119]]
+
+
+def test_a_takeover_with_a_longer_side_of_exactly_min_crop_px_is_still_split(tmp_path):
+    src, video = _small_scene(tmp_path, side=40.0)
+    res = _run(src, tmp_path / "o.txt", video, ColorEncoder(), cfg=_cfg(min_crop_px=40))
+    splits = [e for e in res.events if e.kind is EventKind.SPLIT]
+    assert [(e.params["cut_frame"], e.decision) for e in splits] == [(60, Decision.AUTO_ACCEPT)]
+
+
+def test_min_crop_px_is_in_the_cache_key_and_the_ledger_header(tmp_path):
+    src, video = _scene(tmp_path)
+    r1 = _run(src, tmp_path / "o.txt", video, ColorEncoder())
+    h1 = _header(r1)
+    assert h1["config"]["encoder"]["min_crop_px"] == 40
+    enc = ColorEncoder()
+    r2 = _run(src, tmp_path / "o.txt", video, enc, cfg=_cfg(min_crop_px=0))
+    h2 = _header(r2)
+    assert h2["config"]["encoder"]["min_crop_px"] == 0
+    assert h2["inputs"]["features"]["cache_key"] != h1["inputs"]["features"]["cache_key"]
+    assert enc.crops > 0  # the cache of the first run is not reused
+
+
+def test_a_link_between_small_tracks_scores_with_unknown_appearance(tmp_path):
+    import math
+
+    a = box_rows(1, range(60), 20.0, 100.0, vx=2.0, w=15.0, h=30.0)
+    b = box_rows(2, range(63, 120), 146.0, 100.0, vx=2.0, w=15.0, h=30.0)
+    video = make_color_video(tmp_path / "v.mp4", video_rows(a + b, RED), 120)
+    src = tmp_path / "t.txt"
+    table(a + b).to_csv(src, index=False, header=False)
+    cfg = _cfg()
+    cfg.link.enabled = True
+    enc = ColorEncoder()
+    res = _run(src, tmp_path / "o.txt", video, enc, cfg=cfg)
+    links = [e for e in res.events if e.kind is EventKind.LINK]
+    assert enc.calls == 0 and len(links) == 1
+    ev = links[0]
+    # no clean embedding on either side: c_app is the neutral 0.5 of spec 6.3, not motion-only
+    assert ev.signals["motion_only"] is False and ev.signals["c_app"] == 0.5
+    assert math.isfinite(ev.algo_score) and math.isfinite(ev.signals["S_link"])
+    assert ev.decision is not Decision.AUTO_REJECT

@@ -405,6 +405,7 @@ For each stage, `accept_above` and `reject_below`, with `reject_below < accept_a
 
 - The encoder embeds a crop every `encoder.sample_every` observed frames (default 5). Stage 1 finds candidates on these coarse samples, then embeds every observed frame within ±`switch.window` of each candidate and recomputes that candidate's score on the dense samples.
 - A crop is used only if the box's maximum IoU with every other box in that frame (in the input file and in the context file) is below `encoder.occlusion_iou` (default 0.3). Crops that fail are marked `occluded` and excluded from appearance statistics.
+- A crop is also used only if the box's longer side, `max(w, h)` in pixels as in the track file, is at least `encoder.min_crop_px` (default 40; `0` turns the rule off). A smaller box is treated exactly like an occluded one: it is not cropped or embedded, is not recorded as a skipped crop, and still counts for the ordinals of the coarse samples. Stage 1 then skips tracks and sides without enough clean samples (section 6.1), and stage 3 uses `c_app = 0.5` when a side has no clean embedding (section 6.3). Pretrained encoders see such crops upsampled many times; on 640x480 pedestrian footage, where most boxes were smaller, splits found from them cut single pedestrians. `refine` logs at INFO how many coarse samples the rule drops and how many clean ones remain.
 - The mask is computed from the **raw** input boxes and the context boxes. It does not change when decisions change, so embeddings stay valid across re-proposals.
 - Embeddings are L2-normalized.
 - **The embedded samples do not depend on decisions.** They are the coarse samples, which depend only on the raw tracks and `sample_every`, plus the dense samples around every stage 1 candidate, whatever its decision. Stage 1's proposals are deterministic and never change on replay. So the cache that `refine` writes covers every embedding any replay can request, including the first and last clean samples of tails created by splits that are accepted later.
@@ -413,7 +414,7 @@ For each stage, `accept_above` and `reject_below`, with `reject_below < accept_a
   - the video's **fingerprint**: the SHA-256 of the **entire file**, read in 8 MiB chunks, plus the file size and frame count;
   - the context file's SHA-256, or `none`;
   - encoder kind, model name, and a digest of the weights actually loaded (the SHA-256 of the weights file; for a Hub model, which has no file path, the SHA-256 of the loaded parameters, so a model name that later resolves to different weights misses the cache);
-  - `sample_every` and `occlusion_iou`;
+  - `sample_every`, `occlusion_iou` and `min_crop_px`;
   - crop preprocessing: padding factor, resize target, and normalization;
   - `FEATURES_VERSION`, a constant bumped whenever the crop or embedding code changes.
 
@@ -869,6 +870,7 @@ encoder:
   sample_every: 5
   occlusion_iou: 0.3
   batch_size: 64
+  min_crop_px: 40            # boxes whose longer side (px) is smaller are not embedded; 0: off
 screen:
   enabled: true
   accept_above: 0.85
