@@ -79,6 +79,75 @@ def test_the_cache_is_written_recorded_and_reused(tmp_path):
     ]
 
 
+def test_a_failing_stage_keeps_the_embeddings_but_writes_no_ledger_or_output(
+    tmp_path, monkeypatch
+):
+    import numpy as np
+
+    from dnt.refine.refiner import _Stages
+
+    src, video = _scene(tmp_path)
+
+    def crash(self, *args, **kwargs):
+        raise RuntimeError("stage 2 crashed")
+
+    monkeypatch.setattr(_Stages, "_screen", crash)  # after stage 1 used the embeddings
+    enc = ColorEncoder()
+    with pytest.raises(RuntimeError, match="stage 2 crashed"):
+        _run(src, tmp_path / "o.txt", video, enc)
+    assert enc.crops > 0
+    feats = tmp_path / "o.features.npz"
+    assert feats.is_file()
+    assert not (tmp_path / "o.txt").exists() and not (tmp_path / "o.ledger.jsonl").exists()
+    with np.load(feats) as z:
+        key = str(z["key"])
+    store = FeatureStore.load(feats, key, dim=3)
+    assert store is not None and len(store) == enc.crops
+    monkeypatch.undo()  # the next run succeeds and encodes nothing again
+    again = ColorEncoder()
+    res = _run(src, tmp_path / "o.txt", video, again)
+    assert again.calls == 0 and _header(res)["inputs"]["features"]["cache_key"] == key
+
+
+def test_a_crash_in_the_coarse_pass_keeps_the_embeddings_encoded_before_it(tmp_path):
+    import numpy as np
+
+    class FailsOnSecondCall(ColorEncoder):
+        def encode(self, crops):
+            if self.calls == 1:
+                raise RuntimeError("encoder crashed")
+            return super().encode(crops)
+
+    src, video = _scene(tmp_path)
+    enc = FailsOnSecondCall()
+    with pytest.raises(RuntimeError, match="encoder crashed"):
+        _run(src, tmp_path / "o.txt", video, enc, cfg=_cfg(batch_size=1))
+    feats = tmp_path / "o.features.npz"
+    with np.load(feats) as z:
+        key = str(z["key"])
+    store = FeatureStore.load(feats, key, dim=3)
+    assert store is not None and len(store) == enc.crops == 1
+    assert not (tmp_path / "o.ledger.jsonl").exists()
+
+
+def test_a_failing_save_after_a_crash_does_not_hide_the_crash(tmp_path, monkeypatch, caplog):
+    from dnt.refine.refiner import _Stages
+
+    src, video = _scene(tmp_path)
+
+    def crash(self, *args, **kwargs):
+        raise RuntimeError("stage 2 crashed")
+
+    def no_save(self, path):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(_Stages, "_screen", crash)
+    monkeypatch.setattr(FeatureStore, "save", no_save)
+    with pytest.raises(RuntimeError, match="stage 2 crashed"):
+        _run(src, tmp_path / "o.txt", video, ColorEncoder())
+    assert "disk full" in caplog.text
+
+
 def test_a_different_video_is_a_cache_miss(tmp_path):
     src, video = _scene(tmp_path)
     r1 = _run(src, tmp_path / "o.txt", video, ColorEncoder())

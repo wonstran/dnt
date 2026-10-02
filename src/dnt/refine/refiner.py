@@ -146,6 +146,20 @@ def table_summary(work: pd.DataFrame, fps: float) -> dict:
     }
 
 
+def _save_on_failure(store: FeatureStore | None, path: Path) -> None:
+    """Save a feature cache with unsaved embeddings while a run is failing.
+
+    A failed save is logged, not raised, so it never hides the error that stopped the run.
+    """
+    if store is None or not store.dirty:
+        return
+    try:
+        store.save(path)
+        log.info("saved the %d embeddings computed so far to %s", len(store), path)
+    except Exception as err:
+        log.warning("could not save the feature cache %s: %s", path, err)
+
+
 def _event_counts(events: list[Event]) -> dict[str, int]:
     c = Counter(f"{e.stage}/{e.kind}/{e.decision}" for e in events)
     return dict(sorted(c.items()))
@@ -479,11 +493,14 @@ class TrackRefiner:
             vinfo
             and vinfo["frame_count"] > 0
             and len(work)
-            and int(work["frame"].max()) > vinfo["frame_count"]
+            and int(work["frame"].max()) >= vinfo["frame_count"]
         ):
+            n = vinfo["frame_count"]
             raise ValueError(
-                f"track frame {int(work['frame'].max())} exceeds the video's frame count "
-                f"{vinfo['frame_count']}; the track file does not belong to this video"
+                f"track frame {int(work['frame'].max())} is past the video's last frame: the "
+                f"video's frame count is {n}, so its frames are 0 to {n - 1}. The track file's "
+                "frames must be 0-based frame indexes of this video; check that the track file "
+                "belongs to this video"
             )
         ctx_boxes, ctx_fmt = (
             io.read_context(context_file, cfg.context.format)
@@ -524,7 +541,6 @@ class TrackRefiner:
             },
             features_path=paths["features"],
         )
-        stages = _Stages(cfg, fps_val, frame_size, appearance, ctx_boxes, ctx_fmt, hint_map)
         desc = (
             "Refining"
             if video_index is None or video_tot is None
@@ -532,10 +548,19 @@ class TrackRefiner:
         )
         if message:
             desc += f" {message}"
-        with tqdm(total=5, desc=desc, unit=" stage", disable=not verbose) as pbar:
-            work, events = stages.run(
-                work, tick=lambda name: (pbar.set_postfix_str(name), pbar.update(1))
-            )
+        try:
+            if store is not None:
+                appearance.prefetch_coarse()
+            stages = _Stages(cfg, fps_val, frame_size, appearance, ctx_boxes, ctx_fmt, hint_map)
+            with tqdm(total=5, desc=desc, unit=" stage", disable=not verbose) as pbar:
+                work, events = stages.run(
+                    work, tick=lambda name: (pbar.set_postfix_str(name), pbar.update(1))
+                )
+        except BaseException:
+            # keep the embeddings computed so far, so a rerun does not encode them again;
+            # the ledger and the output are written only on success
+            _save_on_failure(store, paths["features"])
+            raise
         if store is not None:
             sha = store.save(paths["features"])
             inputs["features"] = _file_record(paths["features"], sha, cache_key=store.key)
@@ -681,7 +706,10 @@ class TrackRefiner:
         return self._encoder_memo[1]
 
     def _appearance(self, work, video, context, fps, *, key_parts, features_path):
-        """Return ``(appearance, store)``; ``store`` is the feature cache to save, or None."""
+        """Return ``(appearance, store)``; ``store`` is the feature cache to save, or None.
+
+        With a store, ``appearance`` is a ``VideoAppearance`` whose coarse pass has not run yet.
+        """
         if self.appearance_factory is not None:
             app = self.appearance_factory(
                 work=work, video=video, context=context, fps=fps, config=self.config
@@ -711,5 +739,4 @@ class TrackRefiner:
             batch_size=cfg.batch_size,
             crop_pad=CROP_PAD,
         )
-        app.prefetch_coarse()
-        return app, store
+        return app, store  # the caller runs app.prefetch_coarse()

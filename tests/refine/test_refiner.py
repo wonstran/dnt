@@ -150,6 +150,21 @@ def test_track_frames_beyond_the_video_are_rejected(tmp_path, synthetic_video):
         _refine(src, tmp_path / "o.csv", video_file=video)
 
 
+def test_a_track_frame_equal_to_the_frame_count_is_rejected(tmp_path, synthetic_video):
+    # frames are 0-based: the synthetic video has 150 frames, 0 to 149
+    video, _ = synthetic_video
+    assert io.video_info(video)["frame_count"] == 150
+    src = _write(tmp_path, table(box_rows(1, range(140, 151), 0.0, 0.0)))
+    with pytest.raises(ValueError, match="frame count") as info:
+        _refine(src, tmp_path / "o.csv", video_file=video)
+    msg = str(info.value)
+    assert "track frame 150" in msg and "frame count is 150" in msg and "0 to 149" in msg
+    assert "0-based" in msg
+    assert not (tmp_path / "o.csv").exists()
+    last = _write(tmp_path, table(box_rows(1, range(140, 150), 0.0, 0.0)), "last.txt")
+    assert len(_refine(last, tmp_path / "o.csv", video_file=video).tracks) == 10
+
+
 def test_refiner_api_matches_tracker(tmp_path):
     cfg_file = tmp_path / "c.yaml"
     cfg = RefineConfig.defaults("vehicle")
