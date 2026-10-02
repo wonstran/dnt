@@ -118,8 +118,7 @@ pip install 'dnt[refine-vlm]'   # openai and anthropic
 
 Set the backend in the `vlm` block of the config file (`--config`, or `config_yaml=`), or in
 `cfg.vlm` in code. A local server that speaks the OpenAI chat API (vLLM, Ollama, ...) needs
-`base_url` and `model`. Its key is optional (`vlm.api_key_env` names the variable;
-`OPENAI_API_KEY` by default; it must be a variable name, never the key itself). The
+`base_url` and `model`, and usually no key (see [Endpoint and key](#endpoint-and-key)). The
 `openai_compat` request sends `max_tokens=300` and `temperature`, which suits vLLM, Ollama, and
 GPT-4-class chat models; reasoning models that reject `max_tokens` or `temperature=0` are not
 supported by this backend:
@@ -132,8 +131,8 @@ vlm:
   min_conf: 0.7
 ```
 
-Anthropic needs the key in `ANTHROPIC_API_KEY` (or the variable named by `vlm.api_key_env`);
-`model` defaults to `claude-sonnet-5-5`:
+Anthropic needs a key (by default from `ANTHROPIC_API_KEY`); `model` defaults to
+`claude-sonnet-5-5`:
 
 ```yaml
 vlm:
@@ -151,9 +150,90 @@ default among them, `claude-opus-5*`, `claude-opus-4-7`, `claude-opus-4-8`, `cla
 cut off at the token limit before its answer, leaves the event `HUMAN_PENDING` with that error
 and is not retried.
 
+### Endpoint and key
+
+`vlm.base_url` sets the endpoint of either backend: the server for `openai_compat`, or a proxy
+or gateway for `anthropic` (unset: Anthropic's own API). It must be an `http://` or `https://`
+URL without a user name, password, or query string (the config is copied into the ledger, so
+nothing secret may sit in it). A local vLLM or Ollama server needs no key:
+
+```yaml
+vlm:
+  backend: openai_compat
+  base_url: http://localhost:8000/v1    # Ollama: http://localhost:11434/v1
+  model: Qwen/Qwen2.5-VL-7B-Instruct
+```
+
+A hosted OpenAI-compatible endpoint reads its key from an environment variable you name (the
+name, never the key):
+
+```yaml
+vlm:
+  backend: openai_compat
+  base_url: https://llm.example.com/v1
+  model: some-vision-model
+  api_key_env: EXAMPLE_API_KEY   # export EXAMPLE_API_KEY=... before the run
+```
+
+Anthropic, directly (key in `ANTHROPIC_API_KEY`) or through a gateway:
+
+```yaml
+vlm:
+  backend: anthropic             # the key comes from ANTHROPIC_API_KEY
+```
+
+```yaml
+vlm:
+  backend: anthropic
+  base_url: https://gateway.example.com/anthropic
+  api_key_env: GATEWAY_KEY
+```
+
+A key can also live in a file (surrounding whitespace, such as a trailing newline, is
+stripped; `~` is expanded). The path goes into the ledger; the content never does:
+
+```yaml
+vlm:
+  backend: anthropic
+  api_key_file: ~/.config/dnt/anthropic.key   # chmod 600
+```
+
+In Python, pass the key to the refiner. It stays on the `TrackRefiner` object and is never
+written to the config, the ledger, the summary, or a log line (a custom
+`vlm_backend_factory` does not receive it):
+
+```python
+key = vault.read("vlm/anthropic")  # for example, from your secrets manager
+refiner = TrackRefiner(config_yaml="ped.yaml", vlm_api_key=key)
+```
+
+On the command line, `dnt-refine run` takes `--vlm-backend`, `--vlm-model`, `--vlm-base-url`,
+`--vlm-api-key-env`, and `--vlm-api-key-file`, applied on top of the `--config` file (an empty
+value, such as `--vlm-base-url ""`, resets the field). The ledger header records the settings
+in effect:
+
+```bash
+dnt-refine run ped_track.txt --video cam1.mp4 --config ped.yaml --out ped_refined.txt \
+    --vlm-backend anthropic --vlm-api-key-file ~/.config/dnt/anthropic.key
+```
+
+The key is taken from the first of these that is set: `vlm_api_key=` in Python, then
+`vlm.api_key_file`, then the variable `vlm.api_key_env` names (`OPENAI_API_KEY` or
+`ANTHROPIC_API_KEY` by default). An unreadable or empty key file is an error, not a fall-back
+to the variable. With no key, `anthropic` fails before any work starts, and so does
+`openai_compat` when it has no `base_url` (it would call api.openai.com); with a `base_url` it
+sends a placeholder key. Each error names the three ways to give a key and never shows one;
+`dnt-refine` reports it with exit code 2. A key found in any source is replaced by `***` in
+every error text that reaches the ledger or the log.
+
+There is no `--vlm-api-key` option and no key field in the config, on purpose: a key typed on
+the command line is kept in the shell history and shown to other users in the process list, and
+the config is copied into every ledger header.
+
 The images you send leave your machine for a remote backend; set `vlm.send_context_frames:
-false` to send only the crops. Keys are read from the environment and never written to the
-ledger or the config.
+false` to send only the crops.
+
+### Answers and decisions
 
 The model must reply with an option, a confidence, and a reason. The answer maps to a decision
 only when its confidence reaches `vlm.min_conf`; `unsure`, a lower confidence, a tie between

@@ -36,6 +36,16 @@
   `{"accept": true, "new_cls": N}` stay valid in hand-written files. New extra: `pip install 'dnt[refine-vlm]'` (`openai` and `anthropic`; also part of
   `'dnt[refine]'`). Neither is a required dependency. See "Verification with a VLM" in the
   Track Refinement docs.
+- VLM endpoint and key. `vlm.base_url` sets the endpoint of both backends (an OpenAI-compatible
+  server, or a proxy or gateway in front of Anthropic); it must be an `http://` or `https://` URL
+  without a user name, password, or query string. The key comes from
+  `TrackRefiner(..., vlm_api_key=...)`, else from the file `vlm.api_key_file` names, else from
+  the variable `vlm.api_key_env` names (`OPENAI_API_KEY` or `ANTHROPIC_API_KEY` by default), and
+  is never written to the config, the ledger, the summary, or a log line. `openai_compat`
+  without `base_url` and without a key now fails before the run instead of calling
+  api.openai.com with a placeholder. `dnt-refine run` takes `--vlm-backend`, `--vlm-model`,
+  `--vlm-base-url`, `--vlm-api-key-env`, and `--vlm-api-key-file` on top of `--config`; there is
+  deliberately no option for the key itself (shell history, process list).
 - This release scores with motion only unless a video and an appearance encoder are given, and
   applies only the edits it is sure of: in-vehicle and duplicate false-track drops, rider
   reclasses whose subtype a ReClass hint settles, links across short gaps and static waits with

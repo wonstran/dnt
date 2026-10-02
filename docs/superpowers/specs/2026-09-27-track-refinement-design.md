@@ -172,10 +172,13 @@ tracks = refiner.apply(            # replay after review (§4.2); inputs come fr
 
 ```
 dnt-refine run    TRACKS [--video V] [--fps F] [--context C] [--reclass-hints R] --config CFG --out OUT
+                  [--vlm-backend B] [--vlm-model M] [--vlm-base-url URL] [--vlm-api-key-env NAME] [--vlm-api-key-file PATH]
 dnt-refine apply  --ledger L [--decisions D.json] [--tracks T] [--video V] [--context C] [--reclass-hints R] [--features F] [--no-vlm] [--no-fill] --out OUT
 dnt-refine audit  --ledger L [--video V] --n 50 [--seed S]
 dnt-refine audit-score --ledger L --marks M.json
 ```
+
+The `--vlm-*` options of `run` override the matching `vlm` fields of `--config`; the config is validated after they are applied, and the ledger header records the settings in effect. There is no option for the key itself (§7.3).
 
 The CLI is a thin `argparse` wrapper over `TrackRefiner`, registered as `[project.scripts] dnt-refine = "dnt.refine.cli:main"`.
 
@@ -782,16 +785,21 @@ class VLMBackend(Protocol):
 
 `tag` names the question (kind and event ID) for scripted test backends; the real backends ignore it. A backend raises `VLMTransientError` for a failure worth retrying (a timeout, HTTP 429 or 5xx, a dropped connection); any other exception is final for that question. A reply that is not a valid answer raises `ValueError` (§7.2).
 
+- **Endpoint and key (both backends).**
+  - `vlm.base_url` is the endpoint of either backend: the server for `openai_compat`, a proxy or gateway for `anthropic` (`AsyncAnthropic(base_url=...)`; unset means Anthropic's API). Validation (§9) requires an `http://` or `https://` URL with a host and without userinfo (`user:pass@`), a query string, or a fragment, and never echoes the value: a URL can carry a credential, and the config is copied into the ledger header. A blank value means unset.
+  - The key is resolved by one helper, `resolve_api_key(cfg, default_env, runtime_key=None)`; the first source that has one wins: (1) `TrackRefiner(..., vlm_api_key=...)`, passed to `make_backend(cfg, api_key=...)` and kept on the refiner only; (2) `vlm.api_key_file`, a path whose content, stripped, is the key (`~` expanded; an unreadable or empty file raises `ValueError` naming the path, not the content, before any input file is read); (3) the variable named by `vlm.api_key_env` (default `OPENAI_API_KEY` or `ANTHROPIC_API_KEY`). A custom `vlm_backend_factory(cfg)` gets only the config.
+  - The config holds no key: a key field in YAML or a `--vlm-api-key` option would put it in the ledger header, the shell history, or the process list. The path of the key file is allowed in the config and the ledger.
+  - A backend exposes its resolved key as `secret`; the runner replaces it, and the values of the key variables, with `***` in every error text it records or logs.
 - **`openai_compat`**
   - Settings: `base_url` and `model`.
-  - API key from `vlm.api_key_env` (default `OPENAI_API_KEY`, optional for local servers).
+  - A server at `base_url` (or the SDK's `OPENAI_BASE_URL`) may need no key; a placeholder is sent. Without an endpoint the client would call api.openai.com, so no key there is a `ValueError` naming the three sources.
   - Sends the image as a base64 data URL.
   - Requests `response_format={"type": "json_object"}` when `vlm.json_mode: true` (the default), and falls back to parsing JSON from the text.
   - Sends `max_tokens=300` and `temperature`. It targets vLLM, Ollama, and GPT-4-class chat models; reasoning models that reject `max_tokens` or `temperature=0` are not supported by this backend.
   - Extra: `dnt[refine-vlm] = ["openai>=1.40", "anthropic>=0.40"]`.
 - **`anthropic`**
   - Anthropic Messages API, sending the image as a base64 image block.
-  - The key comes from `vlm.api_key_env` (default `ANTHROPIC_API_KEY`).
+  - The key comes from the sources above (default variable `ANTHROPIC_API_KEY`); none is a `ValueError` naming the three sources. `base_url` routes through a proxy or gateway.
   - The default model ID is pinned at `claude-sonnet-5-5` (`DEFAULT_ANTHROPIC_MODEL`); check it against the current Anthropic model reference when releasing. `vlm.model` overrides it.
   - The request depends on the model. The newer Claude models (ids starting with `claude-sonnet-5`, `claude-opus-5`, `claude-opus-4-7`, `claude-opus-4-8`, `claude-fable`, or `claude-mythos`) answer HTTP 400 to a non-default `temperature`, `top_p` or `top_k`, and think adaptively by default (thinking tokens count against `max_tokens`). They get no sampling parameters, effort `low` (`output_config.effort`, sent through `extra_body`), and `max_tokens=2048`; with `votes > 1` they sample at the model's default temperature. Older models get `temperature` and `max_tokens=1024`, and no effort. No `thinking` setting is sent.
   - `stop_reason: "refusal"`, `stop_reason: "max_tokens"` without a complete answer, and a reply with no text block are final errors for that question (not retried).
@@ -947,9 +955,10 @@ fill:
   smooth_existing: false
 vlm:
   backend: none              # none | openai_compat | anthropic
-  base_url: null
+  base_url: null             # both backends: a local server, a proxy, or a gateway (§7.3)
   model: null
-  api_key_env: null
+  api_key_env: null          # null → OPENAI_API_KEY / ANTHROPIC_API_KEY
+  api_key_file: null         # path of a file holding the key; never the key itself
   json_mode: true
   min_conf: 0.7
   votes: 1
@@ -974,6 +983,7 @@ The link band was lowered from `accept_above: 0.80` (caps 0.75) after a review o
 - `reid` with the `vehicle` target has `weights` set.
 - `switch.min_crop_px` and `link.min_crop_px` are integers `>= 0`.
 - A non-`none` VLM backend has `model` set (except `anthropic`, which has a default).
+- `vlm.base_url`, when set, is an `http://` or `https://` URL with a host and without userinfo, query, or fragment; `vlm.api_key_env` is a variable name; `vlm.api_key_file` is a path (a string that does not look like a key). No message echoes these values.
 
 **Deferred until `refine` or `apply` starts, and only for components the run will use** (§5.5): the encoder's extra (needed only with a video and `encoder.kind` other than `none`) and the VLM backend's extra (needed only with a non-`none` backend and a video).
 
