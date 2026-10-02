@@ -9,7 +9,7 @@ from dnt.refine.config import VLMConfig
 from dnt.refine.vlm import DEFAULT_ANTHROPIC_MODEL, VLMAnswer, VLMTransientError, make_backend
 from dnt.refine.vlm.fake import FakeBackend
 
-from ._vlm_fakes import install_fake_anthropic, install_fake_openai
+from ._vlm_fakes import anthropic_reply, install_fake_anthropic, install_fake_openai
 
 OPTS = ["same_individual", "different", "unsure"]
 GOOD = json.dumps({"answer": "different", "confidence": 0.9, "reason": "r"})
@@ -126,8 +126,13 @@ def test_anthropic_request_shape_and_default_model(monkeypatch):
     ck = seen["client_kwargs"]
     assert ck["api_key"] == "sk-ant" and ck["timeout"] == 9.0 and ck["max_retries"] == 0
     req = seen["requests"][0]
-    assert req["model"] == DEFAULT_ANTHROPIC_MODEL and req["temperature"] == 0.2
-    assert req["max_tokens"] > 0
+    assert req["model"] == DEFAULT_ANTHROPIC_MODEL
+    # the default model rejects a non-default temperature (HTTP 400) and thinks by default:
+    # no sampling parameters, effort "low", and room for the thinking before the answer
+    assert "temperature" not in req and "top_p" not in req and "top_k" not in req
+    assert "thinking" not in req and "output_config" not in req
+    assert req["extra_body"] == {"output_config": {"effort": "low"}}
+    assert req["max_tokens"] == 2048
     blocks = req["messages"][0]["content"]
     assert blocks[0]["type"] == "image" and blocks[0]["source"]["media_type"] == "image/jpeg"
     assert blocks[0]["source"]["data"] == base64.b64encode(b"\xff\xd8jpeg").decode()
@@ -160,3 +165,125 @@ def test_backends_close_their_client_and_the_fake_counts_closes(monkeypatch):
     fake = FakeBackend({})
     asyncio.run(fake.aclose())
     assert fake.closed == 1
+
+
+@pytest.mark.parametrize(
+    ("model", "new"),
+    [
+        ("claude-sonnet-5-5", True),
+        ("claude-sonnet-5", True),
+        ("claude-opus-5-1", True),
+        ("claude-opus-4-7", True),
+        ("claude-opus-4-8-20260101", True),
+        ("claude-fable-1", True),
+        ("claude-mythos-2", True),
+        ("claude-haiku-4-5", False),
+        ("claude-sonnet-4-6", False),
+        ("claude-opus-4-6", False),
+        ("claude-opus-4-1", False),
+        ("claude-3-5-sonnet-latest", False),
+        ("", False),
+    ],
+)
+def test_new_family_models_are_recognized(model, new):
+    from dnt.refine.vlm.anthropic import _new_family
+
+    assert _new_family(model) is new
+
+
+@pytest.mark.parametrize("model", ["claude-haiku-4-5", "claude-sonnet-4-6"])
+def test_older_claude_models_get_the_temperature_and_no_effort(monkeypatch, model):
+    seen = install_fake_anthropic(monkeypatch, [GOOD])
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant")
+    b = make_backend(VLMConfig(backend="anthropic", model=model))
+    ask(b, temperature=0.0)
+    ask(b, temperature=0.7)
+    first, second = seen["requests"]
+    assert first["temperature"] == 0.0 and second["temperature"] == 0.7
+    for req in (first, second):
+        assert req["model"] == model and req["max_tokens"] == 1024
+        assert "extra_body" not in req and "output_config" not in req and "thinking" not in req
+
+
+def test_votes_reach_an_older_model_at_the_vote_temperature_and_skip_it_on_new_ones(monkeypatch):
+    from dnt.refine.vlm.runner import Question, VLMRunner
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant")
+    for model, expect in (("claude-haiku-4-5", 0.7), (DEFAULT_ANTHROPIC_MODEL, None)):
+        seen = install_fake_anthropic(monkeypatch, [GOOD])
+        cfg_ = VLMConfig(backend="anthropic", model=model, votes=3, vote_temperature=0.7)
+        with VLMRunner(cfg_, make_backend(cfg_)) as r:
+            (v,) = r.ask_many([Question("LINK:link-r0-000001", b"img", "P", list(OPTS))])
+        assert v.answer == "different" and len(seen["requests"]) == 3
+        assert [req.get("temperature") for req in seen["requests"]] == [expect] * 3
+
+
+@pytest.mark.parametrize(
+    ("reply", "message"),
+    [
+        (anthropic_reply(None, stop_reason="refusal"), "refused"),
+        (anthropic_reply(GOOD, stop_reason="refusal"), "refused"),
+        (anthropic_reply(None, stop_reason="max_tokens"), "max_tokens"),
+        (anthropic_reply('{"answer": "diff', stop_reason="max_tokens"), "max_tokens"),
+        (anthropic_reply(None, stop_reason="end_turn"), "no text"),
+        (anthropic_reply("  ", stop_reason="end_turn", thinking=False), "no text"),
+    ],
+)
+def test_a_refusal_a_cut_off_or_a_textless_reply_is_an_error(monkeypatch, reply, message):
+    install_fake_anthropic(monkeypatch, [reply])
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant")
+    with pytest.raises(RuntimeError, match=message) as err:
+        ask(make_backend(VLMConfig(backend="anthropic")))
+    assert "sk-ant" not in str(err.value)
+
+
+def test_a_complete_answer_that_hit_max_tokens_is_still_used(monkeypatch):
+    install_fake_anthropic(monkeypatch, [anthropic_reply(GOOD, stop_reason="max_tokens")])
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant")
+    assert ask(make_backend(VLMConfig(backend="anthropic"))).answer == "different"
+
+
+@pytest.mark.parametrize("stop", ["refusal", "max_tokens", "end_turn"])
+def test_the_runner_does_not_retry_a_refusal_a_cut_off_or_a_textless_reply(monkeypatch, stop):
+    from dnt.refine.vlm.runner import Question, VLMRunner
+
+    seen = install_fake_anthropic(monkeypatch, [anthropic_reply(None, stop_reason=stop)])
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant")
+    cfg_ = VLMConfig(backend="anthropic")
+    with VLMRunner(cfg_, make_backend(cfg_)) as r:
+        (v,) = r.ask_many([Question("LINK:link-r0-000001", b"img", "P", list(OPTS))])
+    assert v.answer is None and v.error.startswith("RuntimeError: ")
+    assert len(seen["requests"]) == 1 and r.calls == 1 and r.retries == 0 and r.failures == 1
+    assert "sk-ant" not in v.error
+
+
+@pytest.mark.parametrize(
+    "make",
+    [
+        lambda m: m.APIConnectionError("sk-ant connection reset"),
+        lambda m: m.APITimeoutError("sk-ant timed out"),
+        lambda m: m.InternalServerError("sk-ant overloaded"),
+        lambda m: m.APIStatusError("sk-ant bad gateway", 502),
+        lambda m: m.APIStatusError("sk-ant overloaded", 529),
+        lambda m: m.RateLimitError("sk-ant slow down"),
+    ],
+)
+def test_anthropic_transient_errors_are_mapped(monkeypatch, make):
+    install_fake_anthropic(monkeypatch, [])
+    exc = make(sys.modules["anthropic"])
+    install_fake_anthropic(monkeypatch, [exc])
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant")
+    with pytest.raises(VLMTransientError) as err:
+        ask(make_backend(VLMConfig(backend="anthropic")))
+    assert "sk-ant" not in str(err.value)
+
+
+@pytest.mark.parametrize("status", [400, 401, 403, 404, 422])
+def test_anthropic_client_errors_propagate_unchanged(monkeypatch, status):
+    install_fake_anthropic(monkeypatch, [])
+    exc = sys.modules["anthropic"].APIStatusError("bad", status)
+    install_fake_anthropic(monkeypatch, [exc])
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant")
+    with pytest.raises(type(exc)) as err:
+        ask(make_backend(VLMConfig(backend="anthropic")))
+    assert err.value is exc and err.value.status_code == status

@@ -138,6 +138,15 @@ vlm:
   max_calls: 200
 ```
 
+The Anthropic request asks for effort `low`. `vlm.vote_temperature` is sent only to models that
+accept sampling parameters: `openai_compat` servers and the older Claude models (for example
+`claude-haiku-4-5` or `claude-sonnet-4-6`). The newer Claude models (`claude-sonnet-5*`, the
+default among them, `claude-opus-5*`, `claude-opus-4-7`, `claude-opus-4-8`, `claude-fable*`,
+`claude-mythos*`) reject a non-default temperature, so no temperature is sent to them and with
+`vlm.votes` above 1 their votes sample at the model's default temperature. A refusal, or a reply
+cut off at the token limit before its answer, leaves the event `HUMAN_PENDING` with that error
+and is not retried.
+
 The images you send leave your machine for a remote backend; set `vlm.send_context_frames:
 false` to send only the crops. Keys are read from the environment and never written to the
 ledger or the config.
@@ -187,7 +196,7 @@ question that failed, got an invalid reply, or ended in a vote tie is not cached
 again. A damaged entry is ignored.
 
 **Votes.** With `vlm.votes` above 1, each question is asked that many times at
-`vlm.vote_temperature`. The majority answer wins, its confidence is the share of votes it got
+`vlm.vote_temperature` (at the default temperature for the newer Claude models; see above). The majority answer wins, its confidence is the share of votes it got
 (the model's own confidence is ignored), and a tie is `HUMAN_PENDING`. Every vote that is sent
 (not one answered from the cache) counts against `max_calls`, and so does every retry.
 

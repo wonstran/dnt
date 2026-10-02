@@ -107,11 +107,12 @@ select = ["E", "F", "I", "UP", "B", "SIM", "RUF", "D"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-m 'not model and not golden and not slow'"
+addopts = "-m 'not model and not golden and not slow and not live'"
 markers = [
   "model: downloads real model weights (opt-in)",
   "golden: needs DNT_REF_CLIP and DNT_GOLDEN_DIR (opt-in)",
   "slow: builds and installs the wheel (CI wheel job)",
+  "live: sends requests to a real VLM backend; needs its package and key (opt-in)",
 ]
 filterwarnings = [
   "error::FutureWarning:dnt.*",

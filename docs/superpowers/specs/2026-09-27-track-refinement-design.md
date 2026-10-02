@@ -754,7 +754,7 @@ If `vlm.send_context_frames: false`, context frames are left out.
 - `unsure`, or `confidence < vlm.min_conf` (default 0.7) → `HUMAN_PENDING`.
 
 **Votes**
-- With `vlm.votes = n > 1`, the same question is asked n times at temperature `vlm.vote_temperature` (default 0.7).
+- With `vlm.votes = n > 1`, the same question is asked n times at temperature `vlm.vote_temperature` (default 0.7), where the model accepts a temperature (§7.3).
 - The answer is the majority option, and `confidence = majority count / n`. The model's self-reported confidence is ignored.
 - A tie → `HUMAN_PENDING`.
 
@@ -792,6 +792,8 @@ class VLMBackend(Protocol):
   - Anthropic Messages API, sending the image as a base64 image block.
   - The key comes from `vlm.api_key_env` (default `ANTHROPIC_API_KEY`).
   - The default model ID is pinned at `claude-sonnet-5-5` (`DEFAULT_ANTHROPIC_MODEL`); check it against the current Anthropic model reference when releasing. `vlm.model` overrides it.
+  - The request depends on the model. The newer Claude models (ids starting with `claude-sonnet-5`, `claude-opus-5`, `claude-opus-4-7`, `claude-opus-4-8`, `claude-fable`, or `claude-mythos`) answer HTTP 400 to a non-default `temperature`, `top_p` or `top_k`, and think adaptively by default (thinking tokens count against `max_tokens`). They get no sampling parameters, effort `low` (`output_config.effort`, sent through `extra_body`), and `max_tokens=2048`; with `votes > 1` they sample at the model's default temperature. Older models get `temperature` and `max_tokens=1024`, and no effort. No `thinking` setting is sent.
+  - `stop_reason: "refusal"`, `stop_reason: "max_tokens"` without a complete answer, and a reply with no text block are final errors for that question (not retried).
 - **`fake`**: scripted answers keyed by event ID or kind. Used in tests.
 - **`none`**: no backend. Events in the uncertain band become `HUMAN_PENDING`.
 

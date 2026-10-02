@@ -75,8 +75,21 @@ def install_fake_openai(monkeypatch, replies):
     return seen
 
 
+def anthropic_reply(text=None, *, stop_reason="end_turn", thinking=True):
+    """A fake Messages response: an optional thinking block, then ``text`` (if not None)."""
+    content = [types.SimpleNamespace(type="thinking", thinking="...")] if thinking else []
+    if text is not None:
+        content.append(types.SimpleNamespace(type="text", text=text))
+    return types.SimpleNamespace(content=content, stop_reason=stop_reason)
+
+
 def install_fake_anthropic(monkeypatch, replies):
-    """Install a fake ``anthropic``; ``replies`` is a list of reply texts or exceptions."""
+    """Install a fake ``anthropic``; ``replies`` holds reply texts, responses, or exceptions.
+
+    Every request's keyword arguments are recorded in ``seen["requests"]``. A text becomes a
+    response with a thinking block, then the text, and ``stop_reason="end_turn"``; a response
+    built with ``anthropic_reply`` is returned as it is.
+    """
     seen = {"requests": [], "client_kwargs": None, "closed": 0}
     queue = list(replies)
     mod = _module("anthropic")
@@ -88,8 +101,7 @@ def install_fake_anthropic(monkeypatch, replies):
             item = queue.pop(0) if len(queue) > 1 else queue[0]
             if isinstance(item, Exception):
                 raise item
-            block = types.SimpleNamespace(type="text", text=item)
-            return types.SimpleNamespace(content=[types.SimpleNamespace(type="thinking"), block])
+            return anthropic_reply(item) if isinstance(item, str) else item
 
     class AsyncAnthropic:
         def __init__(self, **kwargs):
