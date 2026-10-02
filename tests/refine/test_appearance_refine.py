@@ -148,6 +148,33 @@ def test_a_failing_save_after_a_crash_does_not_hide_the_crash(tmp_path, monkeypa
     assert "disk full" in caplog.text
 
 
+def test_off_frame_boxes_are_cached_so_a_rerun_never_opens_the_video(tmp_path, monkeypatch):
+    import numpy as np
+
+    from dnt.refine import video_appearance
+
+    src, video = _scene(tmp_path)
+    away = box_rows(2, range(30), 1000.0, 100.0, vx=1.0, w=20.0, h=40.0)  # right of the frame
+    table(pd.read_csv(src, header=None).values.tolist() + away).to_csv(
+        src, index=False, header=False
+    )
+    enc1 = ColorEncoder()
+    r1 = _run(src, tmp_path / "o.txt", video, enc1)
+    feats = tmp_path / "o.features.npz"
+    with np.load(feats) as z:
+        assert z["skipped_raw_id"].size > 0 and set(z["skipped_frame"].tolist()) <= set(range(30))
+    assert enc1.crops > 0
+    first = feats.read_bytes()
+
+    opened = []
+    real = video_appearance.FrameReader
+    monkeypatch.setattr(video_appearance, "FrameReader", lambda p: opened.append(p) or real(p))
+    enc2 = ColorEncoder()
+    r2 = _run(src, tmp_path / "o.txt", video, enc2)
+    assert opened == [] and enc2.calls == 0
+    assert feats.read_bytes() == first and r2.tracks.equals(r1.tracks)
+
+
 def test_a_different_video_is_a_cache_miss(tmp_path):
     src, video = _scene(tmp_path)
     r1 = _run(src, tmp_path / "o.txt", video, ColorEncoder())
@@ -194,6 +221,8 @@ def test_a_cache_with_the_right_key_but_the_wrong_width_is_rebuilt(tmp_path):
         raw_id=np.array([1, 1], dtype=np.int64),
         frame=np.array([0, 5], dtype=np.int64),
         emb=np.ones((2, 5), dtype=np.float32),
+        skipped_raw_id=np.array([], dtype=np.int64),
+        skipped_frame=np.array([], dtype=np.int64),
     )
     enc = ColorEncoder()
     r2 = _run(src, tmp_path / "o.txt", video, enc)

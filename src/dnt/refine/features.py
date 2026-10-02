@@ -17,7 +17,8 @@ from .io import sha256_file
 log = logging.getLogger(__name__)
 
 #: Bumped whenever the crop or embedding code changes, so old caches are not reused.
-FEATURES_VERSION = 1
+#: Version 2 added the keys of skipped (empty or unreadable) crops to the file.
+FEATURES_VERSION = 2
 
 
 class Appearance(Protocol):
@@ -166,6 +167,15 @@ def features_key(
     return hashlib.sha256(json.dumps(parts, sort_keys=True).encode()).hexdigest()
 
 
+def _keys_ok(ids, frames) -> bool:
+    """Return whether ``ids`` and ``frames`` are 1-D integer arrays of one length, no pair twice."""
+    if ids.ndim != 1 or frames.ndim != 1 or len(ids) != len(frames):
+        return False
+    if ids.dtype.kind not in "iu" or frames.dtype.kind not in "iu":
+        return False
+    return len(set(zip(ids.tolist(), frames.tolist(), strict=True))) == len(ids)
+
+
 def _checked(ids, frames, emb, dim) -> np.ndarray | None:
     """Return the embeddings as float32 if the cache arrays are usable, else ``None``.
 
@@ -173,11 +183,9 @@ def _checked(ids, frames, emb, dim) -> np.ndarray | None:
     ``dim`` when it is given (and at least one column otherwise), finite values *after* the
     conversion to float32, and no duplicate ``(raw_id, frame)`` pair.
     """
-    if ids.ndim != 1 or frames.ndim != 1 or emb.ndim != 2:
+    if not _keys_ok(ids, frames) or emb.ndim != 2 or emb.dtype.kind != "f":
         return None
-    if ids.dtype.kind not in "iu" or frames.dtype.kind not in "iu" or emb.dtype.kind != "f":
-        return None
-    if not (len(ids) == len(frames) == emb.shape[0]):
+    if emb.shape[0] != len(ids):
         return None
     if len(ids) and (emb.shape[1] == 0 or (dim is not None and emb.shape[1] != dim)):
         return None
@@ -185,13 +193,15 @@ def _checked(ids, frames, emb, dim) -> np.ndarray | None:
         out = emb.astype(np.float32)
     if not bool(np.isfinite(out).all()):
         return None
-    if len(set(zip(ids.tolist(), frames.tolist(), strict=True))) != len(ids):
-        return None
     return out
 
 
 class FeatureStore:
-    """Embeddings per (raw track id, frame), saved as a deterministic ``.npz`` under a key."""
+    """Embeddings per (raw track id, frame), saved as a deterministic ``.npz`` under a key.
+
+    The store also records the boxes whose crop was empty or unreadable (``skip``), so a rerun
+    does not read the video for them again and a replay can tell them from missing entries.
+    """
 
     def __init__(self, key: str):
         """Create an empty store for cache key ``key``."""
@@ -199,6 +209,7 @@ class FeatureStore:
         self.dirty = False
         self._dim: int | None = None
         self._d: dict[int, dict[int, np.ndarray]] = {}
+        self._skipped: set[tuple[int, int]] = set()
 
     def __len__(self) -> int:
         """Return the number of stored embeddings."""
@@ -208,8 +219,23 @@ class FeatureStore:
         """Return whether ``(raw_id, frame)`` has an embedding."""
         return int(frame) in self._d.get(int(raw_id), {})
 
+    def is_skipped(self, raw_id: int, frame: int) -> bool:
+        """Return whether ``(raw_id, frame)`` was recorded as having no usable crop."""
+        return (int(raw_id), int(frame)) in self._skipped
+
+    def skip(self, raw_id: int, frame: int) -> None:
+        """Record that ``(raw_id, frame)`` has no usable crop (empty or unreadable)."""
+        key = (int(raw_id), int(frame))
+        if self.has(*key):
+            raise ValueError(f"{key} has an embedding; it cannot also be skipped")
+        if key not in self._skipped:
+            self._skipped.add(key)
+            self.dirty = True
+
     def put(self, raw_id: int, frame: int, emb) -> None:
         """Store one embedding; every embedding of a store has the same width."""
+        if self.is_skipped(raw_id, frame):
+            raise ValueError(f"{(int(raw_id), int(frame))} is skipped; it cannot be embedded")
         e = np.array(emb, dtype=np.float32)
         if e.ndim != 1 or (self._dim is not None and e.shape[0] != self._dim):
             raise ValueError(
@@ -233,11 +259,14 @@ class FeatureStore:
                 frames.append(f)
                 embs.append(self._d[rid][f])
         dim = embs[0].shape[0] if embs else 0
+        skipped = sorted(self._skipped)
         arrays = {
             "key": np.array(self.key),
             "raw_id": np.asarray(ids, dtype=np.int64),
             "frame": np.asarray(frames, dtype=np.int64),
             "emb": np.asarray(embs, dtype=np.float32).reshape(len(ids), dim),
+            "skipped_raw_id": np.asarray([k[0] for k in skipped], dtype=np.int64),
+            "skipped_frame": np.asarray([k[1] for k in skipped], dtype=np.int64),
         }
         p = Path(path)
         tmp = p.with_name(p.name + ".tmp")
@@ -272,10 +301,12 @@ class FeatureStore:
             with p.open("rb") as fh, np.load(fh, allow_pickle=False) as z:
                 key_array = z["key"]
                 ids, frames, emb = z["raw_id"], z["frame"], z["emb"]
-        except Exception as err:  # a damaged cache is a miss, never an exception
+                skip_ids, skip_frames = z["skipped_raw_id"], z["skipped_frame"]
+        except Exception as err:  # a damaged or old-format cache is a miss, never an exception
             log.info("feature cache %s is unreadable (%s); recomputing", p, err)
             return None
-        if not all(isinstance(a, np.ndarray) for a in (key_array, ids, frames, emb)):
+        arrays = (key_array, ids, frames, emb, skip_ids, skip_frames)
+        if not all(isinstance(a, np.ndarray) for a in arrays):
             log.info("feature cache %s does not hold arrays; recomputing", p)
             return None
         if key_array.ndim != 0 or key_array.dtype.kind != "U" or str(key_array) != key:
@@ -285,9 +316,20 @@ class FeatureStore:
         if emb32 is None:
             log.info("feature cache %s is malformed or has another width; recomputing", p)
             return None
+        skipped = (
+            set(zip(skip_ids.tolist(), skip_frames.tolist(), strict=True))
+            if _keys_ok(skip_ids, skip_frames)
+            else None
+        )
+        if skipped is None or not skipped.isdisjoint(
+            zip(ids.tolist(), frames.tolist(), strict=True)
+        ):
+            log.info("feature cache %s has malformed skipped keys; recomputing", p)
+            return None
         store = cls(key)
         for r, f, e in zip(ids.tolist(), frames.tolist(), emb32, strict=True):
             store._d.setdefault(r, {})[f] = e
+        store._skipped = skipped
         if len(emb32):
             store._dim = int(emb32.shape[1])
         return store

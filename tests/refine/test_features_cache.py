@@ -135,6 +135,8 @@ def _write_npz(path, **over):
         "raw_id": np.array([1, 1], dtype=np.int64),
         "frame": np.array([3, 4], dtype=np.int64),
         "emb": np.array([[1.0, 0.0], [0.0, 1.0]], dtype=np.float32),
+        "skipped_raw_id": np.array([1, 2], dtype=np.int64),
+        "skipped_frame": np.array([5, 3], dtype=np.int64),
     }
     arrays.update(over)
     np.savez(path, **arrays)
@@ -145,6 +147,7 @@ def test_the_helper_writes_a_loadable_archive(tmp_path):
     _write_npz(p)
     loaded = FeatureStore.load(p, "k")
     assert loaded is not None and len(loaded) == 2 and loaded.has(1, 4)
+    assert loaded.is_skipped(1, 5) and loaded.is_skipped(2, 3) and not loaded.is_skipped(1, 4)
 
 
 @pytest.mark.parametrize(
@@ -163,6 +166,14 @@ def test_the_helper_writes_a_loadable_archive(tmp_path):
         {"frame": np.array([3, 3], dtype=np.int64)},  # duplicate (raw_id, frame)
         {"key": np.array(["k", "k"])},  # key is not a scalar string
         {"key": np.array(3)},
+        # the skipped keys follow the same rules as the embedded ones
+        {"skipped_raw_id": np.array(1, dtype=np.int64)},  # 0-D
+        {"skipped_frame": np.array([[5, 3]], dtype=np.int64)},  # 2-D
+        {"skipped_frame": np.array([5.0, 3.0])},  # float frames
+        {"skipped_raw_id": np.array(["a", "b"])},  # non-numeric ids
+        {"skipped_frame": np.array([5], dtype=np.int64)},  # lengths differ
+        {"skipped_raw_id": np.array([1, 1]), "skipped_frame": np.array([5, 5])},  # duplicate
+        {"skipped_frame": np.array([3, 3], dtype=np.int64)},  # (1, 3) also has an embedding
     ],
 )
 def test_readable_but_malformed_archives_are_misses(tmp_path, over):
@@ -175,6 +186,61 @@ def test_an_archive_with_a_missing_array_is_a_miss(tmp_path):
     p = tmp_path / "part.features.npz"
     np.savez(p, key=np.array("k"), raw_id=np.array([1]), frame=np.array([3]))
     assert FeatureStore.load(p, "k") is None
+
+
+@pytest.mark.parametrize(
+    "names", [{"skipped_raw_id", "skipped_frame"}, {"skipped_raw_id"}, {"skipped_frame"}]
+)
+def test_an_archive_without_the_skipped_keys_is_a_miss(tmp_path, names):
+    # a version 1 file has neither array (and its cache key differs: FEATURES_VERSION)
+    p = tmp_path / "v1.features.npz"
+    _write_npz(p)
+    with np.load(p) as z:
+        arrays = {k: z[k] for k in z.files if k not in names}
+    np.savez(p, **arrays)
+    assert FeatureStore.load(p, "k") is None
+
+
+def test_the_features_version_is_2():
+    assert features.FEATURES_VERSION == 2
+
+
+def test_skipped_keys_are_recorded_saved_sorted_and_loaded(tmp_path):
+    s = FeatureStore("k")
+    s.skip(4, 9)
+    assert s.dirty and s.is_skipped(4, 9) and not s.has(4, 9) and len(s) == 0
+    s.put(1, 3, [1.0, 0.0])
+    s.skip(2, 8)
+    s.skip(2, 1)
+    s.dirty = False
+    s.skip(2, 1)  # already known: nothing changes
+    assert not s.dirty
+    a = tmp_path / "a.features.npz"
+    sha = s.save(a)
+    with np.load(a) as z:
+        assert z["skipped_raw_id"].tolist() == [2, 2, 4]
+        assert z["skipped_frame"].tolist() == [1, 8, 9]
+        assert z["skipped_raw_id"].dtype == z["skipped_frame"].dtype == np.int64
+    other = FeatureStore("k")  # the same content in another order saves the same bytes
+    for rid, f in ((2, 1), (4, 9), (2, 8)):
+        other.skip(rid, f)
+    other.put(1, 3, [1.0, 0.0])
+    assert other.save(tmp_path / "b.features.npz") == sha
+    loaded = FeatureStore.load(a, "k")
+    assert loaded is not None and not loaded.dirty and len(loaded) == 1
+    assert all(loaded.is_skipped(r, f) for r, f in ((2, 1), (2, 8), (4, 9)))
+    assert not loaded.is_skipped(1, 3) and loaded.has(1, 3)
+
+
+def test_a_key_is_either_embedded_or_skipped():
+    s = FeatureStore("k")
+    s.put(1, 3, [1.0, 0.0])
+    with pytest.raises(ValueError, match="has an embedding"):
+        s.skip(1, 3)
+    s.skip(1, 4)
+    with pytest.raises(ValueError, match="is skipped"):
+        s.put(1, 4, [1.0, 0.0])
+    assert len(s) == 1 and s.is_skipped(1, 4) and not s.has(1, 4)
 
 
 def test_an_archive_of_the_wrong_embedding_width_is_a_miss_for_that_encoder(tmp_path):

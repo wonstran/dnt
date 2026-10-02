@@ -176,6 +176,25 @@ def test_unreadable_crops_are_remembered_and_the_video_is_not_reopened(tmp_path,
     assert opened == [] and enc.crops == 0
 
 
+def test_unreadable_crops_are_recorded_in_the_store_and_survive_a_save(tmp_path, monkeypatch):
+    app, enc, store, _ = _make(tmp_path, [_walker(2, range(30), x0=1000.0)], [BLUE])
+    assert app.dense_embeddings(2, 0, 29)[0].size == 0
+    assert all(store.is_skipped(2, f) for f in range(30)) and store.dirty and len(store) == 0
+    path = tmp_path / "s.features.npz"
+    store.save(path)
+    loaded = FeatureStore.load(path, "k")
+    work = io.to_work(table(_walker(2, range(30), x0=1000.0))).work
+    opened = []
+    real = video_appearance.FrameReader
+    monkeypatch.setattr(video_appearance, "FrameReader", lambda p: opened.append(p) or real(p))
+    app2 = VideoAppearance(
+        work, pd.Series(False, index=work.index), tmp_path / "gone.mp4", enc, loaded,
+        sample_every=5, batch_size=4,
+    )
+    assert app2.dense_embeddings(2, 0, 29)[0].size == 0  # the video is not even needed
+    assert opened == [] and enc.crops == 0 and not loaded.dirty
+
+
 def test_crops_are_encoded_while_the_video_is_read_not_held_until_the_end(tmp_path, monkeypatch):
     seen = {"read": 0, "first_encode": None}
     real = video_appearance.FrameReader

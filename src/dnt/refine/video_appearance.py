@@ -71,7 +71,6 @@ class VideoAppearance:
         self.store = store
         self.batch_size = max(1, int(batch_size))
         self.crop_pad = float(crop_pad)
-        self._unreadable: set[tuple[int, int]] = set()
         self._tr: dict[int, tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]] = {}
         w = work.sort_values(["raw_id", "frame"])
         w = w.assign(_occ=occluded.loc[w.index].to_numpy(bool))
@@ -103,7 +102,7 @@ class VideoAppearance:
             frames, boxes, idx = rows
             for i in idx:
                 key = (int(raw_id), int(frames[i]))
-                if key in self._unreadable or self.store.has(*key):
+                if self.store.has(*key) or self.store.is_skipped(*key):
                     continue
                 need.setdefault(key[1], {})[key] = boxes[i]
         if not need:
@@ -114,8 +113,8 @@ class VideoAppearance:
             for f, img in reader.frames(need):
                 for key in sorted(need[f]):
                     crop = crop_box(img, need[f][key], self.crop_pad)
-                    if crop is None:
-                        self._unreadable.add(key)
+                    if crop is None:  # recorded in the cache, so no rerun reads it again
+                        self.store.skip(*key)
                         continue
                     crops.append(crop)
                     owners.append(key)
