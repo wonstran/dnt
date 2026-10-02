@@ -154,8 +154,12 @@ and is not retried.
 
 `vlm.base_url` sets the endpoint of either backend: the server for `openai_compat`, or a proxy
 or gateway for `anthropic` (unset: Anthropic's own API). It must be an `http://` or `https://`
-URL without a user name, password, or query string (the config is copied into the ledger, so
-nothing secret may sit in it). A local vLLM or Ollama server needs no key:
+URL with a host and a valid port, and without whitespace, a user name, password, query string,
+or fragment (the config is copied into the ledger, so nothing secret may sit in it). The
+`anthropic` backend used to ignore `base_url`; it now honours it, so a `base_url` left in an
+older `backend: anthropic` config takes effect: remove it unless you mean it. When a key is sent
+over plain `http://` to a host other than this machine, a warning names the host (use
+`https://` unless the network is trusted). A local vLLM or Ollama server needs no key:
 
 ```yaml
 vlm:
@@ -175,7 +179,8 @@ vlm:
   api_key_env: EXAMPLE_API_KEY   # export EXAMPLE_API_KEY=... before the run
 ```
 
-Anthropic, directly (key in `ANTHROPIC_API_KEY`) or through a gateway:
+Anthropic, directly (key in `ANTHROPIC_API_KEY`) or through a gateway. The SDK appends
+`/v1/messages` to `base_url`, so give the gateway's root, not a URL ending in `/v1`:
 
 ```yaml
 vlm:
@@ -189,8 +194,14 @@ vlm:
   api_key_env: GATEWAY_KEY
 ```
 
-A key can also live in a file (surrounding whitespace, such as a trailing newline, is
-stripped; `~` is expanded). The path goes into the ledger; the content never does:
+A key can also live in a file. Surrounding whitespace (such as a trailing newline or CRLF)
+and a UTF-8 byte order mark are stripped and `~` is expanded. The file must hold the key alone:
+one line of printable ASCII without whitespace, not a `NAME=value` line or a comment (at most
+64 KiB is read). The same rule applies to a key from Python or from the environment (a blank
+variable counts as unset); a key that breaks it is an error naming the file, argument or
+variable, never the key. The path goes into the ledger; the content never does. The file is
+read once per `refine()` call, so once per video under `refine_batch`; a one-shot source such
+as `/dev/stdin` works for a single video only:
 
 ```yaml
 vlm:
@@ -199,8 +210,8 @@ vlm:
 ```
 
 In Python, pass the key to the refiner. It stays on the `TrackRefiner` object and is never
-written to the config, the ledger, the summary, or a log line (a custom
-`vlm_backend_factory` does not receive it):
+written to the config, the ledger, the summary, or a log line. It cannot be combined with a
+custom `vlm_backend_factory`, which does not receive it (give the key to your factory):
 
 ```python
 key = vault.read("vlm/anthropic")  # for example, from your secrets manager
@@ -208,9 +219,14 @@ refiner = TrackRefiner(config_yaml="ped.yaml", vlm_api_key=key)
 ```
 
 On the command line, `dnt-refine run` takes `--vlm-backend`, `--vlm-model`, `--vlm-base-url`,
-`--vlm-api-key-env`, and `--vlm-api-key-file`, applied on top of the `--config` file (an empty
-value, such as `--vlm-base-url ""`, resets the field). The ledger header records the settings
-in effect:
+`--vlm-api-key-env`, and `--vlm-api-key-file`. They are applied to the `--config` file's `vlm`
+block before it is checked, so a flag can complete a file (for example `--vlm-model` for a
+template without one). An empty value, such as `--vlm-base-url ""`, resets the field; a flag
+not given leaves the file's value. When `--vlm-backend` names a different backend than the file,
+the file's `model`, `base_url`, `api_key_env`, and `api_key_file` belong to the other backend
+and are not used (give them again with their flags if you want them): a vLLM file run with
+`--vlm-backend anthropic` never sends the Anthropic key to the vLLM server. The ledger header
+records the settings in effect:
 
 ```bash
 dnt-refine run ped_track.txt --video cam1.mp4 --config ped.yaml --out ped_refined.txt \
@@ -220,11 +236,15 @@ dnt-refine run ped_track.txt --video cam1.mp4 --config ped.yaml --out ped_refine
 The key is taken from the first of these that is set: `vlm_api_key=` in Python, then
 `vlm.api_key_file`, then the variable `vlm.api_key_env` names (`OPENAI_API_KEY` or
 `ANTHROPIC_API_KEY` by default). An unreadable or empty key file is an error, not a fall-back
-to the variable. With no key, `anthropic` fails before any work starts, and so does
-`openai_compat` when it has no `base_url` (it would call api.openai.com); with a `base_url` it
-sends a placeholder key. Each error names the three ways to give a key and never shows one;
-`dnt-refine` reports it with exit code 2. A key found in any source is replaced by `***` in
-every error text that reaches the ledger or the log.
+to the variable. The key is resolved when the backend is built, which happens only with a video
+(without one the backend is ignored): then, with no key, `anthropic` fails before any work
+starts, and so does `openai_compat` when it has no `base_url` (it would call api.openai.com);
+with a `base_url` it sends a placeholder key. Each error names the three ways to give a key and
+never shows one; `dnt-refine` reports it with exit code 2. The key is replaced by `***` in every
+error text that `refine` records in the ledger or logs. The `openai` and `anthropic` SDKs' own
+debug logging is not covered: do not turn it on in logs that others read. The check that
+`vlm.api_key_file` is not a pasted key is best-effort (it catches the `sk-` prefix of OpenAI and
+Anthropic keys only).
 
 There is no `--vlm-api-key` option and no key field in the config, on purpose: a key typed on
 the command line is kept in the shell history and shown to other users in the process list, and

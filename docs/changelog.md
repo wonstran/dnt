@@ -38,13 +38,19 @@
   Track Refinement docs.
 - VLM endpoint and key. `vlm.base_url` sets the endpoint of both backends (an OpenAI-compatible
   server, or a proxy or gateway in front of Anthropic); it must be an `http://` or `https://` URL
-  without a user name, password, or query string. The key comes from
+  with a valid host and port and without whitespace, a user name, password, query string, or
+  fragment. The `anthropic` backend now honours `base_url` (it used to ignore it), so a
+  `base_url` left in an older `backend: anthropic` config takes effect. A key sent over plain
+  `http://` to a host other than this machine logs a warning. The key comes from
   `TrackRefiner(..., vlm_api_key=...)`, else from the file `vlm.api_key_file` names, else from
-  the variable `vlm.api_key_env` names (`OPENAI_API_KEY` or `ANTHROPIC_API_KEY` by default), and
-  is never written to the config, the ledger, the summary, or a log line. `openai_compat`
-  without `base_url` and without a key now fails before the run instead of calling
-  api.openai.com with a placeholder. `dnt-refine run` takes `--vlm-backend`, `--vlm-model`,
-  `--vlm-base-url`, `--vlm-api-key-env`, and `--vlm-api-key-file` on top of `--config`; there is
+  the variable `vlm.api_key_env` names (`OPENAI_API_KEY` or `ANTHROPIC_API_KEY` by default); it
+  must be one line of printable ASCII without whitespace (a key file's surrounding whitespace and
+  byte order mark are stripped; a `NAME=value` line is rejected), and it is never written to the
+  config, the ledger, the summary, or a log line. `openai_compat` without `base_url` and without
+  a key now fails before the run instead of calling api.openai.com with a placeholder.
+  `dnt-refine run` takes `--vlm-backend`, `--vlm-model`, `--vlm-base-url`, `--vlm-api-key-env`,
+  and `--vlm-api-key-file`, applied to the `--config` file before it is checked; switching the
+  backend with `--vlm-backend` drops the file's `model`, `base_url`, and key settings. There is
   deliberately no option for the key itself (shell history, process list).
 - This release scores with motion only unless a video and an appearance encoder are given, and
   applies only the edits it is sure of: in-vehicle and duplicate false-track drops, rider

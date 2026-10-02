@@ -178,7 +178,7 @@ dnt-refine audit  --ledger L [--video V] --n 50 [--seed S]
 dnt-refine audit-score --ledger L --marks M.json
 ```
 
-The `--vlm-*` options of `run` override the matching `vlm` fields of `--config`; the config is validated after they are applied, and the ledger header records the settings in effect. There is no option for the key itself (§7.3).
+The `--vlm-*` options of `run` override the matching `vlm` fields of `--config`. They are applied to the file's `vlm` mapping before the config is built, and the config is validated once, after they are applied (so a flag can complete a file that is only valid with it; unknown keys still fail). An empty value resets a field to its default. When `--vlm-backend` differs from the file's backend, the file's `model`, `base_url`, `api_key_env` and `api_key_file` are dropped unless their own flags are given, so one backend's key never goes to the other backend's endpoint. The ledger header records the settings in effect. There is no option for the key itself (§7.3).
 
 The CLI is a thin `argparse` wrapper over `TrackRefiner`, registered as `[project.scripts] dnt-refine = "dnt.refine.cli:main"`.
 
@@ -786,10 +786,12 @@ class VLMBackend(Protocol):
 `tag` names the question (kind and event ID) for scripted test backends; the real backends ignore it. A backend raises `VLMTransientError` for a failure worth retrying (a timeout, HTTP 429 or 5xx, a dropped connection); any other exception is final for that question. A reply that is not a valid answer raises `ValueError` (§7.2).
 
 - **Endpoint and key (both backends).**
-  - `vlm.base_url` is the endpoint of either backend: the server for `openai_compat`, a proxy or gateway for `anthropic` (`AsyncAnthropic(base_url=...)`; unset means Anthropic's API). Validation (§9) requires an `http://` or `https://` URL with a host and without userinfo (`user:pass@`), a query string, or a fragment, and never echoes the value: a URL can carry a credential, and the config is copied into the ledger header. A blank value means unset.
+  - `vlm.base_url` is the endpoint of either backend: the server for `openai_compat`, a proxy or gateway for `anthropic` (`AsyncAnthropic(base_url=...)`; unset means Anthropic's API). Validation (§9) requires an `http://` or `https://` URL with a host and a valid port and without whitespace or control characters, userinfo (`user:pass@`), a query string, or a fragment, and never echoes the value: a URL can carry a credential, and the config is copied into the ledger header. A blank value means unset.
   - The key is resolved by one helper, `resolve_api_key(cfg, default_env, runtime_key=None)`; the first source that has one wins: (1) `TrackRefiner(..., vlm_api_key=...)`, passed to `make_backend(cfg, api_key=...)` and kept on the refiner only; (2) `vlm.api_key_file`, a path whose content, stripped, is the key (`~` expanded; an unreadable or empty file raises `ValueError` naming the path, not the content, before any input file is read); (3) the variable named by `vlm.api_key_env` (default `OPENAI_API_KEY` or `ANTHROPIC_API_KEY`). A custom `vlm_backend_factory(cfg)` gets only the config.
+  - Every key, whatever its source, is stripped (a key file also loses a UTF-8 BOM; at most 64 KiB of it is read, and a FIFO with no writer reads as empty) and must be one line of printable ASCII without whitespace and not a `NAME=value` line; otherwise `ValueError` names the source and the reason, never the content. A blank environment variable counts as unset. A runtime key together with a custom factory is a `ValueError`.
+  - Sending a key over `http://` to a non-loopback host (the configured `base_url`, or the SDK's `OPENAI_BASE_URL` / `ANTHROPIC_BASE_URL`) logs one warning naming the host only. `anthropic` honours `base_url` since this change, so a `base_url` left in an older anthropic config takes effect.
   - The config holds no key: a key field in YAML or a `--vlm-api-key` option would put it in the ledger header, the shell history, or the process list. The path of the key file is allowed in the config and the ledger.
-  - A backend exposes its resolved key as `secret`; the runner replaces it, and the values of the key variables, with `***` in every error text it records or logs.
+  - A backend exposes its resolved key as `secret`; the runner replaces it, and the values of the key variables, with `***` in every error text it records or logs (longest first; values shorter than 4 characters after stripping are skipped). The SDKs' own debug logging is outside this.
 - **`openai_compat`**
   - Settings: `base_url` and `model`.
   - A server at `base_url` (or the SDK's `OPENAI_BASE_URL`) may need no key; a placeholder is sent. Without an endpoint the client would call api.openai.com, so no key there is a `ValueError` naming the three sources.
@@ -983,7 +985,7 @@ The link band was lowered from `accept_above: 0.80` (caps 0.75) after a review o
 - `reid` with the `vehicle` target has `weights` set.
 - `switch.min_crop_px` and `link.min_crop_px` are integers `>= 0`.
 - A non-`none` VLM backend has `model` set (except `anthropic`, which has a default).
-- `vlm.base_url`, when set, is an `http://` or `https://` URL with a host and without userinfo, query, or fragment; `vlm.api_key_env` is a variable name; `vlm.api_key_file` is a path (a string that does not look like a key). No message echoes these values.
+- `vlm.base_url`, when set, is an `http://` or `https://` URL with a host and a valid port and without whitespace, userinfo, query, or fragment; `vlm.api_key_env` is a variable name; `vlm.api_key_file` is a path (a string that does not look like a key). No message echoes these values.
 
 **Deferred until `refine` or `apply` starts, and only for components the run will use** (§5.5): the encoder's extra (needed only with a video and `encoder.kind` other than `none`) and the VLM backend's extra (needed only with a non-`none` backend and a video).
 
