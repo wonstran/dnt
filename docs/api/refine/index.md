@@ -17,17 +17,45 @@ refiner.refine_batch(track_files, video_files=video_files, output_path="refined/
 Command line: `dnt-refine run TRACKS --fps 10 --config refine.yaml --out clean.csv`.
 
 !!! note "Current limitations"
-    This release scores with motion only, and cannot yet apply decisions made in review.
+    This release scores with motion only unless you give a video and an appearance encoder
+    (see Appearance below), and cannot yet apply decisions made in review.
     Edits it is sure of are applied: in-vehicle and duplicate false-track drops, rider
     reclasses whose subtype a ReClass hint settles, links across short gaps and static waits
-    with a clear assignment margin, orphan drops, and gap filling. Other edits are proposed but
-    never applied yet, because their scores are capped below auto-accept: ID-switch splits
-    found from motion alone, links across occlusions, links with an ambiguous assignment
-    margin, and false-track drops of static objects or of mixed tracks. Rider reclasses whose
-    subtype no ReClass hint settles are pending too, however high they score, because only a
-    hint can choose the subtype in this release. They appear in the ledger as
-    `HUMAN_PENDING` and leave the tracks unchanged. In-vehicle drops need a context file with
-    the vehicles' boxes (`context_file=`, or `--context`); without one the in-vehicle cue is
-    skipped. VLM verification and applying review decisions follow in later releases.
+    with a clear assignment margin, orphan drops, and gap filling. With an encoder, ID-switch
+    splits and links are also scored by appearance and applied when they score high enough.
+    Other edits are proposed but never applied yet, because their scores are capped below
+    auto-accept: ID-switch splits found from motion alone, links across occlusions, links with
+    an ambiguous assignment margin, and false-track drops of static objects or of mixed tracks.
+    Rider reclasses whose subtype no ReClass hint settles are pending too, however high they
+    score, because only a hint can choose the subtype in this release. They appear in the
+    ledger as `HUMAN_PENDING` and leave the tracks unchanged. In-vehicle drops need a context
+    file with the vehicles' boxes (`context_file=`, or `--context`); without one the in-vehicle
+    cue is skipped. VLM verification and applying review decisions follow in later releases.
+
+## Appearance
+
+With a video, `refine` also compares what tracks look like. It crops each box, skips crops that
+another box overlaps, embeds the rest with a pretrained encoder, and uses the embeddings to
+find ID switches (stage 1) and to score links (stage 3). Install an encoder first:
+
+```bash
+pip install 'dnt[refine-dino]'   # DINOv2 (the default, kind: dino)
+pip install 'dnt[refine-reid]'   # torchreid OSNet (kind: reid)
+```
+
+```yaml
+encoder:
+  kind: dino        # dino | reid | none
+  model: facebook/dinov2-small
+  device: auto      # cuda, xpu, mps, then cpu
+  sample_every: 5   # embed every 5th observed frame; stage 1 densifies around candidates
+```
+
+`encoder.kind: none`, or no video, scores with motion only and needs no extra. A video with the
+default `dino` encoder and no package installed raises `ImportError` before any work starts.
+The embeddings are saved as `OUT.features.npz` next to the output and reused when the track
+file, video, context file, and encoder settings are unchanged. For vehicles, `reid` needs
+`encoder.weights`. The cache key includes a digest of the weights that were actually loaded, so a
+model that changes under the same name never reuses old embeddings.
 
 ::: dnt.refine

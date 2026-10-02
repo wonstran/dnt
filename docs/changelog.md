@@ -1,5 +1,33 @@
 # Changelog
 
+## Unreleased
+
+### New
+- `dnt.refine` looks at appearance. With a video and `encoder.kind` of `dino` (DINOv2, the
+  default) or `reid` (torchreid OSNet), `refine` crops each box, skips crops that other boxes
+  occlude, and embeds the rest. Stage 1 (ID-switch splits) and stage 3 (links) score with the
+  embeddings, so a split or link that scores high enough is applied. The embeddings are cached
+  next to the output as `OUT.features.npz`, and a rerun on the same inputs reuses them. New
+  extras: `pip install 'dnt[refine-dino]'`, `'dnt[refine-reid]'`, or `'dnt[refine]'` for both.
+- This release scores with motion only unless a video and an appearance encoder are given, and
+  applies only the edits it is sure of: in-vehicle and duplicate false-track drops, rider
+  reclasses whose subtype a ReClass hint settles, links across short gaps and static waits with
+  a clear assignment margin, orphan drops, and filling. With an encoder, ID-switch splits and
+  links are also scored by appearance and applied when they score high enough. Other edits are
+  capped below auto-accept, recorded as `HUMAN_PENDING`, and not applied yet: ID-switch splits
+  found from motion alone, links across occlusions, links with an ambiguous assignment margin,
+  and false-track drops of static objects or of mixed tracks. Rider reclasses whose subtype no
+  ReClass hint settles are pending too, however high they score, because only a hint can choose
+  the subtype in this release. In-vehicle drops need a context file with the vehicles' boxes
+  (`context_file=`, or `--context`); without one the in-vehicle cue is skipped. VLM
+  verification, review pages, and applying review decisions follow in later releases.
+
+### Changed
+- `refine` with a video now needs the encoder's package (`pip install 'dnt[refine-dino]'`) or
+  `encoder.kind: none`. Before, it logged a warning and ran on motion alone. `dnt-refine run`
+  exits with code 2 and names the extra when the package is missing. `TrackRefiner` accepts
+  `encoder_factory=` to supply your own encoder.
+
 ## 0.3.4 — 2026-10-01
 
 ### New
