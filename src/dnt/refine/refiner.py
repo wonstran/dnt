@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 import re
 from collections import Counter
@@ -33,6 +35,7 @@ from .primitives import (
     occlusion_flags,
     speeds_hps,
 )
+from .review import write_review
 from .screen import ScreenContext, propose_orphans, propose_screen
 from .switch import propose_splits
 from .verify import Band, VLMRouting, decide, route_with_vlm, route_without_vlm
@@ -108,6 +111,13 @@ def check_output_paths(out, inputs: dict) -> None:
                     f"{out_name} ({out_path}) is {in_name} ({in_path}); refine would overwrite "
                     "its input. Write the output to another path."
                 )
+    review_dir = output_paths(out)["review"].with_suffix("")  # OUT.review
+    for in_name, in_path in inputs.items():
+        if in_path is not None and review_dir.resolve() in Path(in_path).resolve().parents:
+            raise ValueError(
+                f"{in_name} ({in_path}) is inside the review image directory ({review_dir}); "
+                "refine would overwrite or delete it. Move the input or write the output elsewhere."
+            )
 
 
 def _file_record(path, sha256: str | None = None, **extra) -> dict:
@@ -631,6 +641,19 @@ class TrackRefiner:
             "hints": None if reclass_file is None else {"reclass": _file_record(reclass_file)},
             "features": None,
         }
+        run_key = hashlib.sha256(
+            json.dumps(
+                {
+                    "tracks": track_sha,
+                    "context": context_sha,
+                    "video": (inputs["video"] or {}).get("fingerprint"),
+                    "hints": ((inputs["hints"] or {}).get("reclass") or {}).get("sha256"),
+                    "config": cfg.to_dict(),
+                },
+                sort_keys=True,
+                default=str,
+            ).encode()
+        ).hexdigest()
         before = table_summary(work, fps_val)
         appearance, store = self._appearance(
             work,
@@ -682,6 +705,18 @@ class TrackRefiner:
             sha = store.save(paths["features"])
             inputs["features"] = _file_record(paths["features"], sha, cache_key=store.key)
         work, id_map = renumber(work)
+        review_path = write_review(
+            events,
+            review_path=paths["review"],
+            evidence=stages.evidence,
+            id_map=id_map,
+            fps=fps_val,
+            video_file=None if video_file is None else str(Path(video_file).resolve()),
+            track_file=out,
+            reclass_map=cfg.reclass_map,
+            title=out.stem,
+            run_key=run_key,
+        )
         summary = {
             "before": before,
             "after": table_summary(work, fps_val),
@@ -715,7 +750,7 @@ class TrackRefiner:
         self.last_result = RefineResult(
             tracks=tracks,
             ledger_path=paths["ledger"],
-            review_path=None,
+            review_path=review_path,
             summary=summary,
             events=events,
         )

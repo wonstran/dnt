@@ -86,8 +86,9 @@ def test_success_prints_json_with_out_ledger_and_summary(tmp_path, capsys):
                             "--config", _cfg(tmp_path), "--out", out)
     assert code == 0
     doc = json.loads(stdout)
-    assert set(doc) == {"out", "ledger", "summary"}
+    assert set(doc) == {"out", "ledger", "review", "summary"}
     assert doc["out"] == str(out) and doc["ledger"] == str(tmp_path / "o.ledger.jsonl")
+    assert doc["review"] is None  # nothing is pending in this scene, so there is no review page
     assert doc["summary"]["after"]["tracks"] == 1  # the two fragments are linked
     assert len(pd.read_csv(out, header=None)) == 90 - 46 + 40 + 6  # 6 filled rows
 

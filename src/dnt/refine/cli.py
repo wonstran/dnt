@@ -58,7 +58,12 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     print(
         json.dumps(
-            {"out": args.out, "ledger": str(res.ledger_path), "summary": res.summary},
+            {
+                "out": args.out,
+                "ledger": str(res.ledger_path),
+                "review": None if res.review_path is None else str(res.review_path),
+                "summary": res.summary,
+            },
             indent=2,
             default=str,
         )

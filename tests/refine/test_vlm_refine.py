@@ -233,3 +233,61 @@ def test_backend_none_changes_nothing(tmp_path):
     assert refiner.last_result.summary["vlm"] == {
         "calls": 0, "retries": 0, "cache_hits": 0, "failures": 0, "budget_skipped": 0
     }
+
+
+def test_refine_writes_the_review_for_pending_events_and_records_the_image(tmp_path):
+    src, video = takeover_scene(tmp_path)
+    res = run(tmp_path, cfg_for(tmp_path), FakeBackend({"SPLIT": reply("unsure")}), src, video)
+    assert res.review_path == tmp_path / "o.review.html" and res.review_path.is_file()
+    (ev,) = splits(res)
+    html = res.review_path.read_text()
+    assert f'data-id="{ev.id}"' in html and (tmp_path / "o.review" / f"{ev.id}.jpg").is_file()
+    led = Ledger.read(res.ledger_path)
+    (back,) = [e for e in led.events if e.kind is EventKind.SPLIT]
+    assert back.vlm["evidence"] == f"o.review/{ev.id}.jpg"
+
+
+def test_the_review_snippet_names_the_renumbered_output_tracks(tmp_path):
+    # raw id 7 becomes output id 1; the snippet must point at the id the output file holds
+    src, video = takeover_scene(tmp_path, first_id=7)
+    res = run(tmp_path, cfg_for(tmp_path), FakeBackend({"SPLIT": reply("unsure")}), src, video)
+    html = res.review_path.read_text()
+    assert "track_ids=[1]" in html and "track_ids=[]" not in html and "track_ids=[7]" not in html
+    assert sorted(res.tracks.track.unique()) == [1]
+
+
+def test_regenerating_a_review_for_other_inputs_changes_the_run_and_card_keys(tmp_path):
+    def keys(html):
+        return html.split('data-run="')[1].split('"')[0], html.split('data-key="')[1].split('"')[0]
+
+    src, video = takeover_scene(tmp_path)
+    run(tmp_path, cfg_for(tmp_path), FakeBackend({"SPLIT": reply("unsure")}), src, video)
+    first = (tmp_path / "o.review.html").read_text()
+    # the same output name and the same event id (switch-r0-000001), but another track file
+    src2, video2 = takeover_scene(tmp_path, name="u.txt", video="w.mp4", first_id=5)
+    res = run(tmp_path, cfg_for(tmp_path), FakeBackend({"SPLIT": reply("unsure")}), src2, video2)
+    second = res.review_path.read_text()
+    assert 'data-id="switch-r0-000001"' in first and 'data-id="switch-r0-000001"' in second
+    assert keys(first)[0] != keys(second)[0]  # the run key (what localStorage is namespaced by)
+    assert keys(first)[1] != keys(second)[1]  # the proposal key (what each saved choice is checked by)
+
+
+def test_the_review_lists_exactly_the_pending_events(tmp_path):
+    src, video = takeover_scene(tmp_path)
+    res = run(tmp_path, cfg_for(tmp_path), FakeBackend({"SPLIT": reply("different")}), src, video)
+    pend = [e for e in res.events if e.decision is Decision.HUMAN_PENDING
+            and e.kind not in (EventKind.FILL, EventKind.SMOOTH)]
+    if pend:
+        html = res.review_path.read_text()
+        assert html.count('class="card"') == len(pend)
+        assert all(f'data-id="{e.id}"' in html for e in pend)
+    else:
+        assert res.review_path is None and not (tmp_path / "o.review.html").exists()
+
+
+def test_a_run_without_a_video_still_writes_a_signals_only_review(tmp_path):
+    src, _ = takeover_scene(tmp_path)
+    refiner = TrackRefiner(cfg_for(tmp_path))
+    refiner.refine(src, tmp_path / "o.txt", fps=10, verbose=False)
+    html = refiner.last_result.review_path.read_text()
+    assert "<img" not in html and "no image" in html
