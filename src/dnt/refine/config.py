@@ -70,7 +70,6 @@ class EncoderConfig:
     sample_every: int = 5
     occlusion_iou: float = 0.3
     batch_size: int = 64
-    min_crop_px: int = 40
 
 
 @dataclass(kw_only=True)
@@ -95,6 +94,7 @@ class SwitchConfig:
     bimodal_purity: float = 0.9
     bimodal_silhouette_min: float = 0.25
     swap_boost: float = 0.2
+    min_crop_px: int = 40
     ramps: dict[str, list[float]] = field(
         default_factory=lambda: {
             "z_app": [2.0, 5.0],
@@ -186,6 +186,7 @@ class LinkConfig:
     speed_seconds: float = 1.0
     heading_min_speed: float = 0.2
     n_alternatives: int = 2
+    min_crop_px: int = 0
 
 
 @dataclass(kw_only=True)
@@ -314,9 +315,10 @@ class RefineConfig:
             p.append(f"encoder.kind must be one of {ENCODERS}")
         if self.vlm.backend not in BACKENDS:
             p.append(f"vlm.backend must be one of {BACKENDS}")
-        mcp = self.encoder.min_crop_px
-        if isinstance(mcp, bool) or not isinstance(mcp, int) or mcp < 0:
-            p.append(f"encoder.min_crop_px must be a whole number of pixels >= 0, not {mcp!r}")
+        for name in ("switch", "link"):
+            mcp = getattr(self, name).min_crop_px
+            if isinstance(mcp, bool) or not isinstance(mcp, int) or mcp < 0:
+                p.append(f"{name}.min_crop_px must be a whole number of pixels >= 0, not {mcp!r}")
         if self.link.mode not in ("scored", "legacy"):
             p.append("link.mode must be 'scored' or 'legacy'")
         if self.context.format not in ("auto", "tracks", "dets"):

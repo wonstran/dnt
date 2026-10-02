@@ -433,17 +433,38 @@ def test_a_failed_cache_save_leaves_no_ledger_and_no_output(tmp_path, monkeypatc
     assert sorted(p.name for p in tmp_path.iterdir()) == ["t.txt", "v.mp4"]
 
 
-# ---- encoder.min_crop_px --------------------------------------------------------------------
+# ---- switch.min_crop_px and link.min_crop_px -----------------------------------------------
 
 
-def _small_scene(tmp_path, side=30.0, name="s.txt", video="s.mp4"):
-    """The takeover scene with boxes whose longer side is ``side`` px (same width ratio)."""
+def _small_scene(tmp_path, side=30.0, name="s.txt", video="s.mp4", fragment=False):
+    """The takeover scene with boxes whose longer side is ``side`` px (same width ratio).
+
+    With ``fragment``, a second small red object below it is cut into tracks 2 and 3 by a
+    three-frame gap: a link candidate.
+    """
     red = box_rows(1, range(60), 20.0, 100.0, vx=2.0, w=side / 2, h=side)
     blue = box_rows(1, range(60, 120), 140.0, 100.0, vx=2.0, w=side * 0.875, h=side)
-    vid = make_color_video(tmp_path / video, video_rows(red, RED) + video_rows(blue, BLUE), 120)
+    rows = red + blue
+    vrows = video_rows(red, RED) + video_rows(blue, BLUE)
+    if fragment:
+        a = box_rows(2, range(56), 20.0, 180.0, vx=2.0, w=side / 2, h=side)
+        b = box_rows(3, range(59, 120), 138.0, 180.0, vx=2.0, w=side / 2, h=side)
+        rows += a + b
+        vrows += video_rows(a + b, RED)
+    vid = make_color_video(tmp_path / video, vrows, 120)
     src = tmp_path / name
-    table(red + blue).to_csv(src, index=False, header=False)
+    table(rows).to_csv(src, index=False, header=False)
     return src, vid
+
+
+def _stage_cfg(switch=None, link=None, link_enabled=False):
+    cfg = _cfg()
+    cfg.link.enabled = link_enabled
+    if switch is not None:
+        cfg.switch.min_crop_px = switch
+    if link is not None:
+        cfg.link.min_crop_px = link
+    return cfg
 
 
 def test_a_takeover_of_small_boxes_is_not_split_from_appearance(tmp_path, caplog):
@@ -451,20 +472,22 @@ def test_a_takeover_of_small_boxes_is_not_split_from_appearance(tmp_path, caplog
     enc = ColorEncoder()
     with caplog.at_level("INFO", logger="dnt.refine.refiner"):
         res = _run(src, tmp_path / "o.txt", video, enc)
-    # no crop is clean, so stage 1 has no appearance samples for the track and skips it
-    assert enc.calls == 0
+    # every clean crop is embedded (link.min_crop_px 0), but stage 1 sees none of them, so it
+    # has no appearance samples for the track and skips it: no SPLIT event at all
+    assert enc.crops > 0
     assert not [e for e in res.events if e.kind is EventKind.SPLIT]
     assert res.tracks["track"].nunique() == 1
-    assert "0 coarse samples are clean; 24 more are not embedded" in caplog.text
-    assert "encoder.min_crop_px = 40 px" in caplog.text
+    log = caplog.text
+    assert "switch uses 0 clean coarse samples; 24 more are smaller" in log
+    assert "than switch.min_crop_px = 40 px" in log
+    assert "link uses 24 clean coarse samples; 0 more are smaller than link.min_crop_px = 0" in log
 
 
-def test_min_crop_px_zero_splits_the_small_takeover_from_appearance_as_before(tmp_path):
+def test_switch_min_crop_px_zero_splits_the_small_takeover_from_appearance(tmp_path):
     src, video = _small_scene(tmp_path)
-    enc = ColorEncoder()
-    res = _run(src, tmp_path / "o.txt", video, enc, cfg=_cfg(min_crop_px=0))
+    res = _run(src, tmp_path / "o.txt", video, ColorEncoder(), cfg=_stage_cfg(switch=0))
     splits = [e for e in res.events if e.kind is EventKind.SPLIT]
-    assert enc.crops > 0 and len(splits) == 1
+    assert len(splits) == 1
     ev = splits[0]
     assert ev.params["cut_frame"] == 60 and ev.signals["motion_only"] is False
     assert ev.decision is Decision.AUTO_ACCEPT and ev.applied
@@ -474,40 +497,82 @@ def test_min_crop_px_zero_splits_the_small_takeover_from_appearance_as_before(tm
 
 def test_a_takeover_with_a_longer_side_of_exactly_min_crop_px_is_still_split(tmp_path):
     src, video = _small_scene(tmp_path, side=40.0)
-    res = _run(src, tmp_path / "o.txt", video, ColorEncoder(), cfg=_cfg(min_crop_px=40))
+    res = _run(src, tmp_path / "o.txt", video, ColorEncoder())  # switch.min_crop_px 40
     splits = [e for e in res.events if e.kind is EventKind.SPLIT]
     assert [(e.params["cut_frame"], e.decision) for e in splits] == [(60, Decision.AUTO_ACCEPT)]
 
 
-def test_min_crop_px_is_in_the_cache_key_and_the_ledger_header(tmp_path):
-    src, video = _scene(tmp_path)
-    r1 = _run(src, tmp_path / "o.txt", video, ColorEncoder())
-    h1 = _header(r1)
-    assert h1["config"]["encoder"]["min_crop_px"] == 40
-    enc = ColorEncoder()
-    r2 = _run(src, tmp_path / "o.txt", video, enc, cfg=_cfg(min_crop_px=0))
-    h2 = _header(r2)
-    assert h2["config"]["encoder"]["min_crop_px"] == 0
-    assert h2["inputs"]["features"]["cache_key"] != h1["inputs"]["features"]["cache_key"]
-    assert enc.crops > 0  # the cache of the first run is not reused
+def _recording(monkeypatch):
+    from dnt.refine import refiner as refiner_mod
+
+    seen = {}
+    real_split, real_link = refiner_mod.propose_splits, refiner_mod.run_link_stage
+
+    def split(work, cfg, fps, appearance=None):
+        seen["switch"] = appearance
+        return real_split(work, cfg, fps, appearance)
+
+    def link(*args, **kwargs):
+        seen["link"] = kwargs["appearance"]
+        return real_link(*args, **kwargs)
+
+    monkeypatch.setattr(refiner_mod, "propose_splits", split)
+    monkeypatch.setattr(refiner_mod, "run_link_stage", link)
+    return seen
 
 
-def test_a_link_between_small_tracks_scores_with_unknown_appearance(tmp_path):
+def test_stage_1_uses_the_switch_view_and_stage_3_the_link_view(tmp_path, monkeypatch):
+    seen = _recording(monkeypatch)
+    src, video = _small_scene(tmp_path, fragment=True)
+    res = _run(src, tmp_path / "o.txt", video, ColorEncoder(), cfg=_stage_cfg(link_enabled=True))
+    assert seen["switch"].min_crop_px == 40 and seen["link"].min_crop_px == 0
+    assert seen["switch"].provider is seen["link"].provider
+    # stage 1 has no appearance sample of the small boxes: no split of the takeover
+    assert not [e for e in res.events if e.kind is EventKind.SPLIT]
+    # stage 3 still compares the small crops: a real c_app (same color), not the unknown 0.5
+    links = [e for e in res.events if e.kind is EventKind.LINK]
+    assert [e.tracks for e in links] == [[2, 3]]
+    assert links[0].signals["motion_only"] is False and links[0].signals["c_app"] < 0.05
+
+
+def test_link_min_crop_px_leaves_the_link_with_unknown_appearance(tmp_path):
     import math
 
-    a = box_rows(1, range(60), 20.0, 100.0, vx=2.0, w=15.0, h=30.0)
-    b = box_rows(2, range(63, 120), 146.0, 100.0, vx=2.0, w=15.0, h=30.0)
-    video = make_color_video(tmp_path / "v.mp4", video_rows(a + b, RED), 120)
-    src = tmp_path / "t.txt"
-    table(a + b).to_csv(src, index=False, header=False)
-    cfg = _cfg()
-    cfg.link.enabled = True
+    src, video = _small_scene(tmp_path, fragment=True)
+    cfg = _stage_cfg(link=40, link_enabled=True)
     enc = ColorEncoder()
     res = _run(src, tmp_path / "o.txt", video, enc, cfg=cfg)
-    links = [e for e in res.events if e.kind is EventKind.LINK]
-    assert enc.calls == 0 and len(links) == 1
-    ev = links[0]
-    # no clean embedding on either side: c_app is the neutral 0.5 of spec 6.3, not motion-only
-    assert ev.signals["motion_only"] is False and ev.signals["c_app"] == 0.5
+    assert enc.calls == 0  # both stages need 40 px, so nothing smaller is embedded
+    ev = next(e for e in res.events if e.kind is EventKind.LINK)
+    assert ev.tracks == [2, 3] and ev.signals["motion_only"] is False
+    assert ev.signals["c_app"] == 0.5  # spec 6.3: no clean embedding on a side
     assert math.isfinite(ev.algo_score) and math.isfinite(ev.signals["S_link"])
-    assert ev.decision is not Decision.AUTO_REJECT
+
+
+def test_a_provider_without_views_is_used_unchanged_by_both_stages(tmp_path, monkeypatch):
+    from dnt.refine.features import ArrayAppearance
+
+    seen = _recording(monkeypatch)
+    src, video = _small_scene(tmp_path, fragment=True)
+    app = ArrayAppearance({1: ([0], [[1.0, 0.0, 0.0]])})
+    refiner = TrackRefiner(_stage_cfg(link_enabled=True), appearance_factory=lambda **kw: app)
+    refiner.refine(src, tmp_path / "o.txt", video_file=video, verbose=False)
+    assert seen["switch"] is app and seen["link"] is app
+
+
+def test_the_cache_key_records_only_the_smallest_stage_min_crop_px(tmp_path):
+    src, video = _scene(tmp_path)
+
+    def run(cfg, enc=None):
+        enc = enc or ColorEncoder()
+        h = _header(_run(src, tmp_path / "o.txt", video, enc, cfg=cfg))
+        return h, enc
+
+    h1, _ = run(_stage_cfg())
+    assert h1["config"]["switch"]["min_crop_px"] == 40 and h1["config"]["link"]["min_crop_px"] == 0
+    assert "min_crop_px" not in h1["config"]["encoder"]
+    key1 = h1["inputs"]["features"]["cache_key"]
+    h2, enc2 = run(_stage_cfg(switch=50))  # the smallest is still link's 0: same embeddings
+    assert h2["inputs"]["features"]["cache_key"] == key1 and enc2.calls == 0
+    h3, enc3 = run(_stage_cfg(link=10))  # now the smallest is 10: another cache
+    assert h3["inputs"]["features"]["cache_key"] != key1 and enc3.crops > 0

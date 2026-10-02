@@ -40,13 +40,14 @@
   (`refine` does it before the stage; `score_candidates` called directly now expects `context`
   without them), so a detection file of the same run is supported as context: on three real
   pedestrian clips the share of rows flagged as occluded fell from about 20% to 7-11%.
-- `refine` no longer embeds boxes whose longer side is below `encoder.min_crop_px` (new, default
-  40 px; `0` embeds every box). Such boxes are treated like occluded ones: stage 1 looks for ID
-  switches only where a track has larger boxes, and stage 3 scores a link whose ends have no
-  clean crop with appearance unknown. Encoders see these crops upsampled many times: on three
-  real 640x480 pedestrian clips, the two ID-switch splits applied on one clip both came from
-  such crops and each cut a single pedestrian; with the rule neither is proposed. The feature
-  cache key includes the setting and `FEATURES_VERSION` is now 3, so caches of earlier runs
+- Stage 1 ignores the appearance of boxes whose longer side is below `switch.min_crop_px` (new,
+  default 40 px), and stage 3 of those below `link.min_crop_px` (new, default 0: every clean
+  crop); `0` turns a stage's filter off. A track whose boxes are all smaller gets no ID-switch
+  proposal at all, and a link whose ends have no crop left is scored with appearance unknown.
+  On three real 640x480 pedestrian clips, the two ID-switch splits applied on one clip came
+  from small crops and each cut a single pedestrian (with the new default neither is
+  proposed), while most links scored from small crops were correct. The feature cache key now
+  includes the smaller of the two values and `FEATURES_VERSION` is 3, so caches of earlier runs
   are recomputed.
 
 ## 0.3.4 — 2026-10-01

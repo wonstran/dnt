@@ -155,31 +155,40 @@ def test_a_null_fill_max_gap_and_small_positive_durations_are_valid():
     assert cfg.fill.max_gap is None and cfg.link.max_passes == 1
 
 
-# ---- encoder.min_crop_px --------------------------------------------------------------------
+# ---- switch.min_crop_px and link.min_crop_px ------------------------------------------------
 
 
-def test_min_crop_px_defaults_to_40_and_round_trips_through_yaml(tmp_path):
+def test_min_crop_px_defaults_per_stage_and_round_trips_through_yaml(tmp_path):
     for target in ("person", "vehicle"):
         cfg = RefineConfig.defaults(target)
-        assert cfg.encoder.min_crop_px == 40
+        assert cfg.switch.min_crop_px == 40 and cfg.link.min_crop_px == 0
+        assert not hasattr(cfg.encoder, "min_crop_px")
         cfg.to_yaml(tmp_path / "c.yaml")
-        text = (tmp_path / "c.yaml").read_text()
-        assert "min_crop_px: 40" in text
+        data = yaml.safe_load((tmp_path / "c.yaml").read_text())
+        assert data["switch"]["min_crop_px"] == 40 and data["link"]["min_crop_px"] == 0
+        assert "min_crop_px" not in data["encoder"]
         back = RefineConfig.from_yaml(tmp_path / "c.yaml")
-        assert back == cfg and back.encoder.min_crop_px == 40
-    assert RefineConfig.from_dict({"encoder": {"min_crop_px": 0}}).encoder.min_crop_px == 0
-    assert RefineConfig.from_dict({"encoder": {"min_crop_px": 64}}).encoder.min_crop_px == 64
+        assert back == cfg
+    cfg = RefineConfig.from_dict({"switch": {"min_crop_px": 0}, "link": {"min_crop_px": 64}})
+    assert cfg.switch.min_crop_px == 0 and cfg.link.min_crop_px == 64
 
 
+def test_encoder_min_crop_px_is_not_a_config_key():
+    with pytest.raises(ValueError, match=r"unknown config key 'encoder\.min_crop_px'"):
+        RefineConfig.from_dict({"encoder": {"min_crop_px": 40}})
+
+
+@pytest.mark.parametrize("stage", ["switch", "link"])
 @pytest.mark.parametrize("value", [-1, 2.5, 40.0, True, "40", None])
-def test_min_crop_px_must_be_a_non_negative_int(value):
-    with pytest.raises(ValueError, match=r"encoder\.min_crop_px"):
-        RefineConfig.from_dict({"encoder": {"min_crop_px": value}})
+def test_min_crop_px_must_be_a_non_negative_int(stage, value):
+    with pytest.raises(ValueError, match=rf"{stage}\.min_crop_px"):
+        RefineConfig.from_dict({stage: {"min_crop_px": value}})
 
 
+@pytest.mark.parametrize("stage", ["switch", "link"])
 @pytest.mark.parametrize("value", [-1, 2.5, True, "40", None])
-def test_a_directly_assigned_min_crop_px_is_validated(value):
+def test_a_directly_assigned_min_crop_px_is_validated(stage, value):
     cfg = RefineConfig.defaults()
-    cfg.encoder.min_crop_px = value
-    with pytest.raises(ValueError, match=r"encoder\.min_crop_px must be a whole number of pixels"):
+    getattr(cfg, stage).min_crop_px = value
+    with pytest.raises(ValueError, match=rf"{stage}\.min_crop_px must be a whole number of pixels"):
         cfg.validate()

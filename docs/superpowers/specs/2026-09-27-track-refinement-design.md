@@ -405,7 +405,7 @@ For each stage, `accept_above` and `reject_below`, with `reject_below < accept_a
 
 - The encoder embeds a crop every `encoder.sample_every` observed frames (default 5). Stage 1 finds candidates on these coarse samples, then embeds every observed frame within ±`switch.window` of each candidate and recomputes that candidate's score on the dense samples.
 - A crop is used only if the box's maximum IoU with every other box in that frame (in the input file and in the context file) is below `encoder.occlusion_iou` (default 0.3). Crops that fail are marked `occluded` and excluded from appearance statistics.
-- A crop is also used only if the box's longer side, `max(w, h)` in pixels as in the track file, is at least `encoder.min_crop_px` (default 40; `0` turns the rule off). A smaller box is treated exactly like an occluded one: it is not cropped or embedded, is not recorded as a skipped crop, and still counts for the ordinals of the coarse samples. Stage 1 then skips tracks and sides without enough clean samples (section 6.1), and stage 3 uses `c_app = 0.5` when a side has no clean embedding (section 6.3). Pretrained encoders see such crops upsampled many times; on 640x480 pedestrian footage, where most boxes were smaller, splits found from them cut single pedestrians. `refine` logs at INFO how many coarse samples the rule drops and how many clean ones remain.
+- **Minimum box size, per stage.** Stage 1 ignores the appearance samples of boxes whose longer side, `max(w, h)` in pixels as in the track file, is below `switch.min_crop_px` (default 40). Stage 3 does the same with `link.min_crop_px` (default 0: every clean crop). `0` turns a stage's filter off. In that stage a filtered row is treated like an occluded one, and the coarse ordinals still count every observed row. Stage 1 skips a track or side without enough samples, so a track of small boxes gets no `SPLIT` event at all (section 6.1). Stage 3 uses `c_app = 0.5` for a side without samples (section 6.3). Rows below the smaller of the two values are never embedded. The other rows are embedded whichever stage asks for them, so the cache does not depend on the stages' filters beyond that smallest value. On three 640x480 pedestrian clips, the ID-switch splits found from small crops cut single pedestrians, while most audited links scored from small crops were correct; hence the two defaults. `refine` logs at INFO how many coarse samples each stage uses and how many its filter leaves out.
 - The mask is computed from the **raw** input boxes and the context boxes. It does not change when decisions change, so embeddings stay valid across re-proposals.
 - Embeddings are L2-normalized.
 - **The embedded samples do not depend on decisions.** They are the coarse samples, which depend only on the raw tracks and `sample_every`, plus the dense samples around every stage 1 candidate, whatever its decision. Stage 1's proposals are deterministic and never change on replay. So the cache that `refine` writes covers every embedding any replay can request, including the first and last clean samples of tails created by splits that are accepted later.
@@ -414,7 +414,7 @@ For each stage, `accept_above` and `reject_below`, with `reject_below < accept_a
   - the video's **fingerprint**: the SHA-256 of the **entire file**, read in 8 MiB chunks, plus the file size and frame count;
   - the context file's SHA-256, or `none`;
   - encoder kind, model name, and a digest of the weights actually loaded (the SHA-256 of the weights file; for a Hub model, which has no file path, the SHA-256 of the loaded parameters, so a model name that later resolves to different weights misses the cache);
-  - `sample_every`, `occlusion_iou` and `min_crop_px`;
+  - `sample_every`, `occlusion_iou`, and the smallest embedded box size, `min(switch.min_crop_px, link.min_crop_px)`;
   - crop preprocessing: padding factor, resize target, and normalization;
   - `FEATURES_VERSION`, a constant bumped whenever the crop or embedding code changes.
 
@@ -870,7 +870,6 @@ encoder:
   sample_every: 5
   occlusion_iou: 0.3
   batch_size: 64
-  min_crop_px: 40            # boxes whose longer side (px) is smaller are not embedded; 0: off
 screen:
   enabled: true
   accept_above: 0.85
@@ -892,6 +891,7 @@ switch:
   motion_only_cap: 0.70
   class_change_gate: true
   size_gate: 1.5
+  min_crop_px: 40            # appearance of boxes with a smaller longer side (px) is ignored
 link:
   enabled: true
   mode: scored               # scored | legacy (§6.3)
@@ -919,6 +919,7 @@ link:
   legacy_weights: {d: 1.0, iou: 1.0, s: 0.3}
   legacy_cost_hi: 3.0
   weights: {mot: 0.45, app: 0.40, gap: 0.15}
+  min_crop_px: 0             # as switch.min_crop_px, for stage 3; 0: every clean crop
 orphan:
   enabled: true
   min_seconds: 0.5
@@ -953,6 +954,7 @@ vlm:
 - No class appears in more than one `link.class_groups` group.
 - `screen.mixed_score_cap < screen.accept_above`, `link.ambiguous_cap < link.accept_above`, and `screen.segment_at < switch.reject_below`.
 - `reid` with the `vehicle` target has `weights` set.
+- `switch.min_crop_px` and `link.min_crop_px` are integers `>= 0`.
 - A non-`none` VLM backend has `model` set (except `anthropic`, which has a default).
 
 **Deferred until `refine` or `apply` starts, and only for components the run will use** (§5.5): the encoder's extra (needed only with a video and `encoder.kind` other than `none`) and the VLM backend's extra (needed only with a non-`none` backend and a video).

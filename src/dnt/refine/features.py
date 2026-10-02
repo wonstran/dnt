@@ -18,7 +18,7 @@ log = logging.getLogger(__name__)
 
 #: Bumped whenever the crop or embedding code changes, so old caches are not reused.
 #: Version 2 added the keys of skipped (empty or unreadable) crops to the file.
-#: Version 3 stopped embedding boxes smaller than ``encoder.min_crop_px`` (part of the key).
+#: Version 3 added the smallest embedded box size (``min_crop_px``) to the key.
 FEATURES_VERSION = 3
 
 
@@ -149,7 +149,8 @@ def features_key(
     sample_every, occlusion_iou, crop_pad : float
         Sampling stride, occlusion threshold, and crop padding.
     min_crop_px : int
-        Minimum longer box side, in pixels, of an embedded crop (``0``: no minimum).
+        Minimum longer box side, in pixels, of an embedded crop (``0``: no minimum); the
+        smallest of the stages' values, never a stage's own filter.
 
     Returns
     -------
