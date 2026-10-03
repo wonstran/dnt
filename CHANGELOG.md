@@ -14,20 +14,85 @@
   `torchreid` package and in deep-person-reid installed from GitHub
   (`pip install git+https://github.com/KaiyangZhou/deep-person-reid.git`), the alternative when
   the PyPI package does not provide it.
+- VLM verification. With a video and `vlm.backend` set to `openai_compat` (any OpenAI-compatible
+  server, such as vLLM or Ollama) or `anthropic`, `refine` builds an evidence image for each
+  ID-switch split, link, false-track drop, or reclass in the uncertain band (and for each rider
+  reclass without a subtype) and asks the model to choose an option. A confident answer decides
+  the event (`VLM_ACCEPT` or `VLM_REJECT`) and can redirect the edit, for example a static drop
+  into a reclass; a rider reclass that lacked a subtype is recorded as `AUTO_ACCEPT` with the
+  subtype set; `unsure`, a low confidence (`vlm.min_conf`), a vote tie, or any error leaves
+  it `HUMAN_PENDING`. `vlm.max_calls` is a hard limit on requests, retries included; answers are
+  cached under `vlm.cache_dir`; `vlm.votes` asks a question several times. Questions are
+  admitted to the budget closest-to-the-band-middle first within each stage (switch, screen,
+  each link pass), earlier stages first; raise `max_calls` rather than expecting a global order. The run summary has
+  a `vlm` entry with `calls`, `retries`, `cache_hits`, `failures`, `budget_skipped`, and
+  `no_evidence` (events not asked because no evidence image could be made). Events
+  left pending, with or without a backend, are collected on a static review page,
+  `OUT.review.html` (signals only without a video), with their images in `OUT.review/`;
+  **Export decisions** downloads `decisions.json`, which a later release will apply. Each entry
+  is an object, `{"accept": true|false, "new_cls": N (only when a class was picked),
+  "proposal_key": ..., "run_key": ...}`: event IDs are reused after a rerun, and `apply` will
+  refuse or warn when a key does not match the ledger. `"accept"`, `"reject"`, and
+  `{"accept": true, "new_cls": N}` stay valid in hand-written files. New extra: `pip install 'dnt[refine-vlm]'` (`openai` and `anthropic`; also part of
+  `'dnt[refine]'`). Neither is a required dependency. See "Verification with a VLM" in the
+  Track Refinement docs.
+- Several VLM endpoints in one config: `vlm.endpoints` names them and `vlm.use` picks one
+  (each may set `backend`, `base_url`, `model`, `api_key_env`, `api_key_file`, `max_tokens`, `extra_body`).
+  `TrackRefiner` also reads `./.env` and the `.env` beside its config file, without overriding
+  variables that are already set. `vlm.max_tokens` sets the output limit (default 1024 for
+  `openai_compat`, which used to send a fixed 300); a reply cut off before its answer now names
+  `max_tokens` in the error. `vlm.extra_body` passes provider switches (such as turning reasoning off) in every
+  `openai_compat` request.
+- VLM endpoint and key. `vlm.base_url` sets the endpoint of both backends (an OpenAI-compatible
+  server, or a proxy or gateway in front of Anthropic); it must be an `http://` or `https://` URL
+  with a valid host and port and without whitespace, a user name, password, query string, or
+  fragment. The `anthropic` backend now honours `base_url` (it used to ignore it), so a
+  `base_url` left in an older `backend: anthropic` config takes effect. A key sent over plain
+  `http://` to a host other than this machine logs a warning. The key comes from
+  `TrackRefiner(..., vlm_api_key=...)`, else from the file `vlm.api_key_file` names, else from
+  the variable `vlm.api_key_env` names (`OPENAI_API_KEY` or `ANTHROPIC_API_KEY` by default); it
+  must be one line of printable ASCII without whitespace (a key file's surrounding whitespace and
+  byte order mark are stripped; a quoted key and a `NAME=value`, `NAME=` or `NAME==value` line
+  are rejected), and it is never written to the config, the ledger, the summary, or a log line.
+  This also applies to the default `OPENAI_API_KEY` and `ANTHROPIC_API_KEY` variables: a value
+  with internal whitespace, a newline, quotes, or non-ASCII characters is now an error when the
+  backend is built at the start of `refine` (a blank value counts as unset). `openai_compat` without `base_url` and without
+  a key now fails before the run instead of calling api.openai.com with a placeholder.
+  `dnt-refine run` takes `--vlm-backend`, `--vlm-model`, `--vlm-base-url`, `--vlm-api-key-env`,
+  and `--vlm-api-key-file`, applied to the `--config` file before it is checked; switching the
+  backend with `--vlm-backend` drops the file's `model`, `base_url`, and key settings (a file
+  without a `backend` counts as `none`). There is
+  deliberately no option for the key itself (shell history, process list).
 - This release scores with motion only unless a video and an appearance encoder are given, and
   applies only the edits it is sure of: in-vehicle and duplicate false-track drops, rider
   reclasses whose subtype a ReClass hint settles, links across short gaps and static waits with
   a clear assignment margin, orphan drops, and filling. With an encoder, ID-switch splits and
-  links are also scored by appearance and applied when they score high enough. Other edits are
-  capped below auto-accept, recorded as `HUMAN_PENDING`, and not applied yet: ID-switch splits
-  found from motion alone, links across occlusions, links with an ambiguous assignment margin,
-  and false-track drops of static objects or of mixed tracks. Rider reclasses whose subtype no
-  ReClass hint settles are pending too, however high they score, because only a hint can choose
-  the subtype in this release. In-vehicle drops need a context file with the vehicles' boxes
-  (`context_file=`, or `--context`); without one the in-vehicle cue is skipped. VLM
-  verification, review pages, and applying review decisions follow in later releases.
+  links are also scored by appearance and applied when they score high enough. Without a VLM
+  backend (the default), other edits are capped below auto-accept, recorded as `HUMAN_PENDING`,
+  and not applied yet: ID-switch splits found from motion alone, links across occlusions, links
+  with an ambiguous assignment margin, and false-track drops of static objects or of mixed
+  tracks. Rider reclasses whose subtype no ReClass hint settles are pending too, however high
+  they score, unless a VLM backend names the subtype. With a VLM backend and a video, the VLM
+  decides these edits when it is sure; the rest stay `HUMAN_PENDING` and go on a review page.
+  In-vehicle drops need a context file with the vehicles' boxes (`context_file=`, or
+  `--context`); without one the in-vehicle cue is skipped. Applying review decisions follows in
+  a later release.
 
 ### Changed
+- With a VLM backend and a video, the edits that stay capped below auto-accept without one
+  (motion-only ID-switch splits, links across occlusions or with an ambiguous margin, static
+  and mixed false-track drops, and rider reclasses without a subtype) are decided by the VLM
+  when it is sure; the rest stay `HUMAN_PENDING`. With `vlm.backend: none` (the default), no
+  decision changes, but `refine` now writes the review page (`OUT.review.html`) for the pending
+  events, with their evidence images in `OUT.review/` when a video is given (the video is
+  decoded for those images). `vlm.max_calls` applies to each `refine()` call, so under
+  `refine_batch` it is a budget per video (each video gets its own runner; the answer cache is
+  shared). The `refine` extra now also installs `openai` and `anthropic`; the new `refine-vlm`
+  extra installs just those two.
+- Config validation now rejects bad `vlm` settings: `votes` below 1, `min_conf` outside [0, 1],
+  a negative `max_calls`, `max_concurrency` below 1, `timeout_s` or `vote_temperature` out of
+  range, an empty `cache_dir`, and an `api_key_env` that is not an environment variable name
+  (a pasted key; the message never repeats the value).
 - The `refine-reid` and `refine` extras now also install `tensorboard`, which PyPI torchreid
   imports but does not declare.
 - `refine` with a video now needs the encoder's package (`pip install 'dnt[refine-dino]'`) or

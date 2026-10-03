@@ -3,19 +3,25 @@
 from __future__ import annotations
 
 import copy
+import json
 import math
 import os
+import re
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass, field, fields, is_dataclass
 from pathlib import Path
-from typing import get_args, get_origin, get_type_hints
+from typing import Any, get_args, get_origin, get_type_hints
+from urllib.parse import urlsplit
 
 import yaml
 
 TARGETS = ("person", "vehicle")
 ENCODERS = ("dino", "reid", "none")
-_ENDPOINT_KEYS = {"backend", "base_url", "model", "api_key_env"}
+_ENDPOINT_KEYS = {
+    "backend", "base_url", "model", "api_key_env", "api_key_file", "max_tokens", "extra_body"
+}
 BACKENDS = ("none", "openai_compat", "anthropic")
+_ENV_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 _FIXED_KEY_DICTS = {"ramps", "weights", "weights_occluded", "legacy_weights", "reclass_map"}
 _RAMP_DICTS = {"ramps", "ramp", "reclass_ramp"}
 _RAMP_FIELDS = {"orphan.ramp", "hints.reclass_ramp"}
@@ -51,6 +57,25 @@ def load_env_file(path) -> bool:
             value = value[1:-1]
         os.environ.setdefault(key, value)
     return True
+
+
+def _json_ok(value) -> bool:
+    """Return True if ``value`` is plain JSON data (str keys; no NaN or infinity)."""
+    try:
+        json.dumps(value, allow_nan=False)
+    except (TypeError, ValueError):
+        return False
+    return all(isinstance(k, str) for k in _keys(value))
+
+
+def _keys(value):
+    if isinstance(value, dict):
+        for k, v in value.items():
+            yield k
+            yield from _keys(v)
+    elif isinstance(value, list):
+        for v in value:
+            yield from _keys(v)
 
 
 def to_frames(seconds: float, fps: float) -> int:
@@ -245,12 +270,31 @@ class FillConfig:
 
 @dataclass(kw_only=True)
 class VLMConfig:
-    """VLM verification settings (spec 7); used from Plan 3 on."""
+    """VLM verification settings (spec 7); used from Plan 3 on.
+
+    Attributes
+    ----------
+    base_url : str or None
+        The endpoint of either backend: an OpenAI-compatible server for ``openai_compat``, or a
+        proxy or gateway for ``anthropic`` (None: the vendor's endpoint). An ``http://`` or
+        ``https://`` URL with a host and a valid port, without whitespace, a user name,
+        password, query string, or fragment.
+    api_key_env : str or None
+        The name of the environment variable that holds the key (None: ``OPENAI_API_KEY`` or
+        ``ANTHROPIC_API_KEY``).
+    api_key_file : str or None
+        The path of a file whose content (stripped) is the key: one line of printable ASCII
+        without whitespace; ``~`` is expanded. It takes
+        precedence over ``api_key_env``, and ``TrackRefiner(vlm_api_key=...)`` over both. The
+        config holds no key itself, since it is copied into the ledger header.
+
+    """
 
     backend: str = "none"
     base_url: str | None = None
     model: str | None = None
     api_key_env: str | None = None
+    api_key_file: str | None = None
     json_mode: bool = True
     min_conf: float = 0.7
     votes: int = 1
@@ -258,6 +302,8 @@ class VLMConfig:
     max_calls: int = 500
     max_concurrency: int = 4
     timeout_s: float = 60.0
+    max_tokens: int | None = None
+    extra_body: dict[str, Any] = field(default_factory=dict)
     send_context_frames: bool = True
     cache_dir: str = "~/.cache/dnt/vlm"
     endpoints: dict[str, dict] = field(default_factory=dict)
@@ -266,8 +312,9 @@ class VLMConfig:
     def resolve(self) -> VLMConfig:
         """Return the settings with the endpoint named by ``use`` applied.
 
-        Each entry of ``endpoints`` may set ``backend``, ``base_url``, ``model`` and
-        ``api_key_env``; any other ``vlm`` setting is shared by all endpoints.
+        Each entry of ``endpoints`` may set ``backend``, ``base_url``, ``model``,
+        ``api_key_env``, ``api_key_file``, ``max_tokens`` and ``extra_body``; any other ``vlm``
+        setting is shared by all endpoints.
         With no ``use`` the settings are returned as they are.
 
         Returns
@@ -343,10 +390,7 @@ class RefineConfig:
     @classmethod
     def from_yaml(cls, path) -> RefineConfig:
         """Load a config from a YAML file."""
-        data = yaml.safe_load(Path(path).read_text(encoding="utf-8"))
-        if data is not None and not isinstance(data, Mapping):
-            raise ValueError(f"{path}: expected a mapping at the top level")
-        return cls.from_dict(data)
+        return cls.from_dict(read_yaml_mapping(path))
 
     def to_dict(self) -> dict:
         """Return the config as plain Python data."""
@@ -364,6 +408,10 @@ class RefineConfig:
         """
         if isinstance(self.encoder.weights, str) and not self.encoder.weights.strip():
             self.encoder.weights = None
+        for name in ("api_key_env", "api_key_file", "base_url"):
+            v = getattr(self.vlm, name)
+            if isinstance(v, str) and not v.strip():
+                setattr(self.vlm, name, None)  # "" from YAML: the default (variable, endpoint)
         p: list[str] = []
         if self.target not in TARGETS:
             p.append(f"target must be one of {TARGETS}")
@@ -422,6 +470,51 @@ class RefineConfig:
             p.append("encoder.weights is required for reid with the vehicle target")
         if vlm.backend not in ("none", "anthropic") and not vlm.model:
             p.append("vlm.model is required for this backend")
+        vl = vlm
+
+        def _num(x):
+            return isinstance(x, int | float) and not isinstance(x, bool) and math.isfinite(x)
+
+        if not (isinstance(vl.votes, int) and not isinstance(vl.votes, bool) and vl.votes >= 1):
+            p.append("vlm.votes must be an integer >= 1")
+        if not (_num(vl.min_conf) and 0.0 <= vl.min_conf <= 1.0):
+            p.append("vlm.min_conf must be a number in [0, 1]")
+        if not (
+            isinstance(vl.max_calls, int)
+            and not isinstance(vl.max_calls, bool)
+            and vl.max_calls >= 0
+        ):
+            p.append("vlm.max_calls must be an integer >= 0")
+        if not (
+            isinstance(vl.max_concurrency, int)
+            and not isinstance(vl.max_concurrency, bool)
+            and vl.max_concurrency >= 1
+        ):
+            p.append("vlm.max_concurrency must be an integer >= 1")
+        if not isinstance(vl.extra_body, dict) or not _json_ok(vl.extra_body):
+            p.append("vlm.extra_body must be a mapping of plain JSON values")
+        mt = vl.max_tokens
+        if mt is not None and not (isinstance(mt, int) and not isinstance(mt, bool) and mt >= 1):
+            p.append("vlm.max_tokens must be a whole number >= 1 (or unset)")
+        if not (_num(vl.timeout_s) and vl.timeout_s > 0):
+            p.append("vlm.timeout_s must be a number > 0")
+        if not (_num(vl.vote_temperature) and vl.vote_temperature >= 0):
+            p.append("vlm.vote_temperature must be a number >= 0")
+        if not (isinstance(vl.cache_dir, str) and vl.cache_dir.strip()):
+            p.append("vlm.cache_dir must be a non-empty string")
+        if vl.api_key_env is not None and not (
+            isinstance(vl.api_key_env, str) and _ENV_NAME.fullmatch(vl.api_key_env)
+        ):
+            # never echo the value: a key pasted here would land in the message and the ledger
+            p.append(
+                "vlm.api_key_env must be the name of an environment variable (letters, digits "
+                "and underscores, not starting with a digit), not the key itself"
+            )
+        p.extend(_url_problems(vl.base_url))
+        if vl.api_key_file is not None and not isinstance(vl.api_key_file, str):
+            p.append("vlm.api_key_file must be the path of a file that holds the key")
+        elif isinstance(vl.api_key_file, str) and vl.api_key_file.strip().startswith("sk-"):
+            p.append("vlm.api_key_file must be the path of a file that holds the key, not the key")
         ramps = {f"switch.ramps.{k}": v for k, v in self.switch.ramps.items()}
         ramps |= {f"screen.ramps.{k}": v for k, v in sc.ramps.items()}
         ramps |= {"orphan.ramp": self.orphan.ramp, "hints.reclass_ramp": self.hints.reclass_ramp}
@@ -461,6 +554,50 @@ class RefineConfig:
             p.append("hints.reclass_class_map values must be keys of reclass_map")
         if p:
             raise ValueError("invalid refine config: " + "; ".join(p))
+
+
+def read_yaml_mapping(path) -> dict:
+    """Return the top-level mapping of a config YAML file (empty if the file is empty).
+
+    Nothing is checked beyond the shape; ``RefineConfig.from_dict`` checks the keys and values.
+    """
+    data = yaml.safe_load(Path(path).read_text(encoding="utf-8"))
+    if data is not None and not isinstance(data, Mapping):
+        raise ValueError(f"{path}: expected a mapping at the top level")
+    return dict(data or {})
+
+
+def _url_problems(url) -> list[str]:
+    """Return what is wrong with ``vlm.base_url``; the messages never echo the value.
+
+    A URL can carry a key (in ``user:pass@`` or a query string), and the config is copied into
+    the ledger header, so neither is allowed.
+    """
+    if url is None:
+        return []
+    if not (isinstance(url, str) and url.lower().startswith(("http://", "https://"))):
+        return ["vlm.base_url must be an http:// or https:// URL"]
+    if any(c.isspace() or ord(c) < 32 or ord(c) == 127 for c in url):
+        return ["vlm.base_url must not contain whitespace or control characters"]
+    try:
+        parts = urlsplit(url)
+        host = parts.hostname
+        _ = parts.port  # raises ValueError for a port that is not a number in range
+    except ValueError:
+        return ["vlm.base_url is not a valid URL (check the host and the port)"]
+    if not host:
+        return ["vlm.base_url must name a host"]
+    if "@" in parts.netloc:
+        return [
+            "vlm.base_url must not hold a user name or password (user:pass@); give the key "
+            "with vlm.api_key_file, vlm.api_key_env, or TrackRefiner(vlm_api_key=...) instead"
+        ]
+    if parts.query or parts.fragment or url.rstrip().endswith(("?", "#")):
+        return [
+            "vlm.base_url must not have a query string or fragment; give a key with "
+            "vlm.api_key_file, vlm.api_key_env, or TrackRefiner(vlm_api_key=...)"
+        ]
+    return []
 
 
 def _check_type(path: str, value, hint) -> None:

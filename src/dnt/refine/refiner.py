@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import dataclasses
+import hashlib
+import json
 import logging
 import re
 from collections import Counter
@@ -20,6 +23,7 @@ from .config import RefineConfig, load_env_file, to_frames
 from .crops import CROP_PAD
 from .encoders import check_encoder_dependencies, make_encoder, weights_identity
 from .events import ACCEPTED, Decision, Event, EventKind, Ledger
+from .evidence import EvidenceBuilder
 from .features import Appearance, FeatureStore, features_key
 from .hints import read_reclass_hints
 from .interpolate import interpolate_tracks_rts
@@ -32,10 +36,14 @@ from .primitives import (
     occlusion_flags,
     speeds_hps,
 )
+from .review import review_image_dir, write_review
 from .screen import ScreenContext, propose_orphans, propose_screen
 from .switch import propose_splits
-from .verify import Band, decide, route_without_vlm
+from .verify import NO_EVIDENCE, Band, VLMRouting, decide, route_with_vlm, route_without_vlm
 from .video_appearance import VideoAppearance
+from .vlm import check_vlm_dependencies, clean_api_key, make_backend
+from .vlm.cache import AnswerCache
+from .vlm.runner import VLMRunner
 
 log = logging.getLogger(__name__)
 LEDGER_FORMAT = "dnt.refine.ledger/1"
@@ -104,6 +112,18 @@ def check_output_paths(out, inputs: dict) -> None:
                     f"{out_name} ({out_path}) is {in_name} ({in_path}); refine would overwrite "
                     "its input. Write the output to another path."
                 )
+    review_dir = review_image_dir(output_paths(out)["review"])  # OUT.review
+    if review_dir.exists() and not review_dir.is_dir():
+        raise ValueError(
+            f"{review_dir} exists and is not a directory; refine needs it for the review "
+            "images. Move it or write the output elsewhere."
+        )
+    for in_name, in_path in inputs.items():
+        if in_path is not None and review_dir.resolve() in Path(in_path).resolve().parents:
+            raise ValueError(
+                f"{in_name} ({in_path}) is inside the review image directory ({review_dir}); "
+                "refine would overwrite or delete it. Move the input or write the output elsewhere."
+            )
 
 
 def _file_record(path, sha256: str | None = None, **extra) -> dict:
@@ -187,6 +207,27 @@ def _check_frames_fit_the_video(max_frame: int, n: int, fmt: str, *, reads_frame
             "indexes; encoder.kind: none skips this check (no frame is read)"
         )
     raise ValueError(msg)
+
+
+def _vlm_counts(runner, events: list[Event]) -> dict:
+    no_evidence = sum(1 for e in events if (e.vlm or {}).get("error") == NO_EVIDENCE)
+    if runner is None:
+        return {
+            "calls": 0,
+            "retries": 0,
+            "cache_hits": 0,
+            "failures": 0,
+            "budget_skipped": 0,
+            "no_evidence": no_evidence,
+        }
+    return {
+        "calls": runner.calls,
+        "retries": runner.retries,
+        "cache_hits": runner.cache_hits,
+        "failures": runner.failures,
+        "budget_skipped": runner.budget_skipped,
+        "no_evidence": no_evidence,
+    }
 
 
 def _event_counts(events: list[Event]) -> dict[str, int]:
@@ -299,9 +340,23 @@ class _Stages:
     """Runs stages 1-4 on a work table and collects their events (spec 3)."""
 
     def __init__(
-        self, cfg: RefineConfig, fps: float, frame_size, appearance, ctx_boxes, ctx_fmt, hints
+        self,
+        cfg: RefineConfig,
+        fps: float,
+        frame_size,
+        appearance,
+        ctx_boxes,
+        ctx_fmt,
+        hints,
+        *,
+        vlm_runner=None,
+        video=None,
+        frame_count: int = 0,
     ):
         """Hold the per-run inputs."""
+        self.vlm_runner, self.video, self.frame_count = vlm_runner, video, frame_count
+        self.vlm: VLMRouting | None = None
+        self.evidence: EvidenceBuilder | None = None
         self.cfg, self.fps, self.frame_size = cfg, fps, frame_size
         self.appearance, self.ctx_boxes, self.ctx_fmt, self.hints = (
             appearance,
@@ -316,10 +371,13 @@ class _Stages:
         self.orphan_deferred: list[int] = []
 
     def _route(self, evs: list[Event], band: Band, stage: str) -> None:
-        route_without_vlm(evs, band)
-        for e in evs:
+        for e in evs:  # ids first: the VLM question tag uses them
             self.seq[stage] += 1
             e.id = f"{stage}-r0-{self.seq[stage]:06d}"
+        if self.vlm is not None:
+            route_with_vlm(evs, band, vlm=self.vlm)
+        else:
+            route_without_vlm(evs, band)
         self.events.extend(evs)
 
     def run(
@@ -328,6 +386,16 @@ class _Stages:
         """Run every enabled stage in the spec's order; ``tick(name)`` follows each stage."""
         tick = tick or (lambda _name: None)
         occluded = occlusion_flags(work, self.ctx_boxes, self.cfg.encoder.occlusion_iou)
+        if self.video is not None:
+            self.evidence = EvidenceBuilder(
+                self.video,
+                work,
+                occluded,
+                frame_count=self.frame_count,
+                send_context_frames=self.cfg.vlm.send_context_frames,
+            )
+            if self.vlm_runner is not None:
+                self.vlm = VLMRouting(self.vlm_runner, self.evidence, self.cfg, self.fps)
         # own detections are judged against the input rows, before any stage edits them
         self.link_ctx = drop_context_duplicates(work, self.ctx_boxes)
         work, split_raw, cuts = self._switch(work)
@@ -452,11 +520,42 @@ class TrackRefiner:
         *,
         appearance_factory: Callable[..., Appearance | None] | None = None,
         encoder_factory: Callable[..., object] | None = None,
+        vlm_backend_factory: Callable[..., object] | None = None,
+        vlm_api_key: str | None = None,
     ) -> None:
-        """Configure once with ``config`` or ``config_yaml``; ``device`` sets ``encoder.device``."""
+        """Configure once with ``config`` or ``config_yaml``; ``device`` sets ``encoder.device``.
+
+        Parameters
+        ----------
+        config, config_yaml : RefineConfig or str, optional
+            The settings, as an object or a YAML file (not both); the defaults if neither.
+        device : str, optional
+            Overrides ``encoder.device``.
+        appearance_factory, encoder_factory : callable, optional
+            Supply your own appearance source or encoder (mainly for tests).
+        vlm_backend_factory : callable, optional
+            ``factory(cfg.vlm)`` returns the VLM backend to use instead of the built-in one.
+        vlm_api_key : str, optional
+            The API key of the built-in VLM backend. It takes precedence over
+            ``vlm.api_key_file`` and the ``vlm.api_key_env`` variable, is kept on this object
+            only, and is never written to the config, the ledger, the summary, or a log line
+            (error texts have it replaced by ``***``). It must be one line of printable
+            ASCII without whitespace (surrounding whitespace is stripped). It cannot be combined
+            with ``vlm_backend_factory``, which does not receive it.
+
+        """
         if config is not None and config_yaml is not None:
             raise ValueError("pass config or config_yaml, not both")
         load_env_file(Path.cwd() / ".env")
+        if vlm_api_key is not None:
+            if vlm_backend_factory is not None:
+                raise ValueError(
+                    "vlm_api_key is for the built-in VLM backends; a vlm_backend_factory does "
+                    "not receive it, so give the key to your factory instead"
+                )
+            vlm_api_key = clean_api_key(vlm_api_key, "the vlm_api_key argument")
+            if vlm_api_key is None:
+                raise ValueError("vlm_api_key must be a non-empty string (or None)")
         if config_yaml is not None:
             load_env_file(Path(config_yaml).parent / ".env")
             config = RefineConfig.from_yaml(config_yaml)
@@ -466,6 +565,8 @@ class TrackRefiner:
         self.config.validate()
         self.appearance_factory = appearance_factory
         self.encoder_factory = encoder_factory
+        self.vlm_backend_factory = vlm_backend_factory
+        self._vlm_api_key = vlm_api_key  # never copied into the config, ledger, or logs
         self._encoder_memo: tuple[tuple, object] | None = None
         self.last_result: RefineResult | None = None
 
@@ -494,13 +595,18 @@ class TrackRefiner:
         ------
         ValueError
             If ``out_file``, or the ledger, review or feature-cache path next to it, is one of
-            the input files; if no frame rate is known; or if an input is malformed.
+            the input files; if no frame rate is known; if an input is malformed; or, with a
+            video and a VLM backend, if the backend needs a key and none is found, or
+            ``vlm.api_key_file`` cannot be read.
         ImportError
             If a video is given, ``encoder.kind`` is ``dino`` or ``reid``, and the encoder's
-            package is not installed; the message names the pip extra.
+            package is not installed; or if a video is given, ``vlm.backend`` is set, and the
+            backend's package is not installed; the message names the pip extra.
 
         """
         cfg = self.config
+        if cfg.vlm.use is not None or cfg.vlm.endpoints:
+            cfg = dataclasses.replace(cfg, vlm=cfg.vlm.resolve())  # the chosen endpoint only
         out = Path(out_file)
         check_output_paths(
             out,
@@ -519,6 +625,20 @@ class TrackRefiner:
             and self.encoder_factory is None
         ):
             check_encoder_dependencies(cfg.encoder)  # before any processing (spec 5.5)
+        backend = None
+        if cfg.vlm.backend != "none" and video_file is None:
+            log.warning(
+                "vlm.backend %r is ignored without a video (no evidence images can be made); "
+                "uncertain events stay pending",
+                cfg.vlm.backend,
+            )
+        elif cfg.vlm.backend != "none":
+            # a missing API key or an unreadable key file fails here, before any file is read
+            if self.vlm_backend_factory is None:
+                check_vlm_dependencies(cfg.vlm)  # before any processing (spec 5.5)
+                backend = make_backend(cfg.vlm, api_key=self._vlm_api_key)
+            else:
+                backend = self.vlm_backend_factory(cfg.vlm)
         track_sha = io.sha256_file(track_file)
         context_sha = None
         if context_file is not None:
@@ -531,6 +651,10 @@ class TrackRefiner:
                     "run as context."
                 )
         vinfo = io.video_info(video_file) if video_file is not None else None
+        if backend is not None and vinfo["frame_count"] <= 0:
+            log.warning(
+                "frame count unknown; evidence frames are not range-checked (%s)", video_file
+            )
         fps_val, fps_src = resolve_fps(fps, cfg.fps, vinfo["fps"] if vinfo else None)
         if cfg.frame_size:
             frame_size = tuple(int(v) for v in cfg.frame_size)
@@ -574,6 +698,19 @@ class TrackRefiner:
             "hints": None if reclass_file is None else {"reclass": _file_record(reclass_file)},
             "features": None,
         }
+        run_key = hashlib.sha256(
+            json.dumps(
+                {
+                    "tracks": track_sha,
+                    "context": context_sha,
+                    "video": (inputs["video"] or {}).get("fingerprint"),
+                    "hints": ((inputs["hints"] or {}).get("reclass") or {}).get("sha256"),
+                    "config": cfg.to_dict(),
+                },
+                sort_keys=True,
+                default=str,
+            ).encode()
+        ).hexdigest()
         before = table_summary(work, fps_val)
         appearance, store = self._appearance(
             work,
@@ -594,10 +731,25 @@ class TrackRefiner:
         )
         if message:
             desc += f" {message}"
+        # the runner (and its loop thread) exists only for the stage run that closes it
+        runner = (
+            None if backend is None else VLMRunner(cfg.vlm, backend, AnswerCache(cfg.vlm.cache_dir))
+        )
         try:
             if store is not None:
                 appearance.prefetch_coarse()
-            stages = _Stages(cfg, fps_val, frame_size, appearance, ctx_boxes, ctx_fmt, hint_map)
+            stages = _Stages(
+                cfg,
+                fps_val,
+                frame_size,
+                appearance,
+                ctx_boxes,
+                ctx_fmt,
+                hint_map,
+                vlm_runner=runner,
+                video=video_file,
+                frame_count=(vinfo or {}).get("frame_count", 0),
+            )
             with tqdm(total=5, desc=desc, unit=" stage", disable=not verbose) as pbar:
                 work, events = stages.run(
                     work, tick=lambda name: (pbar.set_postfix_str(name), pbar.update(1))
@@ -607,15 +759,30 @@ class TrackRefiner:
             # the ledger and the output are written only on success
             _save_on_failure(store, paths["features"])
             raise
+        finally:
+            if runner is not None:
+                runner.close()  # stop the loop thread; close the backend's client on its loop
         if store is not None:
             sha = store.save(paths["features"])
             inputs["features"] = _file_record(paths["features"], sha, cache_key=store.key)
         work, id_map = renumber(work)
+        review_path = write_review(
+            events,
+            review_path=paths["review"],
+            evidence=stages.evidence,
+            id_map=id_map,
+            fps=fps_val,
+            video_file=None if video_file is None else str(Path(video_file).resolve()),
+            track_file=str(out.resolve()),
+            reclass_map=cfg.reclass_map,
+            title=out.stem,
+            run_key=run_key,
+        )
         summary = {
             "before": before,
             "after": table_summary(work, fps_val),
             "events": _event_counts(events),
-            "vlm": {"calls": 0, "cache_hits": 0, "failures": 0},
+            "vlm": _vlm_counts(runner, events),
             "orphan_deferred": sorted(id_map[t] for t in stages.orphan_deferred if t in id_map),
             "filled_input_rows_removed": tin.n_filled_removed,
             "duplicate_input_rows_removed": tin.n_duplicates_removed,
@@ -644,7 +811,7 @@ class TrackRefiner:
         self.last_result = RefineResult(
             tracks=tracks,
             ledger_path=paths["ledger"],
-            review_path=None,
+            review_path=review_path,
             summary=summary,
             events=events,
         )

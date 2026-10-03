@@ -172,10 +172,13 @@ tracks = refiner.apply(            # replay after review (§4.2); inputs come fr
 
 ```
 dnt-refine run    TRACKS [--video V] [--fps F] [--context C] [--reclass-hints R] --config CFG --out OUT
+                  [--vlm-backend B] [--vlm-model M] [--vlm-base-url URL] [--vlm-api-key-env NAME] [--vlm-api-key-file PATH]
 dnt-refine apply  --ledger L [--decisions D.json] [--tracks T] [--video V] [--context C] [--reclass-hints R] [--features F] [--no-vlm] [--no-fill] --out OUT
 dnt-refine audit  --ledger L [--video V] --n 50 [--seed S]
 dnt-refine audit-score --ledger L --marks M.json
 ```
+
+The `--vlm-*` options of `run` override the matching `vlm` fields of `--config`. They are applied to the file's `vlm` mapping before the config is built, and the config is validated once, after they are applied (so a flag can complete a file that is only valid with it; unknown keys still fail). An empty value resets a field to its default. When `--vlm-backend` differs from the file's backend (a file without one counts as `none`), the file's `model`, `base_url`, `api_key_env` and `api_key_file` are dropped unless their own flags are given, so one backend's key never goes to the other backend's endpoint. The ledger header records the settings in effect. There is no option for the key itself (§7.3).
 
 The CLI is a thin `argparse` wrapper over `TrackRefiner`, registered as `[project.scripts] dnt-refine = "dnt.refine.cli:main"`.
 
@@ -344,7 +347,7 @@ A JSONL file.
 - **Settings.** `fps` and `frame_size` come from the header.
 
 `apply` runs `Ledger.replay`:
-1. **Overrides.** Decisions come from `decisions.json` (`{event_id: "accept" | "reject" | {"accept": true, "new_cls": 3}}`). Each event ID is resolved to its `proposal_key`. An override that differs from the recorded decision marks that event as **changed**.
+1. **Overrides.** Decisions come from `decisions.json`. The review page (§8.1) exports one object per decided event: `{event_id: {"accept": true | false, "new_cls": 3, "proposal_key": "<key>", "run_key": "<key>"}}`. `new_cls` is present only when a class was picked for an accepted event; `proposal_key` is the event's `proposal_key` as the page showed it, and `run_key` is the page's run key (a hash of the run's inputs and settings, recomputable from the ledger header). Event IDs are reused for different proposals after a rerun, so the two keys say which proposal and which run a decision was made on. Hand-written files may also use the shorter forms `"accept"`, `"reject"`, and `{"accept": true, "new_cls": 3}` (no keys, so nothing is checked). Each event ID is resolved to its `proposal_key`. `apply` refuses an entry whose `proposal_key` does not match the ledger's event of that ID, and warns about an entry whose `run_key` does not match the ledger's run. An override that differs from the recorded decision marks that event as **changed**.
 2. **Unchanged stages.** For each stage in order: if its input tracks are identical to those recorded, **and none of its own events changed**, the recorded events are applied as they are, with no proposals and no VLM calls.
 3. **Re-proposed stages.** The first stage whose input differs, **or which owns a changed event**, re-runs its proposals, and so does every later stage.
    - Proposals are deterministic, so on an unchanged input they come out with the same keys.
@@ -371,6 +374,8 @@ For each stage, `accept_above` and `reject_below`, with `reject_below < accept_a
 | `≥ accept_above` | `AUTO_ACCEPT` |
 | `< reject_below` | `AUTO_REJECT` (still written to the ledger, so audits can sample rejections) |
 | otherwise | VLM (§7). With `vlm.backend: none`, `HUMAN_PENDING` |
+
+Only `SPLIT`, `LINK`, `DROP`, and `RECLASS` events go to a VLM. Orphan events (`DROP{orphan}`), `FILL`, and `SMOOTH` never do: an orphan in the uncertain band is `HUMAN_PENDING` whatever the backend.
 
 **Exceptions**
 - **Static screen.** The static-object score is capped at `screen.static_score_cap` (default 0.80). Keep the cap below `screen.accept_above`, so static tracks never auto-drop (§6.2).
@@ -705,13 +710,13 @@ Each routed event gets **one composite JPEG**, built by `evidence.py`:
 - A grid of labeled tiles on a neutral background.
 - Crops are padded to 1.5× the box and upscaled so their height is at least 160 px.
 - Context frames are downscaled to 768 px wide, with the event's boxes drawn and labeled "A" or "B".
-- Frames are fetched in one pass per stage, sorted by frame index, with sequential reads and seeking only across large jumps.
+- Evidence is built in chunks of 64 events. Within a chunk the frames are fetched in one pass, sorted by frame index, with sequential reads and seeking only across large jumps. A frame that cannot be read is skipped with a warning (a tile is left out, and an event with no tile left gets no image); a video that cannot be opened gives no image for any event. A frame count of 0 or less (the container does not know it: raw `.h264`, some `.ts`/`.mkv`, streams) means unknown, not empty: frames are then not range-checked, and with a VLM backend one warning says so.
 
 | Event | Tiles |
 |---|---|
 | DROP / RECLASS | 6 crops spread evenly across the track's observed frames, plus 1 context frame at mid-life |
 | SPLIT at t | Row A: 3 clean crops before t. Row B: 3 clean crops after t. Plus the context frame at t, with nearby tracks drawn |
-| LINK i→j | Row A: i's last 3 clean crops. Row B: j's first 3 clean crops. Plus context frames at `t_e` and `t_s`. For occlusion-witnessed links, also a context frame at the middle of the gap, with the hidden box `B_t` drawn dashed and the occluder labeled |
+| LINK i→j | Row A: i's last 3 clean crops. Row B: j's first 3 clean crops. Plus context frames at `t_e` ("A ends") and `t_s` ("B starts"). For occlusion-witnessed links, also a context frame at the middle of the gap ("hidden path"), with the interpolated hidden box drawn dashed and labeled "?". The occluder is not labeled: the link stage does not export its box |
 
 | FILL (audit only, never sent to a VLM) | The last observed crop before the gap and the first after it, plus the context frame at mid-gap with the filled box drawn |
 | SMOOTH (audit only) | The context frame at `max_shift_frame`, with the original box and the smoothed box drawn |
@@ -752,7 +757,7 @@ If `vlm.send_context_frames: false`, context frames are left out.
 - `unsure`, or `confidence < vlm.min_conf` (default 0.7) → `HUMAN_PENDING`.
 
 **Votes**
-- With `vlm.votes = n > 1`, the same question is asked n times at temperature `vlm.vote_temperature` (default 0.7).
+- With `vlm.votes = n > 1`, the same question is asked n times at temperature `vlm.vote_temperature` (default 0.7), where the model accepts a temperature (§7.3).
 - The answer is the majority option, and `confidence = majority count / n`. The model's self-reported confidence is ignored.
 - A tie → `HUMAN_PENDING`.
 
@@ -772,30 +777,49 @@ class VLMAnswer:
 class VLMBackend(Protocol):
     name: str
     model: str
-    async def ask(self, image_jpeg: bytes, prompt: str, options: list[str], temperature: float) -> VLMAnswer: ...
+    async def ask(
+        self, image_jpeg: bytes, prompt: str, options: list[str], temperature: float,
+        *, tag: str = "",
+    ) -> VLMAnswer: ...
 ```
 
+`tag` names the question (kind and event ID) for scripted test backends; the real backends ignore it. A backend raises `VLMTransientError` for a failure worth retrying (a timeout, HTTP 429 or 5xx, a dropped connection); any other exception is final for that question. A reply that is not a valid answer raises `ValueError` (§7.2).
+
+- **Endpoint and key (both backends).**
+  - `vlm.base_url` is the endpoint of either backend: the server for `openai_compat`, a proxy or gateway for `anthropic` (`AsyncAnthropic(base_url=...)`; unset means Anthropic's API). Validation (§9) requires an `http://` or `https://` URL with a host and a valid port and without whitespace or control characters, userinfo (`user:pass@`), a query string, or a fragment, and never echoes the value: a URL can carry a credential, and the config is copied into the ledger header. A blank value means unset.
+  - The key is resolved by one helper, `resolve_api_key(cfg, default_env, runtime_key=None)`; the first source that has one wins: (1) `TrackRefiner(..., vlm_api_key=...)`, passed to `make_backend(cfg, api_key=...)` and kept on the refiner only; (2) `vlm.api_key_file`, a path whose content, stripped, is the key (`~` expanded; an unreadable or empty file raises `ValueError` naming the path, not the content, before any input file is read); (3) the variable named by `vlm.api_key_env` (default `OPENAI_API_KEY` or `ANTHROPIC_API_KEY`). A custom `vlm_backend_factory(cfg)` gets only the config.
+  - Every key, whatever its source, is stripped (a key file also loses a UTF-8 BOM; at most 64 KiB of it is read, and a FIFO with no writer reads as empty) and must be one line of printable ASCII without whitespace, not wrapped in quotes, and not a `NAME=value`, `NAME=` or `NAME==value` line (trailing base64 padding is allowed when the key's length is a multiple of 4 and it is not an upper-case `NAME_WITH_UNDERSCORES`); otherwise `ValueError` names the source and the reason, never the content, and is raised outside any `except` block so it carries no exception context (a `UnicodeDecodeError` would hold the file's bytes). A blank environment variable counts as unset. A runtime key together with a custom factory is a `ValueError`.
+  - Sending a key over `http://` to a non-loopback host (the configured `base_url`, or the SDK's `OPENAI_BASE_URL` / `ANTHROPIC_BASE_URL`) logs one warning naming the host only. `anthropic` honours `base_url` since this change, so a `base_url` left in an older anthropic config takes effect.
+  - The config holds no key: a key field in YAML or a `--vlm-api-key` option would put it in the ledger header, the shell history, or the process list. The path of the key file is allowed in the config and the ledger.
+  - A backend exposes its resolved key as `secret`; the runner replaces it, and the values of the key variables, with `***` in every error text it records or logs (longest first; values shorter than 4 characters after stripping are skipped). The SDKs' own debug logging is outside this.
 - **`openai_compat`**
   - Settings: `base_url` and `model`.
-  - API key from `vlm.api_key_env` (default `OPENAI_API_KEY`, optional for local servers).
+  - A server at `base_url` (or the SDK's `OPENAI_BASE_URL`) may need no key; a placeholder is sent. Without an endpoint the client would call api.openai.com, so no key there is a `ValueError` naming the three sources.
   - Sends the image as a base64 data URL.
   - Requests `response_format={"type": "json_object"}` when `vlm.json_mode: true` (the default), and falls back to parsing JSON from the text.
+  - Sends `max_tokens=300` and `temperature`. It targets vLLM, Ollama, and GPT-4-class chat models; reasoning models that reject `max_tokens` or `temperature=0` are not supported by this backend.
   - Extra: `dnt[refine-vlm] = ["openai>=1.40", "anthropic>=0.40"]`.
 - **`anthropic`**
   - Anthropic Messages API, sending the image as a base64 image block.
-  - The key comes from `ANTHROPIC_API_KEY`.
-  - The default model ID is pinned at implementation time, using the current Anthropic model reference. Config can override it.
+  - The key comes from the sources above (default variable `ANTHROPIC_API_KEY`); none is a `ValueError` naming the three sources. `base_url` routes through a proxy or gateway.
+  - The default model ID is pinned at `claude-sonnet-5-5` (`DEFAULT_ANTHROPIC_MODEL`); check it against the current Anthropic model reference when releasing. `vlm.model` overrides it.
+  - The request depends on the model. The newer Claude models (ids starting with `claude-sonnet-5`, `claude-opus-5`, `claude-opus-4-7`, `claude-opus-4-8`, `claude-fable`, or `claude-mythos`) answer HTTP 400 to a non-default `temperature`, `top_p` or `top_k`, and think adaptively by default (thinking tokens count against `max_tokens`). They get no sampling parameters, effort `low` (`output_config.effort`, sent through `extra_body`), and `max_tokens=2048`; with `votes > 1` they sample at the model's default temperature. Older models get `temperature` and `max_tokens=1024`, and no effort. No `thinking` setting is sent.
+  - `stop_reason: "refusal"`, `stop_reason: "max_tokens"` without a complete answer, and a reply with no text block are final errors for that question (not retried).
 - **`fake`**: scripted answers keyed by event ID or kind. Used in tests.
 - **`none`**: no backend. Events in the uncertain band become `HUMAN_PENDING`.
 
 ### 7.4 Budget, concurrency, caching, failures
 
-- **Budget.** `vlm.max_calls` per `refine` run (default 500; votes count individually). Events in the uncertain band are sent in order of `|algo_score − band midpoint|`, closest first. Once the budget is spent, the rest become `HUMAN_PENDING` with `vlm.error: "budget"`. Rider-subtype calls come out of the same budget.
-- **Concurrency.** An `asyncio` semaphore enforces `vlm.max_concurrency` (default 4). The public API stays synchronous and runs its own event loop.
-- **Cache.** `vlm.cache_dir` (default `~/.cache/dnt/vlm`) stores one JSON file per SHA-256 of (image bytes, prompt, options, backend, model, temperature, vote index). A cache hit costs nothing against the budget and sets `vlm.cached: true`.
+- **Budget.** `vlm.max_calls` (default 500) is a hard limit on backend invocations per `refine` run: `calls` + `retries` never exceed it. `refine_batch` calls `refine` once per video, each with its own runner, so there it is a budget per video (the answer cache is shared). Each vote that is sent counts one call, and each retry (after a transient failure, or after an invalid reply) counts one retry; cache hits cost nothing.
+  - Whole questions are admitted in priority order, before anything is sent, but within each routing batch, not across the run: the switch stage, the screen stage, and each link pass are routed separately, in that order, and each batch orders its uncertain events by `|algo_score − band midpoint|`, closest first, and admits them against what earlier batches left. This deviates from the original "closest first overall": later stages only exist after earlier stages' edits are applied, so a run-wide order is not possible. With `max_calls: 200` and 250 uncertain switch events, the link questions are all skipped with `budget`, even when closer to their band midpoint. `max_calls` (calls + retries) still holds for the whole run; raise it rather than expect global ordering. Rider-subtype calls come out of the same budget. A question is admitted only if all its uncached votes fit in what is left. A question that does not fit is skipped with `vlm.error: "budget"` and stays `HUMAN_PENDING`; a later question that does fit still runs.
+  - Retries draw from the allowance left after admission. When none is left, the event stays `HUMAN_PENDING` with `vlm.error: "budget"`.
+  - The summary reports `calls`, `retries`, `budget_skipped`, and `no_evidence` (§8.3).
+- **Concurrency.** An `asyncio` semaphore enforces `vlm.max_concurrency` (default 4). The public API stays synchronous: the runner keeps one event loop alive on its own thread for its whole life, runs one batch at a time on it, and closes the backend's client on that same loop. An interrupted wait (for example Ctrl+C) cancels the batch; `close()` while a batch runs makes `ask_many` raise `RuntimeError`.
+- **Cache.** `vlm.cache_dir` (default `~/.cache/dnt/vlm`) stores one JSON file per SHA-256 of (image bytes, prompt, options, backend, model, temperature, vote index). A cache hit costs nothing against the budget and sets `vlm.cached: true`. A cached answer is validated like a fresh reply (an option, a finite confidence in [0, 1]); a damaged entry is a miss.
 - **Failures.**
-  - Timeouts (`vlm.timeout_s`, default 60), HTTP 429, and HTTP 5xx are retried with exponential backoff: 3 attempts, starting at 2 s.
-  - When the retries run out, or on any other error, the event becomes `HUMAN_PENDING` with `vlm.error`.
+  - Timeouts (`vlm.timeout_s`, default 60), HTTP 429, and HTTP 5xx are retried with exponential backoff: 3 attempts, starting at 2 s, each retry drawing from the budget above.
+  - When the retries run out, or on any other error, the event becomes `HUMAN_PENDING` with `vlm.error`. A failure of one question, including a reply that cannot be serialized, is that question's error only.
+  - Circuit breaker: an error carrying HTTP status 400, 401, 403, 404 or 422 (a bad request, key, permission, or model), or three other unexpected errors in a row with no answer between them, trips the runner. It logs one warning (secrets scrubbed); from then on every vote not yet sent, in that batch and in the runner's later batches, ends its question with `vlm.error: "aborted after a fatal API error: <error>"` without a backend call and counts in `failures`. Cached votes are still used. Transient errors, invalid replies, and budget stops never trip it. A batch that had failures logs one warning with their count and the first error (unless the breaker tripped).
   - VLM errors never abort the run and never apply an edit.
 
 ## 8. Human review, audit, and summary
@@ -804,19 +828,21 @@ class VLMBackend(Protocol):
 
 `OUT.review.html` is a static page, with images in `OUT.review/`. It has one card per `HUMAN_PENDING` event, showing:
 - the evidence image,
-- the kind, reason, tracks, and frames,
+- the kind, reason, tracks (stage-time ids and the output track ids), and frames,
 - `algo_score` and the top signals,
 - the VLM's answer and reason, if there was one,
 - for `LINK` events, the recorded next-best alternatives,
 - for partial screen events, the supported and unsupported segments,
 - accept and reject controls, plus a class picker for `RECLASS` and for screen events that the VLM redirected,
-- a copy-to-clipboard `Labeler.draw_track_clips(...)` snippet covering the event's tracks and frame span ±2 s, for events that need motion to judge. `dnt.refine` does not import `Labeler`; it only prints the snippet.
+- a copy-to-clipboard `Labeler.draw_track_clips(...)` snippet, present only when a video was given. It writes one clip per track of the event, each spanning that track's own first to last frame ±2 s. `dnt.refine` does not import `Labeler`; it only prints the snippet.
 
 An **Export decisions** button downloads `decisions.json` in the §4.2 format.
 
-The page makes no network requests. Its choices are saved in `localStorage` while the person works, as a convenience only. The exported file is what counts.
+The page makes no network requests. Its choices are saved in `localStorage` while the person works, as a convenience only. They are namespaced by a run key (a hash of the run's inputs and settings) and a saved choice is restored only if the event's `proposal_key` is unchanged. The exported file is what counts.
 
-Cards can be filtered by stage and sorted by score.
+Cards can be filtered by stage and sorted by score (high or low first) or kept in order.
+
+The image directory is named after the page (`OUT.review/`). It holds a `.dnt-review.json` manifest of the images the page wrote. A rerun deletes only the images that manifest lists, never overwrites a file that is not listed in it, and removes the directory only when it is empty afterwards. With no pending event the page, its listed images, and the manifest are removed.
 
 ### 8.2 Audit
 
@@ -837,7 +863,7 @@ The summary is written to the ledger header, printed at the end of the run, and 
 - observed and interpolated row counts,
 - median observed track duration,
 - event counts per (stage, kind, decision),
-- VLM calls, cache hits, and failures.
+- the `vlm` counters: `calls`, `retries`, `cache_hits`, `failures`, `budget_skipped`, and `no_evidence` (events in the uncertain band that were not asked because no evidence image could be made).
 
 ## 9. Configuration
 
@@ -931,9 +957,10 @@ fill:
   smooth_existing: false
 vlm:
   backend: none              # none | openai_compat | anthropic
-  base_url: null
+  base_url: null             # both backends: a local server, a proxy, or a gateway (§7.3)
   model: null
-  api_key_env: null
+  api_key_env: null          # null → OPENAI_API_KEY / ANTHROPIC_API_KEY
+  api_key_file: null         # path of a file holding the key; never the key itself
   json_mode: true
   min_conf: 0.7
   votes: 1
@@ -958,6 +985,7 @@ The link band was lowered from `accept_above: 0.80` (caps 0.75) after a review o
 - `reid` with the `vehicle` target has `weights` set.
 - `switch.min_crop_px` and `link.min_crop_px` are integers `>= 0`.
 - A non-`none` VLM backend has `model` set (except `anthropic`, which has a default).
+- `vlm.base_url`, when set, is an `http://` or `https://` URL with a host and a valid port and without whitespace, userinfo, query, or fragment; `vlm.api_key_env` is a variable name; `vlm.api_key_file` is a path (a string that does not look like a key). No message echoes these values.
 
 **Deferred until `refine` or `apply` starts, and only for components the run will use** (§5.5): the encoder's extra (needed only with a video and `encoder.kind` other than `none`) and the VLM backend's extra (needed only with a non-`none` backend and a video).
 
@@ -967,7 +995,7 @@ Durations in config are in seconds and are converted to frames with `fps`.
 
 | Situation | Behavior |
 |---|---|
-| No `video` | Motion-only mode: no embeddings, and appearance weights set to 0 (§6.1, §6.3). The VLM backend is forced to `none` with a warning. Everything in the uncertain band becomes `HUMAN_PENDING`, and no review images are made (cards show signals only). No encoder or VLM extra is needed. |
+| No `video` | Motion-only mode: no embeddings, and appearance weights set to 0 (§6.1, §6.3). The VLM backend is forced to `none` with a warning. Everything in the uncertain band becomes `HUMAN_PENDING`, and no review images are made: a signals-only review page (cards show signals, no image or clip snippet) is still written. No encoder or VLM extra is needed. |
 | `encoder.kind: none` with a video | Motion-only scoring, as above, but the VLM and the evidence images are still available. |
 | No `context` | In-vehicle and two-wheeler-overlap cues are skipped and recorded as `null` in `signals`. The vehicle-duplicate cue still runs, because it uses the vehicle file itself. |
 | Context file with neither 8 nor 10 columns, when `context.format: auto` | `ValueError` naming the file and the column count. |

@@ -86,8 +86,9 @@ def test_success_prints_json_with_out_ledger_and_summary(tmp_path, capsys):
                             "--config", _cfg(tmp_path), "--out", out)
     assert code == 0
     doc = json.loads(stdout)
-    assert set(doc) == {"out", "ledger", "summary"}
+    assert set(doc) == {"out", "ledger", "review", "summary"}
     assert doc["out"] == str(out) and doc["ledger"] == str(tmp_path / "o.ledger.jsonl")
+    assert doc["review"] is None  # nothing is pending in this scene, so there is no review page
     assert doc["summary"]["after"]["tracks"] == 1  # the two fragments are linked
     assert len(pd.read_csv(out, header=None)) == 90 - 46 + 40 + 6  # 6 filled rows
 
@@ -271,7 +272,7 @@ def test_track_and_refine_import_in_either_order(order):
 
 def test_docs_pages_exist_and_are_in_the_nav():
     nav = (ROOT / "mkdocs.yml").read_text()
-    for page in ("index", "refiner", "config", "events", "interpolate", "link"):
+    for page in ("index", "refiner", "config", "events", "interpolate", "link", "verification"):
         path = ROOT / "docs" / "api" / "refine" / f"{page}.md"
         assert path.exists(), path
         assert f"api/refine/{page}.md" in nav
@@ -280,6 +281,9 @@ def test_docs_pages_exist_and_are_in_the_nav():
                          ("interpolate", "interpolate"), ("link", "link")):
         assert f"::: dnt.refine.{module}\n" in (
             ROOT / "docs" / "api" / "refine" / f"{page}.md").read_text()
+    verification = (ROOT / "docs/api/refine/verification.md").read_text()
+    for module in ("vlm", "verify", "evidence", "review"):
+        assert f"::: dnt.refine.{module}\n" in verification
     post = (ROOT / "docs/api/track/post_process.md").read_text()
     assert "::: dnt.refine.link.link_tracklets" in post
     assert "::: dnt.refine.interpolate.interpolate_tracks_rts" in post
@@ -316,8 +320,13 @@ def test_docs_and_changelog_state_the_limitation_accurately():
         for word in ("HUMAN_PENDING", "motion", "occlusion", "ambiguous", "static",
                      "not applied yet" if where == "changelog" else "never applied yet"):
             assert word in note, (where, word)
-        assert "static objects" in note and "mixed tracks" in note, where
+        assert "static objects or of mixed tracks" in note, where
+        assert "links across occlusions" in note, where
         assert "ambiguous assignment margin" in note, where
+        assert "Without a VLM backend" in note, where
+        assert "the VLM decides these edits when it is sure" in note, where
+        assert "applying review decisions follows in a later release" in note.lower(), where
+        assert "follow in later releases" not in note, where
         # the exact phrases: what is applied, and what stays pending without an encoder
         assert "static waits" in note, where
         assert "ID-switch splits found from motion alone" in note, where
