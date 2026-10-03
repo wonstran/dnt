@@ -242,7 +242,7 @@ dnt-refine run ped_track.txt --video cam1.mp4 --config ped.yaml --out ped_refine
 ### Several endpoints in one file
 
 List every endpoint under `vlm.endpoints` and pick one with `vlm.use`. An entry may set
-`backend`, `base_url`, `model`, `api_key_env`, `api_key_file` and `max_tokens`; every other `vlm`
+`backend`, `base_url`, `model`, `api_key_env`, `api_key_file`, `max_tokens` and `extra_body`; every other `vlm`
 setting (`votes`, `max_calls`, `timeout_s`, ...) is shared. Switching endpoints is a one-line
 change to `use`. `refine()` resolves the chosen entry once, so the backend, the runner and the
 ledger header see only that endpoint. A `use` that is not in `endpoints`, or an unknown key in an
@@ -286,6 +286,14 @@ answer. A reply that ends this way raises an error that names `max_tokens` inste
 object in the reply"; it is counted as a failure and not retried, because the same request would
 be cut off again. Raise `vlm.max_tokens` (it can be set per endpoint) or turn off the model's
 reasoning. A cut-off reply whose answer is already complete is used.
+
+`vlm.extra_body` (a mapping, also per endpoint) is merged into the body of every
+`openai_compat` request, which is how a provider's own switches are set. Reasoning is switched
+off differently by each provider, and some models do not allow it: on OpenRouter,
+`{reasoning: {enabled: false}}` works for some models, a mandatory-reasoning model answers
+HTTP 400 and takes `{reasoning: {effort: low}}` instead; a Qwen3 server on vLLM takes
+`{chat_template_kwargs: {enable_thinking: false}}`. `anthropic` ignores it. Values must be
+plain JSON. Like `max_tokens`, it is not part of the answer-cache key.
 
 The key is taken from the first of these that is set: `vlm_api_key=` in Python, then
 `vlm.api_key_file`, then the variable `vlm.api_key_env` names (`OPENAI_API_KEY` or

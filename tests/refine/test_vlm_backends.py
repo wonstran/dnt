@@ -89,6 +89,16 @@ def test_openai_max_tokens_defaults_to_1024_and_follows_the_setting(monkeypatch)
     assert [r["max_tokens"] for r in seen["requests"]] == [1024, 4000]
 
 
+def test_openai_extra_body_is_passed_through_only_when_set(monkeypatch):
+    seen = install_fake_openai(monkeypatch, [GOOD])
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-secret")
+    ask(make_backend(cfg()))
+    body = {"reasoning": {"enabled": False}}
+    ask(make_backend(cfg(extra_body=body)))
+    first, second = seen["requests"]
+    assert "extra_body" not in first and second["extra_body"] == body
+
+
 def test_an_openai_reply_cut_off_before_its_answer_names_max_tokens(monkeypatch):
     cut = openai_reply('{"answer": "diff', finish_reason="length")
     install_fake_openai(monkeypatch, [cut])

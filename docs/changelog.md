@@ -37,11 +37,12 @@
   `'dnt[refine]'`). Neither is a required dependency. See "Verification with a VLM" in the
   Track Refinement docs.
 - Several VLM endpoints in one config: `vlm.endpoints` names them and `vlm.use` picks one
-  (each may set `backend`, `base_url`, `model`, `api_key_env`, `api_key_file`, `max_tokens`).
+  (each may set `backend`, `base_url`, `model`, `api_key_env`, `api_key_file`, `max_tokens`, `extra_body`).
   `TrackRefiner` also reads `./.env` and the `.env` beside its config file, without overriding
   variables that are already set. `vlm.max_tokens` sets the output limit (default 1024 for
   `openai_compat`, which used to send a fixed 300); a reply cut off before its answer now names
-  `max_tokens` in the error.
+  `max_tokens` in the error. `vlm.extra_body` passes provider switches (such as turning reasoning off) in every
+  `openai_compat` request.
 - VLM endpoint and key. `vlm.base_url` sets the endpoint of both backends (an OpenAI-compatible
   server, or a proxy or gateway in front of Anthropic); it must be an `http://` or `https://` URL
   with a valid host and port and without whitespace, a user name, password, query string, or

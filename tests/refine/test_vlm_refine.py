@@ -420,3 +420,17 @@ def test_max_tokens_is_validated_and_selectable_per_endpoint():
         cfg.vlm.max_tokens = bad
         with pytest.raises(ValueError, match="max_tokens"):
             cfg.validate()
+
+
+def test_extra_body_is_validated_and_selectable_per_endpoint():
+    cfg = RefineConfig.defaults()
+    body = {"chat_template_kwargs": {"enable_thinking": False}}
+    cfg.vlm.endpoints = {"q": {"backend": "openai_compat", "model": "m", "extra_body": body}}
+    cfg.vlm.use = "q"
+    cfg.validate()
+    assert cfg.vlm.resolve().extra_body == body
+    for bad in ([1], "x", {1: "a"}, {"a": float("nan")}, {"a": {1: 2}}, {"a": object()}):
+        cfg = RefineConfig.defaults()
+        cfg.vlm.extra_body = bad
+        with pytest.raises(ValueError, match="extra_body"):
+            cfg.validate()

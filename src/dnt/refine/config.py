@@ -3,20 +3,21 @@
 from __future__ import annotations
 
 import copy
+import json
 import math
 import os
 import re
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass, field, fields, is_dataclass
 from pathlib import Path
-from typing import get_args, get_origin, get_type_hints
+from typing import Any, get_args, get_origin, get_type_hints
 from urllib.parse import urlsplit
 
 import yaml
 
 TARGETS = ("person", "vehicle")
 ENCODERS = ("dino", "reid", "none")
-_ENDPOINT_KEYS = {"backend", "base_url", "model", "api_key_env", "api_key_file", "max_tokens"}
+_ENDPOINT_KEYS = {"backend", "base_url", "model", "api_key_env", "api_key_file", "max_tokens", "extra_body"}
 BACKENDS = ("none", "openai_compat", "anthropic")
 _ENV_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 _FIXED_KEY_DICTS = {"ramps", "weights", "weights_occluded", "legacy_weights", "reclass_map"}
@@ -54,6 +55,25 @@ def load_env_file(path) -> bool:
             value = value[1:-1]
         os.environ.setdefault(key, value)
     return True
+
+
+def _json_ok(value) -> bool:
+    """Return True if ``value`` is plain JSON data (str keys; no NaN or infinity)."""
+    try:
+        json.dumps(value, allow_nan=False)
+    except (TypeError, ValueError):
+        return False
+    return all(isinstance(k, str) for k in _keys(value))
+
+
+def _keys(value):
+    if isinstance(value, dict):
+        for k, v in value.items():
+            yield k
+            yield from _keys(v)
+    elif isinstance(value, list):
+        for v in value:
+            yield from _keys(v)
 
 
 def to_frames(seconds: float, fps: float) -> int:
@@ -281,6 +301,7 @@ class VLMConfig:
     max_concurrency: int = 4
     timeout_s: float = 60.0
     max_tokens: int | None = None
+    extra_body: dict[str, Any] = field(default_factory=dict)
     send_context_frames: bool = True
     cache_dir: str = "~/.cache/dnt/vlm"
     endpoints: dict[str, dict] = field(default_factory=dict)
@@ -290,7 +311,7 @@ class VLMConfig:
         """Return the settings with the endpoint named by ``use`` applied.
 
         Each entry of ``endpoints`` may set ``backend``, ``base_url``, ``model`` and
-        ``api_key_env`` and ``api_key_file``; any other ``vlm`` setting is shared by all endpoints.
+        ``api_key_env``, ``api_key_file``, ``max_tokens`` and ``extra_body``; any other ``vlm`` setting is shared by all endpoints.
         With no ``use`` the settings are returned as they are.
 
         Returns
@@ -467,6 +488,8 @@ class RefineConfig:
             and vl.max_concurrency >= 1
         ):
             p.append("vlm.max_concurrency must be an integer >= 1")
+        if not isinstance(vl.extra_body, dict) or not _json_ok(vl.extra_body):
+            p.append("vlm.extra_body must be a mapping of plain JSON values")
         mt = vl.max_tokens
         if mt is not None and not (isinstance(mt, int) and not isinstance(mt, bool) and mt >= 1):
             p.append("vlm.max_tokens must be a whole number >= 1 (or unset)")

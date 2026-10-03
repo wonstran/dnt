@@ -42,6 +42,7 @@ class OpenAICompatBackend:
         self.model = cfg.model
         self._json_mode = bool(cfg.json_mode)
         self._max_tokens = cfg.max_tokens or DEFAULT_MAX_TOKENS
+        self._extra_body = dict(cfg.extra_body or {})
         key = resolve_api_key(cfg, "OPENAI_API_KEY", api_key)
         endpoint = cfg.base_url or os.environ.get("OPENAI_BASE_URL")
         if key is None and not endpoint:
@@ -71,6 +72,8 @@ class OpenAICompatBackend:
             "temperature": float(temperature),
             "max_tokens": self._max_tokens,
         }
+        if self._extra_body:  # provider switches, e.g. {"reasoning": {"enabled": false}}
+            kwargs["extra_body"] = self._extra_body
         if self._json_mode:
             kwargs["response_format"] = {"type": "json_object"}
         try:
