@@ -390,3 +390,20 @@ def test_the_runner_is_made_only_after_the_inputs_are_read_and_is_closed(tmp_pat
     assert len(built) == 1 and made == []  # the backend is checked first; no runner was made
     refiner.refine(src, tmp_path / "o.txt", video_file=video, verbose=False)
     assert len(made) == 1 and made[0]._closed
+
+
+def test_the_endpoint_named_by_use_is_what_the_backend_factory_receives(tmp_path):
+    src, video = takeover_scene(tmp_path)
+    cfg = cfg_for(tmp_path)
+    cfg.vlm.endpoints = {
+        "a": {"backend": "openai_compat", "model": "model-a", "base_url": "http://a.example/v1"},
+        "b": {"backend": "openai_compat", "model": "model-b", "base_url": "http://b.example/v1"},
+    }
+    cfg.vlm.use = "b"
+    backend, seen = FakeBackend({"SPLIT": reply("different")}), []
+    refiner = TrackRefiner(cfg, vlm_backend_factory=lambda c: seen.append(c) or backend)
+    refiner.refine(src, tmp_path / "o.txt", video_file=video, verbose=False)
+    (got,) = seen
+    assert (got.model, got.base_url) == ("model-b", "http://b.example/v1")
+    assert got.endpoints == {} and got.use is None
+    assert len(backend.calls) == 1
