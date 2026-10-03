@@ -14,6 +14,9 @@ from . import (
     warn_if_cleartext,
 )
 
+#: Output budget when ``vlm.max_tokens`` is unset; a reasoning model spends part of it thinking.
+DEFAULT_MAX_TOKENS = 1024
+
 
 class OpenAICompatBackend:
     """Ask a chat-completions endpoint; the image goes in as a base64 data URL."""
@@ -38,6 +41,7 @@ class OpenAICompatBackend:
 
         self.model = cfg.model
         self._json_mode = bool(cfg.json_mode)
+        self._max_tokens = cfg.max_tokens or DEFAULT_MAX_TOKENS
         key = resolve_api_key(cfg, "OPENAI_API_KEY", api_key)
         endpoint = cfg.base_url or os.environ.get("OPENAI_BASE_URL")
         if key is None and not endpoint:
@@ -65,7 +69,7 @@ class OpenAICompatBackend:
             "model": self.model,
             "messages": [{"role": "user", "content": content}],
             "temperature": float(temperature),
-            "max_tokens": 300,
+            "max_tokens": self._max_tokens,
         }
         if self._json_mode:
             kwargs["response_format"] = {"type": "json_object"}
@@ -77,7 +81,18 @@ class OpenAICompatBackend:
             if exc.status_code == 429 or exc.status_code >= 500:
                 raise VLMTransientError(f"HTTP {exc.status_code}") from None
             raise
-        return parse_answer(resp.choices[0].message.content or "", options)
+        choice = resp.choices[0]
+        text = choice.message.content or ""
+        try:
+            return parse_answer(text, options)
+        except ValueError:
+            if getattr(choice, "finish_reason", None) == "length":
+                raise RuntimeError(
+                    f"the reply was cut off at max_tokens={self._max_tokens} before its answer "
+                    "(a reasoning model spends the budget thinking): raise vlm.max_tokens or "
+                    "turn off the model's reasoning"
+                ) from None
+            raise
 
     async def aclose(self) -> None:
         """Close the HTTP client; the runner calls this on the event loop that used it."""

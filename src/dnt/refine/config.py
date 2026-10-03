@@ -16,7 +16,7 @@ import yaml
 
 TARGETS = ("person", "vehicle")
 ENCODERS = ("dino", "reid", "none")
-_ENDPOINT_KEYS = {"backend", "base_url", "model", "api_key_env", "api_key_file"}
+_ENDPOINT_KEYS = {"backend", "base_url", "model", "api_key_env", "api_key_file", "max_tokens"}
 BACKENDS = ("none", "openai_compat", "anthropic")
 _ENV_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 _FIXED_KEY_DICTS = {"ramps", "weights", "weights_occluded", "legacy_weights", "reclass_map"}
@@ -280,6 +280,7 @@ class VLMConfig:
     max_calls: int = 500
     max_concurrency: int = 4
     timeout_s: float = 60.0
+    max_tokens: int | None = None
     send_context_frames: bool = True
     cache_dir: str = "~/.cache/dnt/vlm"
     endpoints: dict[str, dict] = field(default_factory=dict)
@@ -466,6 +467,9 @@ class RefineConfig:
             and vl.max_concurrency >= 1
         ):
             p.append("vlm.max_concurrency must be an integer >= 1")
+        mt = vl.max_tokens
+        if mt is not None and not (isinstance(mt, int) and not isinstance(mt, bool) and mt >= 1):
+            p.append("vlm.max_tokens must be a whole number >= 1 (or unset)")
         if not (_num(vl.timeout_s) and vl.timeout_s > 0):
             p.append("vlm.timeout_s must be a number > 0")
         if not (_num(vl.vote_temperature) and vl.vote_temperature >= 0):

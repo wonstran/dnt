@@ -67,6 +67,7 @@ class AnthropicBackend:
         warn_if_cleartext(cfg.base_url or os.environ.get("ANTHROPIC_BASE_URL"), self.name)
         self.secret = key  # the runner scrubs it from every error text
         self.model = cfg.model or DEFAULT_ANTHROPIC_MODEL
+        self._max_tokens = cfg.max_tokens
         extra = {"base_url": cfg.base_url} if cfg.base_url else {}
         self._client = AsyncAnthropic(api_key=key, timeout=cfg.timeout_s, max_retries=0, **extra)
 
@@ -78,11 +79,11 @@ class AnthropicBackend:
         """
         kwargs = {"model": self.model, "messages": [{"role": "user", "content": content}]}
         if _new_family(self.model):
-            kwargs["max_tokens"] = _NEW_FAMILY_MAX_TOKENS
+            kwargs["max_tokens"] = self._max_tokens or _NEW_FAMILY_MAX_TOKENS
             # extra_body works on every SDK version; a named output_config argument may not
             kwargs["extra_body"] = {"output_config": {"effort": "low"}}
         else:
-            kwargs["max_tokens"] = _OLDER_MAX_TOKENS
+            kwargs["max_tokens"] = self._max_tokens or _OLDER_MAX_TOKENS
             kwargs["temperature"] = float(temperature)
         return kwargs
 
@@ -120,7 +121,7 @@ class AnthropicBackend:
                 return parse_answer(text, options)
             except ValueError:
                 raise RuntimeError(
-                    "the model stopped at max_tokens before giving an answer"
+                    "the model stopped at max_tokens before giving an answer: raise vlm.max_tokens"
                 ) from None
         if not text.strip():
             raise RuntimeError(f"the reply has no text (stop_reason={stop})")

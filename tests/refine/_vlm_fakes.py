@@ -46,6 +46,13 @@ def _errors(mod):
         setattr(mod, cls.__name__, cls)
 
 
+def openai_reply(text, *, finish_reason="stop"):
+    """A fake chat-completions response with one choice."""
+    msg = types.SimpleNamespace(content=text)
+    choice = types.SimpleNamespace(message=msg, finish_reason=finish_reason)
+    return types.SimpleNamespace(choices=[choice])
+
+
 def install_fake_openai(monkeypatch, replies):
     """Install a fake ``openai``; ``replies`` is a list of reply texts or exceptions."""
     seen = {"requests": [], "client_kwargs": None, "closed": 0}
@@ -59,8 +66,9 @@ def install_fake_openai(monkeypatch, replies):
             item = queue.pop(0) if len(queue) > 1 else queue[0]
             if isinstance(item, Exception):
                 raise item
-            msg = types.SimpleNamespace(content=item)
-            return types.SimpleNamespace(choices=[types.SimpleNamespace(message=msg)])
+            if not isinstance(item, str):
+                return item  # a response built with ``openai_reply``
+            return openai_reply(item)
 
     class AsyncOpenAI:
         def __init__(self, **kwargs):

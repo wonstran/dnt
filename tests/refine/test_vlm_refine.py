@@ -407,3 +407,16 @@ def test_the_endpoint_named_by_use_is_what_the_backend_factory_receives(tmp_path
     assert (got.model, got.base_url) == ("model-b", "http://b.example/v1")
     assert got.endpoints == {} and got.use is None
     assert len(backend.calls) == 1
+
+
+def test_max_tokens_is_validated_and_selectable_per_endpoint():
+    cfg = RefineConfig.defaults()
+    cfg.vlm.endpoints = {"r": {"backend": "openai_compat", "model": "m", "max_tokens": 4096}}
+    cfg.vlm.use = "r"
+    cfg.validate()
+    assert cfg.vlm.resolve().max_tokens == 4096
+    for bad in (0, -1, True, 1.5, "300"):
+        cfg = RefineConfig.defaults()
+        cfg.vlm.max_tokens = bad
+        with pytest.raises(ValueError, match="max_tokens"):
+            cfg.validate()

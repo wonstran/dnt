@@ -9,7 +9,12 @@ from dnt.refine.config import VLMConfig
 from dnt.refine.vlm import DEFAULT_ANTHROPIC_MODEL, VLMAnswer, VLMTransientError, make_backend
 from dnt.refine.vlm.fake import FakeBackend
 
-from ._vlm_fakes import anthropic_reply, install_fake_anthropic, install_fake_openai
+from ._vlm_fakes import (
+    anthropic_reply,
+    install_fake_anthropic,
+    install_fake_openai,
+    openai_reply,
+)
 
 OPTS = ["same_individual", "different", "unsure"]
 GOOD = json.dumps({"answer": "different", "confidence": 0.9, "reason": "r"})
@@ -74,6 +79,43 @@ def test_openai_request_shape(monkeypatch):
     assert content[0] == {"type": "text", "text": "PROMPT"}
     url = content[1]["image_url"]["url"]
     assert url == "data:image/jpeg;base64," + base64.b64encode(b"\xff\xd8jpeg").decode()
+
+
+def test_openai_max_tokens_defaults_to_1024_and_follows_the_setting(monkeypatch):
+    seen = install_fake_openai(monkeypatch, [GOOD])
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-secret")
+    ask(make_backend(cfg()))
+    ask(make_backend(cfg(max_tokens=4000)))
+    assert [r["max_tokens"] for r in seen["requests"]] == [1024, 4000]
+
+
+def test_an_openai_reply_cut_off_before_its_answer_names_max_tokens(monkeypatch):
+    cut = openai_reply('{"answer": "diff', finish_reason="length")
+    install_fake_openai(monkeypatch, [cut])
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-secret")
+    with pytest.raises(RuntimeError, match=r"max_tokens=2048.*raise vlm\.max_tokens") as err:
+        ask(make_backend(cfg(max_tokens=2048)))
+    assert "sk-secret" not in str(err.value)
+
+
+def test_a_complete_openai_answer_that_hit_the_limit_is_still_used(monkeypatch):
+    install_fake_openai(monkeypatch, [openai_reply(GOOD, finish_reason="length")])
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-secret")
+    assert ask(make_backend(cfg())).answer == "different"
+
+
+def test_a_bad_reply_that_was_not_cut_off_keeps_its_parse_error(monkeypatch):
+    install_fake_openai(monkeypatch, [openai_reply("no json here", finish_reason="stop")])
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-secret")
+    with pytest.raises(ValueError, match="no JSON object"):
+        ask(make_backend(cfg()))
+
+
+def test_anthropic_max_tokens_setting_overrides_the_default(monkeypatch):
+    seen = install_fake_anthropic(monkeypatch, [GOOD])
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant")
+    ask(make_backend(VLMConfig(backend="anthropic", max_tokens=3000)))
+    assert seen["requests"][0]["max_tokens"] == 3000
 
 
 def test_openai_json_mode_off_and_missing_key_for_local_servers(monkeypatch):

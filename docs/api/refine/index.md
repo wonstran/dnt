@@ -239,6 +239,54 @@ dnt-refine run ped_track.txt --video cam1.mp4 --config ped.yaml --out ped_refine
     --vlm-backend anthropic --vlm-api-key-file ~/.config/dnt/anthropic.key
 ```
 
+### Several endpoints in one file
+
+List every endpoint under `vlm.endpoints` and pick one with `vlm.use`. An entry may set
+`backend`, `base_url`, `model`, `api_key_env`, `api_key_file` and `max_tokens`; every other `vlm`
+setting (`votes`, `max_calls`, `timeout_s`, ...) is shared. Switching endpoints is a one-line
+change to `use`. `refine()` resolves the chosen entry once, so the backend, the runner and the
+ledger header see only that endpoint. A `use` that is not in `endpoints`, or an unknown key in an
+entry, is an error. A provider with several models gets one entry per model; a YAML anchor
+(`&name` and `<<: *name`) saves repeating its URL and key:
+
+```yaml
+vlm:
+  use: qwen-7b
+  endpoints:
+    qwen-7b: &vllm
+      backend: openai_compat
+      base_url: http://gpu1:8000/v1
+      model: qwen2.5-vl-7b
+      api_key_env: QWEN_KEY
+    qwen-72b:
+      <<: *vllm
+      model: qwen2.5-vl-72b
+    gemini:
+      backend: openai_compat
+      base_url: https://openrouter.ai/api/v1
+      model: google/gemini-3.8-flash
+      api_key_env: OPENROUTER_KEY
+      max_tokens: 4096          # a reasoning model spends part of the budget thinking
+  votes: 1
+```
+
+### Keys in a `.env` file
+
+`TrackRefiner` reads `./.env` and, when it is given a config file, the `.env` next to that file.
+Each line is `NAME=value` (`export NAME=value`, quotes and `#` comments are accepted). A variable
+that is already set in the environment is not overridden. Keep the file out of version control
+and name its variables in `api_key_env`.
+
+### Output limit
+
+`vlm.max_tokens` is the most the model may write per answer (default: 1024 for `openai_compat`;
+`anthropic` keeps its own defaults of 1024, or 2048 for the newest models). A model that reasons
+before it answers spends part of that budget thinking, and can be cut off before the JSON
+answer. A reply that ends this way raises an error that names `max_tokens` instead of "no JSON
+object in the reply"; it is counted as a failure and not retried, because the same request would
+be cut off again. Raise `vlm.max_tokens` (it can be set per endpoint) or turn off the model's
+reasoning. A cut-off reply whose answer is already complete is used.
+
 The key is taken from the first of these that is set: `vlm_api_key=` in Python, then
 `vlm.api_key_file`, then the variable `vlm.api_key_env` names (`OPENAI_API_KEY` or
 `ANTHROPIC_API_KEY` by default). An unreadable or empty key file is an error, not a fall-back
