@@ -17,7 +17,9 @@ import yaml
 
 TARGETS = ("person", "vehicle")
 ENCODERS = ("dino", "reid", "none")
-_ENDPOINT_KEYS = {"backend", "base_url", "model", "api_key_env", "api_key_file", "max_tokens", "extra_body"}
+_ENDPOINT_KEYS = {
+    "backend", "base_url", "model", "api_key_env", "api_key_file", "max_tokens", "extra_body"
+}
 BACKENDS = ("none", "openai_compat", "anthropic")
 _ENV_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 _FIXED_KEY_DICTS = {"ramps", "weights", "weights_occluded", "legacy_weights", "reclass_map"}
@@ -310,8 +312,9 @@ class VLMConfig:
     def resolve(self) -> VLMConfig:
         """Return the settings with the endpoint named by ``use`` applied.
 
-        Each entry of ``endpoints`` may set ``backend``, ``base_url``, ``model`` and
-        ``api_key_env``, ``api_key_file``, ``max_tokens`` and ``extra_body``; any other ``vlm`` setting is shared by all endpoints.
+        Each entry of ``endpoints`` may set ``backend``, ``base_url``, ``model``,
+        ``api_key_env``, ``api_key_file``, ``max_tokens`` and ``extra_body``; any other ``vlm``
+        setting is shared by all endpoints.
         With no ``use`` the settings are returned as they are.
 
         Returns
