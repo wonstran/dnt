@@ -19,3 +19,6 @@ dist/
 src/dnt/detect/yolo/models/*.pt
 __pycache__/
 *.pyc
+
+# Local secrets
+.env

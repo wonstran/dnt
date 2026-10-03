@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import math
+import os
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass, field, fields, is_dataclass
 from pathlib import Path
@@ -13,10 +14,43 @@ import yaml
 
 TARGETS = ("person", "vehicle")
 ENCODERS = ("dino", "reid", "none")
+_ENDPOINT_KEYS = {"backend", "base_url", "model", "api_key_env"}
 BACKENDS = ("none", "openai_compat", "anthropic")
 _FIXED_KEY_DICTS = {"ramps", "weights", "weights_occluded", "legacy_weights", "reclass_map"}
 _RAMP_DICTS = {"ramps", "ramp", "reclass_ramp"}
 _RAMP_FIELDS = {"orphan.ramp", "hints.reclass_ramp"}
+
+
+def load_env_file(path) -> bool:
+    """Load ``KEY=VALUE`` lines from a ``.env`` file into ``os.environ``.
+
+    Variables that are already set are left alone, so the shell wins over the file.
+
+    Parameters
+    ----------
+    path : str or Path
+        The ``.env`` file; a missing file is ignored.
+
+    Returns
+    -------
+    bool
+        True if the file existed and was read.
+
+    """
+    path = Path(path)
+    if not path.is_file():
+        return False
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        key = key.removeprefix("export ").strip()
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+            value = value[1:-1]
+        os.environ.setdefault(key, value)
+    return True
 
 
 def to_frames(seconds: float, fps: float) -> int:
@@ -226,6 +260,28 @@ class VLMConfig:
     timeout_s: float = 60.0
     send_context_frames: bool = True
     cache_dir: str = "~/.cache/dnt/vlm"
+    endpoints: dict[str, dict] = field(default_factory=dict)
+    use: str | None = None
+
+    def resolve(self) -> VLMConfig:
+        """Return the settings with the endpoint named by ``use`` applied.
+
+        Each entry of ``endpoints`` may set ``backend``, ``base_url``, ``model`` and
+        ``api_key_env``; any other ``vlm`` setting is shared by all endpoints.
+        With no ``use`` the settings are returned as they are.
+
+        Returns
+        -------
+        VLMConfig
+            A copy with the chosen endpoint's fields filled in, and no ``endpoints``/``use``.
+
+        """
+        out = copy.deepcopy(self)
+        if self.use is not None:
+            for k, v in self.endpoints[self.use].items():
+                setattr(out, k, v)
+        out.endpoints, out.use = {}, None
+        return out
 
 
 @dataclass(kw_only=True)
@@ -313,7 +369,19 @@ class RefineConfig:
             p.append(f"target must be one of {TARGETS}")
         if self.encoder.kind not in ENCODERS:
             p.append(f"encoder.kind must be one of {ENCODERS}")
-        if self.vlm.backend not in BACKENDS:
+        vlm = self.vlm
+        endpoints_ok = True
+        for ename, ep in vlm.endpoints.items():
+            bad = set(ep) - _ENDPOINT_KEYS
+            if bad:
+                p.append(f"vlm.endpoints.{ename}: unknown keys {sorted(bad)}")
+                endpoints_ok = False
+        if vlm.use is not None and vlm.use not in vlm.endpoints:
+            p.append(f"vlm.use '{vlm.use}' is not in vlm.endpoints")
+            endpoints_ok = False
+        if endpoints_ok:
+            vlm = vlm.resolve()
+        if vlm.backend not in BACKENDS:
             p.append(f"vlm.backend must be one of {BACKENDS}")
         for name in ("switch", "link"):
             mcp = getattr(self, name).min_crop_px
@@ -352,7 +420,7 @@ class RefineConfig:
             seen |= set(group)
         if self.encoder.kind == "reid" and self.target == "vehicle" and not self.encoder.weights:
             p.append("encoder.weights is required for reid with the vehicle target")
-        if self.vlm.backend not in ("none", "anthropic") and not self.vlm.model:
+        if vlm.backend not in ("none", "anthropic") and not vlm.model:
             p.append("vlm.model is required for this backend")
         ramps = {f"switch.ramps.{k}": v for k, v in self.switch.ramps.items()}
         ramps |= {f"screen.ramps.{k}": v for k, v in sc.ramps.items()}

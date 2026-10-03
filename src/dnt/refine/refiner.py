@@ -16,7 +16,7 @@ from tqdm import tqdm
 from .. import __version__
 from . import io
 from .apply import apply_edit, lineage_of_rows, merge_chains, next_track_id, renumber
-from .config import RefineConfig, to_frames
+from .config import RefineConfig, load_env_file, to_frames
 from .crops import CROP_PAD
 from .encoders import check_encoder_dependencies, make_encoder, weights_identity
 from .events import ACCEPTED, Decision, Event, EventKind, Ledger
@@ -456,7 +456,9 @@ class TrackRefiner:
         """Configure once with ``config`` or ``config_yaml``; ``device`` sets ``encoder.device``."""
         if config is not None and config_yaml is not None:
             raise ValueError("pass config or config_yaml, not both")
+        load_env_file(Path.cwd() / ".env")
         if config_yaml is not None:
+            load_env_file(Path(config_yaml).parent / ".env")
             config = RefineConfig.from_yaml(config_yaml)
         self.config = config if config is not None else RefineConfig.defaults()
         if device is not None:
