@@ -912,16 +912,28 @@ def _ev(work, a, b, score=0.9, decision=Decision.AUTO_ACCEPT, source="auto"):
 
 
 def test_an_applied_merge_drops_the_lower_score_rows_and_reports_them():
+    # track 2 also sees frames 10 and 12 of track 1: 2 shared frames, under conflict_min_shared
+    w = _work(_rows(1, range(0, 40, 2), score=0.9),
+              _rows(2, sorted({*range(1, 40, 2), 10, 12}), score=0.8))
+    ev = _ev(w, 1, 2)
+    out = apply_merges(w, [ev], CFG)
+    assert len(out.work) == 40 and out.work["track"].unique().tolist() == [1]
+    assert ev.applied is True
+    assert ev.signals["dropped_rows"] == 2
+    assert ev.signals["dropped"] == [[2, 10, 10], [2, 12, 12]]
+    assert ev.signals["merged_into"] == 1
+    assert out.excluded == {2: {10, 12}}
+    assert out.absorbed == {2: 1} and out.merged_reps == {1}
+    assert out.counts == {"applied": 1, "redundant": 0, "conflict": 0, "dropped_rows": 2}
+
+
+def test_a_fully_co_observed_hand_made_edge_is_refused_not_forced():
     w = _work(_rows(1, range(0, 20), score=0.9), _rows(2, range(10, 30), score=0.8))
     ev = _ev(w, 1, 2)
     out = apply_merges(w, [ev], CFG)
-    assert len(out.work) == 30 and out.work["track"].unique().tolist() == [1]
-    assert ev.applied is True
-    assert ev.signals["dropped_rows"] == 10 and ev.signals["dropped"] == [[2, 10, 19]]
-    assert ev.signals["merged_into"] == 1
-    assert out.excluded == {2: set(range(10, 20))}
-    assert out.absorbed == {2: 1} and out.merged_reps == {1}
-    assert out.counts == {"applied": 1, "redundant": 0, "conflict": 0, "dropped_rows": 10}
+    assert ev.applied is False and ev.signals["skipped_reason"] == "conflict"
+    assert ev.signals["conflicts_with"] == {"tracks": [1, 2], "why": "dense", "proposal_key": None}
+    assert len(out.work) == 40 and out.absorbed == {} and out.counts["conflict"] == 1
 
 
 def test_a_three_way_interleave_merges_into_the_earliest_track():
@@ -1291,7 +1303,10 @@ from dnt.refine.refiner import fill_stage
 from dnt.refine.screen import propose_orphans
 
 from ._fixtures import table
+from ._video import BLUE, RED
 from .test_dedup import _rows, _work
+from .test_evidence import _builder, _walker
+from .test_evidence import _work as _ev_work
 
 FRAMES = [f for f in range(10, 31) if f != 20]  # frame 20 was dropped by a merge
 EXCLUDED = {122: {20}}
@@ -1358,6 +1373,25 @@ def test_fill_events_use_the_excluded_frames():
     assert fills[0].lineage == [[[1, 0, 3], [2, 4, 4], [1, 5, 24]]]
     _, plain = fill_stage(work, RefineConfig.defaults(), 10.0, {})
     assert [e for e in plain if e.kind is EventKind.FILL][0].lineage == [[[1, 0, 24], [2, 4, 4]]]
+
+
+def test_the_evidence_of_a_later_link_never_shows_the_dropped_observation(tmp_path):
+    # the builder is made from the ORIGINAL raw table, where (122, 20) still exists: only the
+    # split spans of the downstream event keep that observation out of the evidence
+    raw = _ev_work(_walker(122, range(10, 22)), _walker(7, range(24, 40), x0=54.0))
+    after = raw[~((raw["raw_id"] == 122) & (raw["frame"] == 20))]
+    cfg = RefineConfig.defaults()
+    cfg.link.mode = "legacy"
+    builder = _builder(tmp_path, raw, {122: RED, 7: BLUE})
+
+    def tiles(ev):
+        return [k for _, ts in builder.plan(ev).rows for k in ts]
+
+    (plain,) = legacy_link_events(after, cfg, 10.0)
+    assert (122, 20) in tiles(plain) and builder._box_at(plain.lineage[0], 20) is not None
+    (kept,) = legacy_link_events(after, cfg, 10.0, EXCLUDED)
+    assert (122, 20) not in tiles(kept) and (122, 19) in tiles(kept)
+    assert builder._box_at(kept.lineage[0], 20) is None  # the own-track box lookup
 ```
 
 - [ ] **Step 2: Run to verify they fail**
@@ -1460,6 +1494,7 @@ def _stages(cfg, fps=20.0):
 def _short_pair_cfg(link_on):
     cfg = RefineConfig.defaults()
     cfg.link.enabled = link_on
+    cfg.fill.enabled = False  # keep the orphan assertions apart from interpolation
     cfg.dedup.min_observed = 1
     cfg.dedup.min_overlap_seconds = 0.1
     return cfg
@@ -1511,6 +1546,45 @@ def test_absorbed_ids_compose_across_dedup_and_link():
     kinds = {(e.stage, str(e.kind), str(e.decision)) for e in events if e.stage != "fill"}
     assert ("dedup", "MERGE", "AUTO_ACCEPT") in kinds and ("link", "LINK", "AUTO_ACCEPT") in kinds
     assert stages.merge_counts["applied"] == 1
+
+
+def _two_hop():
+    # C (1) is linked later. B (2) and A (3) interleave and merge. D (4) walks beside them, so
+    # the A/D merge is only uncertain: a pending event whose endpoint A is absorbed twice.
+    return _work(_rows(1, range(0, 41)), _rows(2, range(50, 112, 2)),
+                 _rows(3, range(51, 112, 2)), _rows(4, range(52, 111, 2), dx=14.0))
+
+
+def _spy_orphans(monkeypatch):
+    seen = {}
+    original = _Stages._orphans
+
+    def spy(self, work, linked, pending):
+        seen["linked"], seen["pending"] = set(linked), set(pending)
+        return original(self, work, linked, pending)
+
+    monkeypatch.setattr(_Stages, "_orphans", spy)
+    return seen
+
+
+def test_a_merged_track_that_link_then_absorbs_resolves_and_stays_protected(monkeypatch):
+    seen = _spy_orphans(monkeypatch)
+    stages = _stages(RefineConfig.defaults(), fps=10.0)
+    out, events = stages.run(_two_hop())
+    ab = next(e for e in events if e.stage == "dedup" and e.tracks == [2, 3])
+    ad = next(e for e in events if e.stage == "dedup" and e.tracks == [3, 4])
+    assert ab.decision is Decision.AUTO_ACCEPT and ab.applied
+    assert ad.decision is Decision.HUMAN_PENDING
+    link = next(e for e in events if e.stage == "link" and e.applied)
+    assert link.tracks == [1, 2]  # the merged track (2) is absorbed by the earlier track 1
+    # A (3) was absorbed by B (2) and B by C (1): the map must resolve A to C, not stop at B
+    assert stages.absorbed == {2: 1, 3: 1}
+    # what dedup produced, before link maps it
+    assert stages.merged_reps == {2} and stages.merge_pending == {2, 4}
+    # what the orphan pass received: both sets were mapped through link's representatives
+    assert 1 in seen["linked"] and 2 not in seen["linked"]
+    assert {1, 4} <= seen["pending"] and 2 not in seen["pending"]
+    assert sorted(out["track"].unique()) == [1, 4]
 
 
 def test_a_disabled_stage_leaves_no_trace():
@@ -1745,6 +1819,32 @@ def test_a_pending_merge_resolves_absorbed_endpoints_to_the_survivors_output_id(
     assert "track_ids=[2]" in plain
 ```
 
+Then append the end-to-end version to `tests/refine/test_dedup_stage.py`, which uses the map the stage actually produces. Add `from dnt.refine.apply import renumber` and `from dnt.refine.review import write_review` to the **top** of that file with the other imports (not mid-file: ruff E402):
+
+```python
+def test_the_pending_card_of_a_twice_absorbed_track_shows_the_survivors_output_id(tmp_path):
+    stages = _stages(RefineConfig.defaults(), fps=10.0)
+    out, events = stages.run(_two_hop())
+    _, id_map = renumber(out)
+    pend = next(e for e in events if e.stage == "dedup" and e.decision is Decision.HUMAN_PENDING)
+    assert pend.tracks == [3, 4]
+
+    def card(absorbed):
+        page = write_review(
+            [pend], review_path=tmp_path / "o.review.html", evidence=None, id_map=id_map,
+            absorbed=absorbed, fps=10.0, video_file="/v/cam.mp4", track_file=tmp_path / "o.txt",
+            reclass_map={}, title="o", run_key="r",
+        )
+        return page.read_text()
+
+    header_form = {str(k): int(v) for k, v in stages.absorbed.items()}  # as the ledger stores it
+    want = [id_map[1], id_map[4]]  # track 3 resolves through 2 to the survivor 1
+    html = card(header_form)
+    assert f"output id(s): {', '.join(map(str, want))}" in html
+    assert f"track_ids={want}" in html
+    assert f"track_ids={[id_map[4]]}" in card(None)  # without the map, the absorbed end is lost
+```
+
 - [ ] **Step 3: Run to verify they fail**
 
 Run: `.venv/bin/python -m pytest tests/refine/test_evidence.py tests/refine/test_review.py -q -k "merge or absorbed or skipped"`
@@ -1883,9 +1983,13 @@ Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>"
 - Create: `tests/refine/test_dedup_real.py`, `docs/api/refine/dedup.md`
 - Modify: `docs/changelog.md`, `docs/api/refine/index.md`, `mkdocs.yml`
 
-- [ ] **Step 1: Write the real-data test** (create `tests/refine/test_dedup_real.py`)
+- [ ] **Step 1: Write the real-data tests** (create `tests/refine/test_dedup_real.py`)
+
+Two groups: a focused regression of the stage alone (the calibration check of spec §12), and runs through `TrackRefiner.refine`, which exercise switch, screen, the dedup hand-off, link, orphan, fill and the final renumbering, with and without the video and the recorded appearance setup.
 
 ```python
+import copy
+import shutil
 from pathlib import Path
 
 import pytest
@@ -1893,43 +1997,121 @@ import pytest
 from dnt.refine import io
 from dnt.refine.config import RefineConfig
 from dnt.refine.dedup import apply_merges, propose_merges
-from dnt.refine.events import Ledger
+from dnt.refine.events import EventKind, Ledger
+from dnt.refine.refiner import TrackRefiner
 from dnt.refine.verify import Band, route_without_vlm
 
 DATA = Path("/mnt/e/videos/miami/dets")
+CLIPS = Path("/mnt/e/videos/miami/clips")
 pytestmark = pytest.mark.skipif(not DATA.is_dir(), reason="the Miami clips are not mounted")
+EVENING, MIDDLE = "evening_1900_190000.00", "middle_120000.00"
+GROUP = (122, 125, 134)  # one person, confirmed on video (spec 1)
 
 
-def _run(clip):
+def _files(clip):
     track_file = next(DATA.glob(f"*{clip}_ped_track.txt"))
     ledger = next(DATA.glob(f"*{clip}_ped_track_refined_p3.ledger.jsonl"))
-    fps = Ledger.read(ledger).header["fps"]
+    return track_file, ledger, Ledger.read(ledger).header
+
+
+def _out_id(header, track):
+    """The output ID of an input track: through the absorbed map, then the final renumbering."""
+    survivor = header["absorbed"].get(str(track), track)
+    return header["id_map"][str(survivor)]
+
+
+# ---- the stage alone: a focused calibration regression
+
+def _stage_only(clip):
+    track_file, _, header = _files(clip)
     work = io.read_tracks(track_file, fmt="dnt", class_id=0).work
     cfg = RefineConfig.defaults()
-    events = propose_merges(work, cfg, fps)
+    events = propose_merges(work, cfg, header["fps"])
     route_without_vlm(events, Band.of(cfg.dedup))
     return work, events, apply_merges(work, events, cfg)
 
 
-def test_the_evening_group_is_one_person_and_becomes_one_track():
-    work, events, out = _run("evening_1900_190000.00")
-    assert {out.absorbed.get(t, t) for t in (122, 125, 134)} == {122}
-    merged = out.work[out.work["raw_id"].isin([122, 125, 134])]
+def test_stage_only_the_evening_group_becomes_one_track():
+    work, events, out = _stage_only(EVENING)
+    assert {out.absorbed.get(t, t) for t in GROUP} == {122}
+    merged = out.work[out.work["raw_id"].isin(GROUP)]
     assert merged["track"].nunique() == 1 and not merged.duplicated("frame").any()
-    ours = [e for e in events if set(e.tracks) <= {122, 125, 134} and e.applied]
+    ours = [e for e in events if set(e.tracks) <= set(GROUP) and e.applied]
     assert sum(e.signals["dropped_rows"] for e in ours) <= 13
-    assert len(out.work) < len(work) and out.work["track"].nunique() < work["track"].nunique()
+    assert out.work["track"].nunique() < work["track"].nunique()
 
 
-def test_side_by_side_pairs_in_the_middle_clip_stay_apart():
-    _, _, out = _run("middle_120000.00")
+def test_stage_only_side_by_side_pairs_in_the_middle_clip_stay_apart():
+    _, _, out = _stage_only(MIDDLE)
     track_of = out.work.groupby("raw_id")["track"].first()
-    assert track_of[266] != track_of[270]
-    assert track_of[15] != track_of[19]
+    assert track_of[266] != track_of[270] and track_of[15] != track_of[19]
+
+
+# ---- the whole pipeline
+
+def _check_evening(refiner, tracks, raw_rows):
+    header = Ledger.read(refiner.last_result.ledger_path).header
+    ids = {_out_id(header, t) for t in GROUP}
+    assert len(ids) == 1, f"the three raw tracks ended as output IDs {sorted(ids)}"
+    (tid,) = ids
+    rows = tracks[tracks["track"] == tid]
+    assert not rows.duplicated("frame").any()  # observed and filled rows never share a frame
+    events = refiner.last_result.events
+    merges = [e for e in events if e.kind is EventKind.MERGE and e.applied
+              and set(e.tracks) <= set(GROUP)]
+    assert merges and sum(e.signals["dropped_rows"] for e in merges) <= 13
+    dropped = {(r, f) for e in merges for r, a, b in e.signals["dropped"] for f in range(a, b + 1)}
+    retained = {f for r, f in raw_rows if r in GROUP} - {f for _, f in dropped}
+    assert retained <= set(rows.loc[rows["interp"] == 0, "frame"])  # every kept observation is there
+
+
+def _raw_rows(track_file):
+    work = io.read_tracks(track_file, fmt="dnt", class_id=0).work
+    return set(zip(work["raw_id"], work["frame"], strict=True))
+
+
+def test_pipeline_motion_only_merges_the_evening_group(tmp_path):
+    track_file, _, header = _files(EVENING)
+    cfg = RefineConfig.defaults()
+    cfg.encoder.kind = "none"
+    refiner = TrackRefiner(cfg)
+    tracks = refiner.refine(track_file, tmp_path / "x.txt", fps=header["fps"], verbose=False)
+    _check_evening(refiner, tracks, _raw_rows(track_file))
+
+
+def test_pipeline_motion_only_keeps_the_middle_negatives_apart(tmp_path):
+    track_file, _, header = _files(MIDDLE)
+    cfg = RefineConfig.defaults()
+    cfg.encoder.kind = "none"
+    refiner = TrackRefiner(cfg)
+    refiner.refine(track_file, tmp_path / "x.txt", fps=header["fps"], verbose=False)
+    h = Ledger.read(refiner.last_result.ledger_path).header
+    assert _out_id(h, 266) != _out_id(h, 270) and _out_id(h, 15) != _out_id(h, 19)
+
+
+@pytest.mark.skipif(not CLIPS.is_dir(), reason="the Miami videos are not mounted")
+def test_pipeline_with_the_recorded_p3_setup_and_the_video(tmp_path):
+    track_file, ledger, header = _files(EVENING)
+    kind = header["config"]["encoder"]["kind"]
+    if kind == "dino":
+        pytest.importorskip("transformers")
+    elif kind == "reid":
+        pytest.importorskip("torchreid")
+    video = next(CLIPS.glob(f"*{EVENING}.mp4"))
+    recorded = copy.deepcopy(header["config"])
+    recorded["vlm"]["backend"] = "none"  # no network: appearance is real, the VLM is not used
+    recorded["vlm"]["use"] = None
+    cfg = RefineConfig.from_dict(recorded)  # the P3 run predates dedup: it gets the defaults
+    cache = next(DATA.glob(f"*{EVENING}_ped_track_refined_p3.features.npz"), None)
+    if cache is not None:
+        shutil.copy(cache, tmp_path / "x.features.npz")  # reuse the embeddings if the key matches
+    refiner = TrackRefiner(cfg)
+    tracks = refiner.refine(track_file, tmp_path / "x.txt", video_file=str(video), verbose=False)
+    _check_evening(refiner, tracks, _raw_rows(track_file))
 ```
 
 Run: `.venv/bin/python -m pytest tests/refine/test_dedup_real.py -q`
-Expected: PASS when `/mnt/e/videos/miami/dets` is mounted (it is on the author's machine), otherwise SKIPPED. If an assertion fails, do **not** loosen it: print the signals and scores of the pairs involved and compare with spec §12 (the prototype numbers) before deciding whether the code or a default is wrong.
+Expected: PASS when the data is mounted (the last test needs the video, the recorded encoder's package and, if the copied embedding cache does not match, a model download); otherwise SKIPPED. A skip is **not** a pass: in the handoff list which of the five tests ran. If an assertion fails, do not loosen it. Print the dedup events of the three raw tracks and the ledger's `absorbed` and `id_map`, and compare with spec §12: a failure here means switch, screen or link changed the picture the stage-only check saw, and that is exactly what the test is for.
 
 - [ ] **Step 2: Calibration check** (no code change expected)
 
@@ -2038,7 +2220,7 @@ Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>"
 
 | Spec | Task |
 |---|---|
-| §2 criteria 1 to 5 | 9 (criterion 1, negatives), 5 (criteria 3, 4), 4 (criterion 2, key), 6 (downstream exclusion) |
+| §2 criteria 1 to 5 | 9 (criterion 1 through the pipeline, negatives), 5 (criteria 3, 4), 4 (criterion 2, key), 6 (downstream exclusion, including evidence) |
 | §3.1 order, progress total, no new IDs | 7 |
 | §3.2 signals, gate, score | 4 |
 | §3.3 event, `key_lineage`, `n_a`/`n_b` correspondence | 2, 4 |
@@ -2049,7 +2231,7 @@ Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>"
 | §5 absorbed map, review sections, summary | 7, 8 |
 | §6 config | 1 |
 | §7 compatibility (`enabled: false`, old ledgers) | 7 (disabled test), 8 (`absorbed=None`) |
-| §9 tests 1 to 18 | 1 (17), 4 (1 to 6, 13), 5 (7 to 9, bands in 7), 6 (18), 7 (11, 12), 8 (14, 15), 9 (16) |
+| §9 tests 1 to 18 | 1 (17), 4 (1 to 6, 13), 5 (7 to 9), 6 (18, including the evidence assertion), 7 (11, 12, the two-hop composition), 8 (14, 15, the two-hop card), 9 (16, stage-only and through `TrackRefiner.refine`) |
 
 Spec test 9 (bands, no VLM) is covered in Task 7: `test_dedup_routing_never_goes_through_the_vlm` sets a `stages.vlm` that would fail if used and checks that the uncertain merge is still `HUMAN_PENDING`. The auto-accept and auto-reject bands are covered by the Task 5 tests (hand-made events) and the Task 7 orphan tests.
 
@@ -2059,4 +2241,4 @@ Spec test 9 (bands, no VLM) is covered in Task 7: `test_dedup_routing_never_goes
 
 **Clarification of the spec made in this plan:** `propose_merges` proposes an event for every pair that passes the gates, including pairs scoring 0 (they are auto-rejected). The spec does not say; recording them keeps the ledger a complete account of what was considered. The prototype produced 23, 40 and 160 such events on the three clips (most auto-rejected).
 
-**Not run:** the tests and code of Tasks 1 to 3 and 6 to 9, and the integration in Task 7 and 8. The prototype validated the signals, the conflict procedure and the three-way merge on real data, and the fixtures of Tasks 6 and 7 were run against the current (pre-change) code, which confirmed their baseline behavior.
+**Not run:** the tests and code of Tasks 1 to 3 and 6 to 9, and the integration in Task 7 and 8. The fixtures added after review (the two-hop case of Tasks 7 and 8, and the evidence case of Task 6) were run against the current code for their baseline behavior only (link accepts the earlier track into the merged one and leaves the third track apart; the legacy link event exists with the expected lineage). The prototype validated the signals, the conflict procedure and the three-way merge on real data, and the fixtures of Tasks 6 and 7 were run against the current (pre-change) code, which confirmed their baseline behavior.
