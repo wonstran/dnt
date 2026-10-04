@@ -21,6 +21,7 @@ from . import io
 from .apply import apply_edit, lineage_of_rows, merge_chains, next_track_id, renumber
 from .config import RefineConfig, load_env_file, to_frames
 from .crops import CROP_PAD
+from .dedup import apply_merges, propose_merges
 from .encoders import check_encoder_dependencies, make_encoder, weights_identity
 from .events import ACCEPTED, Decision, Event, EventKind, Ledger
 from .evidence import EvidenceBuilder
@@ -373,16 +374,46 @@ class _Stages:
         self.seq: Counter = Counter()
         self.events: list[Event] = []
         self.orphan_deferred: list[int] = []
+        self.merged_reps: set[int] = set()
+        self.merge_pending: set[int] = set()
+        self.absorbed: dict[int, int] = {}
+        self.excluded: dict[int, set[int]] = {}
+        self.merge_counts = {"applied": 0, "redundant": 0, "conflict": 0, "dropped_rows": 0}
 
-    def _route(self, evs: list[Event], band: Band, stage: str) -> None:
+    def _route(self, evs: list[Event], band: Band, stage: str, *, use_vlm: bool = True) -> None:
         for e in evs:  # ids first: the VLM question tag uses them
             self.seq[stage] += 1
             e.id = f"{stage}-r0-{self.seq[stage]:06d}"
-        if self.vlm is not None:
+        if self.vlm is not None and use_vlm:
             route_with_vlm(evs, band, vlm=self.vlm)
         else:
             route_without_vlm(evs, band)
         self.events.extend(evs)
+
+    def _absorb(self, mapping: dict[int, int]) -> None:
+        """Compose ``mapping`` (an absorbed work ID to its absorber) into ``self.absorbed``."""
+        mapping = {int(k): int(v) for k, v in mapping.items() if int(k) != int(v)}
+        if not mapping:
+            return
+        for k, v in self.absorbed.items():
+            self.absorbed[k] = mapping.get(v, v)
+        for k, v in mapping.items():
+            self.absorbed.setdefault(k, v)
+
+    def _dedup(self, work):
+        cfg = self.cfg
+        if not cfg.dedup.enabled or work.empty:
+            return work
+        if self.vlm_runner is not None:
+            log.info("dedup does not use the VLM; uncertain merges stay pending for review")
+        evs = propose_merges(work, cfg, self.fps, self.link_app)
+        self._route(evs, Band.of(cfg.dedup), "dedup", use_vlm=False)
+        out = apply_merges(work, evs, cfg)
+        self.merged_reps, self.merge_pending = out.merged_reps, out.pending_endpoints
+        self.excluded = out.excluded
+        self.merge_counts = out.counts
+        self._absorb(out.absorbed)
+        return out.work
 
     def run(
         self, work: pd.DataFrame, tick: Callable[[str], None] | None = None
@@ -406,8 +437,13 @@ class _Stages:
         tick("switch")
         work = self._screen(work, split_raw, cuts)
         tick("screen")
-        work, protected, linked, pending = self._link(work, occluded)
+        work = self._dedup(work)
+        tick("dedup")
+        work, protected, linked, pending, rep_of = self._link(work, occluded)
         tick("link")
+        self._absorb(rep_of)
+        linked = linked | {rep_of.get(t, t) for t in self.merged_reps}
+        pending = pending | {rep_of.get(t, t) for t in self.merge_pending}
         work = self._orphans(work, linked, pending)
         tick("orphan")
         work = self._fill(work, protected)
@@ -467,7 +503,7 @@ class _Stages:
     def _link(self, work, occluded):
         cfg = self.cfg
         if not cfg.link.enabled or work.empty:
-            return work, {}, set(), set()
+            return work, {}, set(), set(), {}
         band = Band.of(cfg.link)
         res = run_link_stage(
             work,
@@ -478,6 +514,7 @@ class _Stages:
             frame_size=self.frame_size,
             occluded=occluded,
             route=lambda evs: self._route(evs, band, "link"),
+            excluded=self.excluded,
         )
         work, rep_of = merge_chains(work, res.accepted)
         protected: dict[int, list[tuple[int, int]]] = {}
@@ -486,14 +523,19 @@ class _Stages:
                 rep = rep_of.get(ev.tracks[0], ev.tracks[0])
                 protected.setdefault(rep, []).append(tuple(ev.params["gap"]))
         pending = {rep_of.get(t, t) for t in res.pending_endpoints}
-        return work, protected, set(rep_of.values()), pending
+        return work, protected, set(rep_of.values()), pending, rep_of
 
     def _orphans(self, work, linked, pending):
         cfg = self.cfg
         if not cfg.orphan.enabled or work.empty:
             return work
         evs, self.orphan_deferred = propose_orphans(
-            work, cfg, self.fps, linked_tracks=linked, pending_endpoints=pending
+            work,
+            cfg,
+            self.fps,
+            linked_tracks=linked,
+            pending_endpoints=pending,
+            excluded=self.excluded,
         )
         self._route(evs, Band.of(cfg.orphan), "orphan")
         for ev in evs:
@@ -505,7 +547,7 @@ class _Stages:
     def _fill(self, work, protected):
         if not self.cfg.fill.enabled or work.empty:
             return work
-        work, evs = fill_stage(work, self.cfg, self.fps, protected)
+        work, evs = fill_stage(work, self.cfg, self.fps, protected, self.excluded)
         for ev in evs:
             self.seq["fill"] += 1
             ev.id = f"fill-r0-{self.seq['fill']:06d}"
@@ -754,7 +796,7 @@ class TrackRefiner:
                 video=video_file,
                 frame_count=(vinfo or {}).get("frame_count", 0),
             )
-            with tqdm(total=5, desc=desc, unit=" stage", disable=not verbose) as pbar:
+            with tqdm(total=6, desc=desc, unit=" stage", disable=not verbose) as pbar:
                 work, events = stages.run(
                     work, tick=lambda name: (pbar.set_postfix_str(name), pbar.update(1))
                 )
@@ -786,6 +828,7 @@ class TrackRefiner:
             "before": before,
             "after": table_summary(work, fps_val),
             "events": _event_counts(events),
+            "dedup": dict(stages.merge_counts),
             "vlm": _vlm_counts(runner, events),
             "orphan_deferred": sorted(id_map[t] for t in stages.orphan_deferred if t in id_map),
             "filled_input_rows_removed": tin.n_filled_removed,
@@ -802,6 +845,7 @@ class TrackRefiner:
             "fps_source": fps_src,
             "frame_size": list(frame_size) if frame_size else None,
             "id_map": {str(k): v for k, v in id_map.items()},
+            "absorbed": {str(k): int(v) for k, v in stages.absorbed.items()},
             "n_filled_input_rows_removed": tin.n_filled_removed,
             "smoothing": cfg.fill.smooth_existing,
             "summary": summary,
