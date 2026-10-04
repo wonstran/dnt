@@ -576,8 +576,13 @@ class TrackDesc:
         }
 
 
-def describe_tracks(work, cfg: RefineConfig, fps: float, occluded) -> dict[int, TrackDesc]:
-    """Build a ``TrackDesc`` per track; ``occluded`` is the row-aligned occlusion mask."""
+def describe_tracks(
+    work, cfg: RefineConfig, fps: float, occluded, excluded=None
+) -> dict[int, TrackDesc]:
+    """Build a ``TrackDesc`` per track; ``occluded`` is the row-aligned occlusion mask.
+
+    ``excluded`` maps a raw ID to frames dedup dropped; the descriptors' lineage skips them.
+    """
     lc, hw = cfg.link, cfg.motion.height_window
     out: dict[int, TrackDesc] = {}
     for t, g in work.groupby("track", sort=True):
@@ -602,7 +607,7 @@ def describe_tracks(work, cfg: RefineConfig, fps: float, occluded) -> dict[int, 
             speed_start=span_speed(frames, boxes, fps, lc.speed_seconds, at="start"),
             end_clean=boxes[clean[-1]] if len(clean) else boxes[-1],
             start_clean=boxes[clean[0]] if len(clean) else boxes[0],
-            lineage=lineage_of_rows(g),
+            lineage=lineage_of_rows(g, excluded),
         )
     return out
 
@@ -831,6 +836,7 @@ def score_candidates(
     frame_size,
     occluded,
     min_score: float | None = None,
+    excluded=None,
 ) -> tuple[list[Candidate], dict[int, TrackDesc]]:
     """Gate and score every end->start pair (spec 6.3).
 
@@ -849,7 +855,7 @@ def score_candidates(
                     f"link.{name}: motion-only scoring (no appearance provider) needs a "
                     "positive mot + gap weight"
                 )
-    descs = describe_tracks(work, cfg, fps, occluded)
+    descs = describe_tracks(work, cfg, fps, occluded, excluded)
     if len(descs) < 2:
         return [], descs
     occl = _Occluders(work, context)
@@ -918,7 +924,7 @@ def score_candidates(
     return cands, descs
 
 
-def legacy_link_events(work, cfg: RefineConfig, fps: float) -> list[Event]:
+def legacy_link_events(work, cfg: RefineConfig, fps: float, excluded=None) -> list[Event]:
     """Return ``link_tracklets``'s matches as LINK proposals (``link.mode: legacy``)."""
     lc = cfg.link
     if work.empty:
@@ -948,8 +954,8 @@ def legacy_link_events(work, cfg: RefineConfig, fps: float) -> list[Event]:
                 kind=EventKind.LINK,
                 tracks=[a, b],
                 lineage=[
-                    lineage_of_rows(work[work["track"] == a]),
-                    lineage_of_rows(work[work["track"] == b]),
+                    lineage_of_rows(work[work["track"] == a], excluded),
+                    lineage_of_rows(work[work["track"] == b], excluded),
                 ],
                 frames=(t_e, t_s),
                 params={"gate": "legacy", "gap": [t_e, t_s]},
@@ -1125,10 +1131,11 @@ def run_link_stage(
     frame_size,
     occluded,
     route: Callable[[list[Event]], None],
+    excluded=None,
 ) -> LinkStageResult:
     """Propose, route, and resolve LINK events for the current work table."""
     if cfg.link.mode == "legacy":
-        evs = legacy_link_events(work, cfg, fps)
+        evs = legacy_link_events(work, cfg, fps, excluded)
         route(evs)
         acc = [e for e in evs if e.decision in ACCEPTED]
         for e in acc:
@@ -1143,6 +1150,7 @@ def run_link_stage(
         frame_size=frame_size,
         occluded=occluded,
         min_score=cfg.link.reject_below,
+        excluded=excluded,
     )
 
     def make_event(c: Candidate, routed: float, extra: dict) -> Event:

@@ -236,7 +236,11 @@ def _event_counts(events: list[Event]) -> dict[str, int]:
 
 
 def fill_stage(
-    work: pd.DataFrame, cfg: RefineConfig, fps: float, protected: dict[int, list[tuple[int, int]]]
+    work: pd.DataFrame,
+    cfg: RefineConfig,
+    fps: float,
+    protected: dict[int, list[tuple[int, int]]],
+    excluded: dict[int, set[int]] | None = None,
 ) -> tuple[pd.DataFrame, list[Event]]:
     """Run stage 4; return the filled table and its FILL / SMOOTH records (spec 6.4)."""
     if work.empty:
@@ -260,7 +264,7 @@ def fill_stage(
     gapped = out.loc[out["interp"] == 1, "track"].unique()
     for t, g in out[out["track"].isin(gapped)].groupby("track", sort=True):
         obs = g[g["interp"] == 0]
-        lin = lineage_of_rows(obs)
+        lin = lineage_of_rows(obs, excluded)
         for a, b in frame_runs(g.loc[g["interp"] == 1, "frame"]):
             f_before = int(obs.loc[obs["frame"] < a, "frame"].iloc[-1])
             f_after = int(obs.loc[obs["frame"] > b, "frame"].iloc[0])
@@ -301,7 +305,7 @@ def fill_stage(
                 stage="fill",
                 kind=EventKind.SMOOTH,
                 tracks=[int(t)],
-                lineage=[lineage_of_rows(before[before["track"] == t])],
+                lineage=[lineage_of_rows(before[before["track"] == t], excluded)],
                 frames=(int(f.min()), int(f.max())),
                 params={"n_rows": int((shift > 0).sum())},
                 algo_score=1.0,

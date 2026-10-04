@@ -411,6 +411,7 @@ def propose_orphans(
     *,
     linked_tracks: set[int],
     pending_endpoints: set[int],
+    excluded=None,
 ) -> tuple[list[Event], list[int]]:
     """Propose dropping short unlinked tracks; defer those with a pending link (spec 6.2)."""
     oc = cfg.orphan
@@ -435,7 +436,7 @@ def propose_orphans(
                 stage=ORPHAN_STAGE,
                 kind=EventKind.DROP,
                 tracks=[t],
-                lineage=[lineage_of_rows(g)],
+                lineage=[lineage_of_rows(g, excluded)],
                 frames=(int(g["frame"].iloc[0]), int(g["frame"].iloc[-1])),
                 params={"reason": "orphan", "spans": None},
                 algo_score=score,
