@@ -2,7 +2,15 @@ import math
 
 import numpy as np
 
-from dnt.refine.events import Decision, Event, EventKind, Ledger, assign_ids, proposal_key
+from dnt.refine.events import (
+    DEFINING_PARAMS,
+    Decision,
+    Event,
+    EventKind,
+    Ledger,
+    assign_ids,
+    proposal_key,
+)
 
 
 def _split(tracks=(4,), cut=821, lineage=((12, 780, 900),)):
@@ -91,3 +99,37 @@ def test_spans_alone_change_the_drop_and_reclass_keys():
         keys = {proposal_key("screen", kind, lin, {**base, "spans": spans})
                 for spans in (None, [[850, 900]], [[851, 900]], [[780, 820], [850, 900]])}
         assert len(keys) == 4, kind
+
+
+def _merge(tracks, lineage, span=(652, 834), key_lineage=None):
+    return Event.propose(stage="dedup", kind=EventKind.MERGE, tracks=tracks, lineage=lineage,
+                         key_lineage=key_lineage, frames=span, params={"span": list(span)},
+                         algo_score=0.9, signals={"shared": 7})
+
+
+def test_merge_key_uses_key_lineage_and_ignores_track_order():
+    a, b = [[122, 652, 834]], [[125, 652, 834]]
+
+    def canon(lin):
+        return sorted(lin, key=lambda spans: tuple(spans[0]))
+
+    e1 = _merge([3, 9], [a, b], key_lineage=canon([a, b]))
+    e2 = _merge([9, 3], [b, a], key_lineage=canon([b, a]))
+    assert e1.proposal_key == e2.proposal_key
+    assert e1.lineage == [a, b] and e2.lineage == [b, a]  # stored in tracks order, never sorted
+    assert DEFINING_PARAMS[EventKind.MERGE] == ("span",)
+    assert _merge([3, 9], [a, b], span=(652, 835), key_lineage=canon([a, b])).proposal_key \
+        != e1.proposal_key
+
+
+def test_without_key_lineage_the_key_follows_the_lineage_order():
+    a, b = [[122, 652, 834]], [[125, 652, 834]]
+    assert _merge([3, 9], [a, b]).proposal_key != _merge([9, 3], [b, a]).proposal_key
+
+
+def test_merge_round_trips_through_the_ledger(tmp_path):
+    ev = _merge([3, 9], [[[122, 652, 834]], [[125, 652, 834]]])
+    ev.id = "dedup-r0-000001"
+    Ledger({"format": "x"}, [ev]).write(tmp_path / "l.jsonl")
+    back = Ledger.read(tmp_path / "l.jsonl").events[0]
+    assert back.kind is EventKind.MERGE and back.to_dict() == ev.to_dict()

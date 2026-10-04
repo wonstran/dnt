@@ -18,6 +18,7 @@ class EventKind(StrEnum):
     DROP = "DROP"
     RECLASS = "RECLASS"
     SPLIT = "SPLIT"
+    MERGE = "MERGE"
     LINK = "LINK"
     FILL = "FILL"
     SMOOTH = "SMOOTH"
@@ -41,6 +42,7 @@ DEFINING_PARAMS: dict[EventKind, tuple[str, ...]] = {
     EventKind.SPLIT: ("cut_frame",),
     EventKind.DROP: ("reason", "spans", "of"),
     EventKind.RECLASS: ("new_cls", "spans"),
+    EventKind.MERGE: ("span",),
     EventKind.LINK: ("gap",),
     EventKind.FILL: ("gap",),
     EventKind.SMOOTH: (),
@@ -129,14 +131,20 @@ class Event:
         params: dict,
         algo_score: float,
         signals: dict | None = None,
+        key_lineage=None,
         round: int = 0,
     ) -> Event:
-        """Create an undecided proposal and compute its key."""
+        """Create an undecided proposal and compute its key.
+
+        ``key_lineage``, when given, replaces ``lineage`` in the key only, so an event can store
+        its lineage in ``tracks`` order and still have a key that does not depend on that order.
+        """
         params = clean_json(dict(params))
         lineage = clean_json(lineage)
+        key_source = lineage if key_lineage is None else clean_json(key_lineage)
         return cls(
             id="",
-            proposal_key=proposal_key(stage, kind, lineage, params),
+            proposal_key=proposal_key(stage, kind, key_source, params),
             round=int(round),
             stage=stage,
             kind=EventKind(kind),
