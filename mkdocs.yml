@@ -45,6 +45,7 @@ nav:
           - Events and Ledger: api/refine/events.md
           - Interpolation: api/refine/interpolate.md
           - Linking: api/refine/link.md
+          - Duplicate merging: api/refine/dedup.md
           - Appearance: api/refine/appearance.md
           - Verification: api/refine/verification.md
       - Engine:

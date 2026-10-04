@@ -1,8 +1,9 @@
 # Track Refinement (`dnt.refine`)
 
 `dnt.refine` refines a track file after tracking: it splits ID switches, screens false tracks,
-links fragments (including across static waits and witnessed occlusions), drops orphans, and
-fills gaps. Every edit is recorded in a JSONL ledger next to the output.
+merges interleaved duplicate tracks, links fragments (including across static waits and
+witnessed occlusions), drops orphans, and fills gaps. Every edit is recorded in a JSONL ledger
+next to the output.
 
 Used like `Detector` and `Tracker`:
 
@@ -47,6 +48,27 @@ The score is multiplied by a border prior, `0.8 + 0.2 * b`, where `b` is 0 for a
 or starts near the image border. With `accept_above` 0.62, such border links can now be
 applied too: on the three audited clips, 2 of the 8 applied links (beginning 98->134, middle
 221->222) were border links, and both were among the audited, correct ones.
+
+## Interleaved duplicate tracks
+
+A tracker can alternate IDs on one person from frame to frame. Each ID then covers part of the
+trajectory over the same span, and gap filling makes the overlap visible. Stage `dedup` (between
+screen and link) proposes a `MERGE` for two tracks whose boxes follow each other but which are
+observed together on few frames (`co_occupancy`, the share of the sparser track's frames on
+which the other is also observed, is low). Two people walking side by side are observed
+together on most frames, so they are never merged.
+
+```yaml
+dedup:
+  enabled: true
+  accept_above: 0.75   # auto-merge at or above this score
+  reject_below: 0.40   # auto-reject below it; in between the merge goes to review
+  cooccur_hi: 0.50     # observed together on this share of frames or more: never a candidate
+```
+
+Merged tracks keep the earlier track's ID and, on a frame where both had a row, the row with
+the higher score; the dropped rows are listed in the event's `dropped` signal. Merges are never
+sent to the VLM in this release.
 
 ## Appearance
 

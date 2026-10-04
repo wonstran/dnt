@@ -3,6 +3,16 @@
 ## Unreleased
 
 ### New
+- `dnt.refine` merges interleaved duplicate tracks. A tracker sometimes alternates IDs on one
+  person from frame to frame; the fill stage then interpolated each ID into the other's frames,
+  so the output showed overlapping boxes on one person. The new `dedup` stage runs between
+  screen and link: it finds pairs of tracks that move together but are almost never observed on
+  the same frame, scores them (`MERGE` events), and merges the confident ones into the earlier
+  ID, keeping the higher-score row where both have one. Pairs observed together often (two
+  people walking side by side) are never merged. Uncertain merges go to the review page;
+  merges that were accepted but blocked by a conflicting pair are shown there read-only. Set
+  `dedup.enabled: false` for the old behavior. New config block `dedup`; the ledger header gains
+  `absorbed` and the run summary gains `dedup`.
 - `dnt.refine` looks at appearance. With a video and `encoder.kind` of `dino` (DINOv2, the
   default) or `reid` (torchreid OSNet), `refine` crops each box, skips crops that other boxes
   occlude, and embeds the rest. Stage 1 (ID-switch splits) and stage 3 (links) score with the
