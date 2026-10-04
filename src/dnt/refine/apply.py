@@ -8,12 +8,28 @@ import pandas as pd
 from .events import Event, EventKind
 
 
-def lineage_of_rows(rows: pd.DataFrame) -> list[list[int]]:
-    """Return ``[[raw_id, first_frame, last_frame], ...]`` for rows, ordered by first frame."""
+def lineage_of_rows(
+    rows: pd.DataFrame, excluded: dict[int, set[int]] | None = None
+) -> list[list[int]]:
+    """Return ``[[raw_id, first_frame, last_frame], ...]`` for rows, ordered by first frame.
+
+    ``excluded`` maps a raw ID to frames that stage ``dedup`` dropped (dedup spec 3.5). A raw
+    ID's span is split at each excluded frame that lies strictly inside it, so a consumer that
+    reads the raw observations inside the spans never sees a dropped row.
+    """
     if rows.empty:
         return []
-    g = rows.groupby("raw_id")["frame"].agg(["min", "max"]).reset_index().sort_values("min")
-    return [[int(r), int(a), int(b)] for r, a, b in g[["raw_id", "min", "max"]].to_numpy()]
+    g = rows.groupby("raw_id")["frame"].agg(["min", "max"]).reset_index()
+    spans: list[list[int]] = []
+    for raw, first, last in g[["raw_id", "min", "max"]].to_numpy():
+        raw, first, last = int(raw), int(first), int(last)
+        start = first
+        for f in sorted(f for f in (excluded or {}).get(raw, ()) if first < f < last):
+            if f > start:
+                spans.append([raw, start, f - 1])
+            start = f + 1
+        spans.append([raw, start, last])
+    return sorted(spans, key=lambda s: (s[1], s[0]))
 
 
 def lineage(work: pd.DataFrame, track: int) -> list[list[int]]:
@@ -113,6 +129,41 @@ def merge_chains(
     out = work.drop(index=drop_idx).copy()
     out["track"] = out["track"].map(lambda t: rep_of.get(int(t), int(t))).astype(int)
     return out.sort_values(["track", "frame"]), rep_of
+
+
+def rows_to_drop(rows: pd.DataFrame) -> pd.Index:
+    """Return the index labels of rows that lose on a frame where several rows exist.
+
+    The best row of a frame has the higher ``score``; ties go to the smaller ``raw_id``, then
+    to the smaller ``track``. The order is total, so the kept set does not depend on the order
+    the rows or the merges arrive in (dedup spec 3.5).
+    """
+    order = rows.sort_values(
+        ["frame", "score", "raw_id", "track"], ascending=[True, False, True, True], kind="stable"
+    )
+    return order.index[order.duplicated("frame", keep="first")]
+
+
+def merge_tracks(
+    work: pd.DataFrame, rep_of: dict[int, int]
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Relabel every member of a merge group to its representative and keep one row per frame.
+
+    ``rep_of`` maps each member track to its representative (representatives map to
+    themselves). Returns the merged table, with its index labels kept and sorted by track and
+    frame, and the dropped rows.
+    """
+    if not rep_of:
+        return work, work.iloc[0:0]
+    new_track = work["track"].map(lambda t: rep_of.get(int(t), int(t)))
+    members = work[work["track"].isin(rep_of)]
+    drop: list = []
+    for _, g in members.assign(_rep=new_track.loc[members.index]).groupby("_rep"):
+        drop.extend(rows_to_drop(g).tolist())
+    dropped = work.loc[drop]
+    out = work.drop(index=drop).copy()
+    out["track"] = new_track.loc[out.index].astype(int)
+    return out.sort_values(["track", "frame"]), dropped
 
 
 def renumber(work: pd.DataFrame) -> tuple[pd.DataFrame, dict[int, int]]:

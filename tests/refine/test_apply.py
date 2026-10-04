@@ -159,3 +159,51 @@ def test_split_track_rejects_existing_new_id():
         A.split_track(w, 1, 2, 2)
     with pytest.raises(ValueError, match="new_id 1 already exists"):
         A.split_track(w, 1, 2, 1)
+
+
+def test_lineage_of_rows_splits_spans_at_excluded_frames():
+    rows = _work(box_rows(122, [f for f in range(10, 31) if f != 20], 0.0, 0.0))
+    assert A.lineage_of_rows(rows) == [[122, 10, 30]]
+    assert A.lineage_of_rows(rows, {122: {20}}) == [[122, 10, 19], [122, 21, 30]]
+    rows2 = _work(box_rows(122, [f for f in range(10, 31) if f not in (20, 21)], 0.0, 0.0))
+    assert A.lineage_of_rows(rows2, {122: {20, 21}}) == [[122, 10, 19], [122, 22, 30]]
+
+
+def test_excluded_frames_outside_or_at_the_ends_of_a_span_change_nothing():
+    rows = _work(box_rows(122, range(10, 31), 0.0, 0.0))
+    assert A.lineage_of_rows(rows, {122: {5, 10, 30, 31}}) == [[122, 10, 30]]
+    assert A.lineage_of_rows(rows, {999: {20}}) == [[122, 10, 30]]
+
+
+def test_lineage_of_rows_orders_split_spans_across_raw_ids_by_first_frame():
+    rows = _work(box_rows(7, range(0, 6), 0.0, 0.0),
+                 box_rows(122, [f for f in range(10, 31) if f != 20], 0.0, 0.0))
+    assert A.lineage_of_rows(rows, {122: {20}}) == [[7, 0, 5], [122, 10, 19], [122, 21, 30]]
+    assert A.lineage_of_rows(rows.iloc[0:0], {122: {20}}) == []
+
+
+def test_rows_to_drop_keeps_the_best_row_per_frame():
+    w = _work(box_rows(1, range(3), 0.0, 0.0, score=0.5),
+              box_rows(2, range(3), 0.0, 0.0, score=0.9),
+              box_rows(3, [5], 0.0, 0.0))
+    assert sorted(w.loc[A.rows_to_drop(w), "track"].tolist()) == [1, 1, 1]
+
+
+def test_rows_to_drop_breaks_a_score_tie_with_the_smaller_raw_id():
+    w = _work(box_rows(5, range(2), 0.0, 0.0, score=0.7), box_rows(3, range(2), 0.0, 0.0, score=0.7))
+    assert set(w.loc[A.rows_to_drop(w), "track"]) == {5}
+
+
+def test_merge_tracks_relabels_drops_losers_and_keeps_the_index():
+    w = _work(box_rows(1, range(0, 10), 0.0, 0.0, score=0.9),
+              box_rows(2, range(5, 15), 0.0, 0.0, score=0.8),
+              box_rows(3, range(0, 4), 0.0, 0.0))
+    out, dropped = A.merge_tracks(w, {1: 1, 2: 1})
+    assert sorted(out["track"].unique()) == [1, 3]
+    assert out[out["track"] == 1]["frame"].tolist() == list(range(15))
+    assert dropped["raw_id"].unique().tolist() == [2]
+    assert sorted(dropped["frame"].tolist()) == list(range(5, 10))
+    assert set(out.index) | set(dropped.index) == set(w.index)
+    assert set(out.index) & set(dropped.index) == set()
+    same, none = A.merge_tracks(w, {})
+    assert same is w and none.empty
