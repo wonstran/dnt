@@ -388,7 +388,9 @@ def write_review(
         '<!doctype html><html><head><meta charset="utf-8">'
         f"<title>{_e(title)}</title><style>{_CSS}</style></head>"
         f'<body data-run="{_e(run_key)}">'
-        f"<h2>{_e(title)}: {len(pend)} event(s) to review</h2>"
+        f"<h2>{_e(title)}: {len(pend)} event(s) to review"
+        + (f", {len(skipped)} skipped merge(s)" if skipped else "")
+        + "</h2>"
         '<div class="bar"><select id="stage-filter">' + stage_opts + "</select> "
         '<select id="sort"><option value="score-desc">score, high first</option>'
         '<option value="score-asc">score, low first</option><option value="order">order</option>'

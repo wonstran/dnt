@@ -418,7 +418,10 @@ different proposals after a rerun, so `proposal_key` (the event's) and `run_key`
 say which proposal and run each decision was made on; `apply` will refuse an entry whose
 `proposal_key` does not match the ledger and warn when the `run_key` differs. Hand-written files
 may also use `"accept"`, `"reject"`, or `{"accept": true, "new_cls": 3}`. Applying the file
-arrives in a later release. A rerun deletes only the images listed in `OUT.review/.dnt-review.json`, the page's own
+arrives in a later release. Merges that were accepted but blocked, because joining would put two
+densely co-observed or explicitly rejected tracks in one track, are shown read-only in a separate
+"Skipped merges" section, with no accept or reject controls and nothing in the exported decisions.
+A rerun deletes only the images listed in `OUT.review/.dnt-review.json`, the page's own
 manifest, and never overwrites another file. Without a video the page is still written, with
 signals only.
 

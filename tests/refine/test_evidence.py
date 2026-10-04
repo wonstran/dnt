@@ -342,6 +342,36 @@ def test_chunks_are_cut_after_sorting_the_events_by_their_first_frame(tmp_path, 
     assert ranges == [(0, 19), (90, 109)]  # each chunk reads one compact range
 
 
+def _merge_ev(lin_a, lin_b, span):
+    ev = Event.propose(stage="dedup", kind=EventKind.MERGE, tracks=[1, 2],
+                       lineage=[lin_a, lin_b], frames=tuple(span),
+                       params={"span": list(span)}, algo_score=0.9, signals={})
+    ev.id = "dedup-r0-000002"
+    return ev
+
+
+def test_merge_context_draws_an_interpolated_dashed_b_when_b_is_not_observed_there(tmp_path):
+    w = _work(_walker(1, range(0, 60, 2)), _walker(2, range(1, 60, 2)))
+    b = _builder(tmp_path, w, {1: RED, 2: BLUE})
+    plan = b.plan(_merge_ev([[1, 0, 58]], [[2, 1, 59]], (1, 58)))
+    (ctx,) = plan.contexts
+    assert b._box_at([[2, 1, 59]], ctx.frame) is None
+    (box_b,) = [c for c in ctx.boxes if c.label == "B"]
+    assert box_b.xywh is not None and box_b.dashed
+    (box_a,) = [c for c in ctx.boxes if c.label == "A"]
+    assert not box_a.dashed
+    assert abs(box_b.xywh[0] - box_a.xywh[0]) <= 2.0  # walkers move 1 px/frame
+
+
+def test_merge_context_keeps_a_solid_b_when_b_is_observed_at_the_frame(tmp_path):
+    w = _work(_walker(1, range(0, 60)), _walker(2, range(0, 60), x0=100.0))
+    b = _builder(tmp_path, w, {1: RED, 2: BLUE})
+    plan = b.plan(_merge_ev([[1, 0, 59]], [[2, 0, 59]], (0, 59)))
+    (ctx,) = plan.contexts
+    (box_b,) = [c for c in ctx.boxes if c.label == "B"]
+    assert box_b.xywh is not None and not box_b.dashed
+
+
 def test_merge_plan_shows_each_track_in_its_own_row(tmp_path):
     w = _work(_walker(1, range(0, 60, 2)), _walker(2, range(1, 60, 2)))
     b = _builder(tmp_path, w, {1: RED, 2: BLUE})

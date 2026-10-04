@@ -176,6 +176,19 @@ class EvidenceBuilder:
                 return self._box[(int(raw), frame)]
         return None
 
+    def _interp_box(self, spans, obs, frame: int):
+        """Box at ``frame`` interpolated from the nearest observed frames of ``obs``."""
+        before = [f for _, f in obs if f <= frame]
+        after = [f for _, f in obs if f >= frame]
+        f0, f1 = (before[-1] if before else None), (after[0] if after else None)
+        if f0 is None or f1 is None:
+            return self._box_at(spans, f0 if f1 is None else f1)
+        b0, b1 = self._box_at(spans, f0), self._box_at(spans, f1)
+        if b0 is None or b1 is None or f1 == f0:
+            return b0 if b0 is not None else b1
+        k = (frame - f0) / (f1 - f0)
+        return tuple(a + k * (b - a) for a, b in zip(b0, b1, strict=True))
+
     def _in_video(self, frame: int) -> bool:
         return frame >= 0 and (self._limit is None or frame < self._limit)
 
@@ -251,12 +264,15 @@ class EvidenceBuilder:
             b_obs = self._clean(b_spans, lo, hi)
             plan.rows += [("A", _spread(a_obs, 6)), ("B", _spread(b_obs, 6))]
             f = a_obs[len(a_obs) // 2][1] if a_obs else (lo + hi) // 2
+            b_box, b_dashed = self._box_at(b_spans, f), False
+            if b_box is None and b_obs:
+                b_box, b_dashed = self._interp_box(b_spans, b_obs, f), True
             plan.contexts += self._ctx(
                 f,
                 "A and B",
                 [
                     ContextBox("A", GREEN, False, self._box_at(a_spans, f)),
-                    ContextBox("B", RED, False, self._box_at(b_spans, f)),
+                    ContextBox("B", RED, b_dashed, b_box),
                 ],
             )
         return plan

@@ -498,6 +498,15 @@ def test_a_conflicting_accepted_merge_gets_a_read_only_card_and_keeps_the_page(t
     assert 'type="radio"' not in html and 'class="card"' not in html
 
 
+def test_heading_counts_skipped_merges_only_when_there_are_some(tmp_path):
+    html = write(tmp_path, [skipped_merge()]).read_text()
+    assert "<h2>o: 0 event(s) to review, 1 skipped merge(s)</h2>" in html
+    p = pending(EventKind.SPLIT, "switch", 2, cut_frame=40)
+    html = write(tmp_path, [p, skipped_merge()]).read_text()
+    assert "<h2>o: 1 event(s) to review, 1 skipped merge(s)</h2>" in html
+    assert "<h2>o: 1 event(s) to review</h2>" in write(tmp_path, [p]).read_text()
+
+
 def test_a_redundant_merge_has_no_card_and_a_page_with_neither_group_is_removed(tmp_path):
     assert write(tmp_path, [skipped_merge(reason="redundant")]) is None
     write(tmp_path, [skipped_merge()])
