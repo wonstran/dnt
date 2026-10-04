@@ -267,3 +267,46 @@ def test_good_vlm_settings_validate_and_round_trip(tmp_path):
     cfg.validate()
     cfg.to_yaml(tmp_path / "c.yaml")
     assert RefineConfig.from_yaml(tmp_path / "c.yaml").vlm.votes == 3
+
+
+# ---- dedup stage (spec 6.5) ------------------------------------------------------------------
+
+
+def test_dedup_defaults_and_yaml_round_trip(tmp_path):
+    cfg = RefineConfig.defaults()
+    d = cfg.dedup
+    assert d.enabled is True
+    assert (d.accept_above, d.reject_below) == (0.75, 0.40)
+    assert (d.min_overlap_seconds, d.min_observed) == (1.0, 8)
+    assert (d.comotion_lo, d.comotion_hi) == (0.25, 0.50)
+    assert (d.cooccur_lo, d.cooccur_hi, d.conflict_min_shared) == (0.10, 0.50, 3)
+    assert (d.appearance_floor, d.app_lo, d.app_hi) == (0.60, 0.40, 0.70)
+    cfg.to_yaml(tmp_path / "c.yaml")
+    assert RefineConfig.from_yaml(tmp_path / "c.yaml").dedup == d
+
+
+def test_dedup_overlay_and_unknown_key():
+    cfg = RefineConfig.from_dict({"dedup": {"enabled": False, "min_observed": 12}})
+    assert cfg.dedup.enabled is False and cfg.dedup.min_observed == 12
+    assert cfg.dedup.accept_above == 0.75  # untouched keys keep their defaults
+    with pytest.raises(ValueError, match=re.escape("unknown config key 'dedup.nope'")):
+        RefineConfig.from_dict({"dedup": {"nope": 1}})
+
+
+@pytest.mark.parametrize(
+    ("patch", "message"),
+    [
+        ({"accept_above": 0.3, "reject_below": 0.4}, "dedup: need 0 <= reject_below"),
+        ({"cooccur_lo": 0.6, "cooccur_hi": 0.5}, "dedup.cooccur_lo must be below"),
+        ({"comotion_lo": 0.5, "comotion_hi": 0.5}, "dedup.comotion_lo must be below"),
+        ({"app_lo": 0.8, "app_hi": 0.7}, "dedup.app_lo must be below"),
+        ({"conflict_min_shared": 0}, "dedup.conflict_min_shared"),
+        ({"min_observed": 0}, "dedup.min_observed"),
+        ({"min_observed": True}, "dedup.min_observed"),
+        ({"min_overlap_seconds": 0}, "dedup.min_overlap_seconds"),
+        ({"appearance_floor": 1.5}, "dedup.appearance_floor"),
+    ],
+)
+def test_dedup_validation(patch, message):
+    with pytest.raises(ValueError, match=message):
+        RefineConfig.from_dict({"dedup": patch})

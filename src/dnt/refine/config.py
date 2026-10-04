@@ -200,6 +200,25 @@ class ScreenConfig:
 
 
 @dataclass(kw_only=True)
+class DedupConfig:
+    """Stage dedup settings: merging interleaved duplicate tracks (dedup spec 6)."""
+
+    enabled: bool = True
+    accept_above: float = 0.75
+    reject_below: float = 0.40
+    min_overlap_seconds: float = 1.0
+    min_observed: int = 8
+    comotion_lo: float = 0.25
+    comotion_hi: float = 0.50
+    cooccur_lo: float = 0.10
+    cooccur_hi: float = 0.50
+    conflict_min_shared: int = 3
+    appearance_floor: float = 0.60
+    app_lo: float = 0.40
+    app_hi: float = 0.70
+
+
+@dataclass(kw_only=True)
 class LinkConfig:
     """Stage 3 settings (spec 6.3)."""
 
@@ -358,6 +377,7 @@ class RefineConfig:
     motion: MotionConfig = field(default_factory=MotionConfig)
     encoder: EncoderConfig = field(default_factory=EncoderConfig)
     screen: ScreenConfig = field(default_factory=ScreenConfig)
+    dedup: DedupConfig = field(default_factory=DedupConfig)
     switch: SwitchConfig = field(default_factory=SwitchConfig)
     link: LinkConfig = field(default_factory=LinkConfig)
     orphan: OrphanConfig = field(default_factory=OrphanConfig)
@@ -439,10 +459,11 @@ class RefineConfig:
             p.append("link.mode must be 'scored' or 'legacy'")
         if self.context.format not in ("auto", "tracks", "dets"):
             p.append("context.format must be 'auto', 'tracks' or 'dets'")
-        for name in ("switch", "screen", "link", "orphan"):
+        for name in ("switch", "screen", "dedup", "link", "orphan"):
             s = getattr(self, name)
             if not 0.0 <= s.reject_below < s.accept_above <= 1.0:
                 p.append(f"{name}: need 0 <= reject_below < accept_above <= 1")
+        p.extend(_dedup_problems(self.dedup))
         sc, lc = self.screen, self.link
         if not sc.static_score_cap < sc.accept_above:
             p.append("screen.static_score_cap must be below screen.accept_above")
@@ -598,6 +619,35 @@ def _url_problems(url) -> list[str]:
             "vlm.api_key_file, vlm.api_key_env, or TrackRefiner(vlm_api_key=...)"
         ]
     return []
+
+
+def _dedup_problems(dd: DedupConfig) -> list[str]:
+    """Return the rules of the dedup block that its values break."""
+
+    def num(x):
+        return isinstance(x, int | float) and not isinstance(x, bool) and math.isfinite(x)
+
+    def whole(x):
+        return isinstance(x, int) and not isinstance(x, bool)
+
+    p: list[str] = []
+    if not (whole(dd.min_observed) and dd.min_observed >= 1):
+        p.append("dedup.min_observed must be an integer >= 1")
+    if not (whole(dd.conflict_min_shared) and dd.conflict_min_shared >= 1):
+        p.append("dedup.conflict_min_shared must be an integer >= 1")
+    if not (num(dd.min_overlap_seconds) and dd.min_overlap_seconds > 0):
+        p.append("dedup.min_overlap_seconds must be a number > 0")
+    for lo, hi in (
+        ("comotion_lo", "comotion_hi"),
+        ("cooccur_lo", "cooccur_hi"),
+        ("app_lo", "app_hi"),
+    ):
+        a, b = getattr(dd, lo), getattr(dd, hi)
+        if not (num(a) and num(b) and a < b):
+            p.append(f"dedup.{lo} must be below dedup.{hi}")
+    if not (num(dd.appearance_floor) and 0.0 <= dd.appearance_floor <= 1.0):
+        p.append("dedup.appearance_floor must be a number in [0, 1]")
+    return p
 
 
 def _check_type(path: str, value, hint) -> None:
