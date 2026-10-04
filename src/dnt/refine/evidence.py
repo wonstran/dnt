@@ -244,6 +244,21 @@ class EvidenceBuilder:
             plan.contexts += self._ctx(
                 t_s, "B starts", [ContextBox("B", RED, False, self._box_at(b_spans, t_s))]
             )
+        elif event.kind is EventKind.MERGE:
+            b_spans = event.lineage[1]
+            lo, hi = (int(v) for v in event.params["span"])
+            a_obs = self._clean(a_spans, lo, hi)
+            b_obs = self._clean(b_spans, lo, hi)
+            plan.rows += [("A", _spread(a_obs, 6)), ("B", _spread(b_obs, 6))]
+            f = a_obs[len(a_obs) // 2][1] if a_obs else (lo + hi) // 2
+            plan.contexts += self._ctx(
+                f,
+                "A and B",
+                [
+                    ContextBox("A", GREEN, False, self._box_at(a_spans, f)),
+                    ContextBox("B", RED, False, self._box_at(b_spans, f)),
+                ],
+            )
         return plan
 
     # ---- rendering ----

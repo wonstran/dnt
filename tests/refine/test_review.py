@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from dnt.refine.events import Decision, Event, EventKind
+from dnt.refine.events import ACCEPTED, Decision, Event, EventKind
 from dnt.refine.review import _JS_PURE, review_image_dir, write_review
 from dnt.refine.verify import decide
 
@@ -476,3 +476,50 @@ def test_cards_show_the_output_track_ids_and_load_images_lazily(tmp_path):
     assert 'loading="lazy"' in page and re.search(r'<img [^>]*loading="lazy"', page)
     assert "output id(s): 9<" in write(tmp_path, [ev], id_map={"2": 9}).read_text()
     assert "output id(s): none" in write(tmp_path, [ev], id_map={}).read_text()
+
+
+def skipped_merge(idx=1, reason="conflict"):
+    ev = pending(EventKind.MERGE, "dedup", idx, tracks=(1, 2), span=[10, 90],
+                 signals={"co_occupancy": 0.9, "shared": 20})
+    decide(ev, Decision.AUTO_ACCEPT, source="auto")
+    assert ev.decision in ACCEPTED
+    ev.applied = False
+    ev.signals["skipped_reason"] = reason
+    ev.signals["conflicts_with"] = {"tracks": [1, 3], "why": "dense", "proposal_key": None}
+    return ev
+
+
+def test_a_conflicting_accepted_merge_gets_a_read_only_card_and_keeps_the_page(tmp_path):
+    page = write(tmp_path, [skipped_merge()])
+    assert page is not None
+    html = page.read_text()
+    assert "Skipped merges" in html and 'class="skipcard"' in html
+    assert "conflict" in html and "dense" in html
+    assert 'type="radio"' not in html and 'class="card"' not in html
+
+
+def test_a_redundant_merge_has_no_card_and_a_page_with_neither_group_is_removed(tmp_path):
+    assert write(tmp_path, [skipped_merge(reason="redundant")]) is None
+    write(tmp_path, [skipped_merge()])
+    assert (tmp_path / "o.review.html").exists()
+    assert write(tmp_path, []) is None
+    assert not (tmp_path / "o.review.html").exists()
+    assert not review_image_dir(tmp_path / "o.review.html").exists()
+
+
+def test_pending_and_skipped_cards_are_separate_and_only_pending_ones_have_controls(tmp_path):
+    pend = pending(EventKind.MERGE, "dedup", 1, tracks=(1, 2), span=[10, 90])
+    html = write(tmp_path, [pend, skipped_merge(idx=2)]).read_text()
+    assert html.count('class="card"') == 1 and html.count('class="skipcard"') == 1
+    assert html.count('type="radio"') == 2  # accept and reject of the pending card only
+
+
+def test_a_pending_merge_resolves_absorbed_endpoints_to_the_survivors_output_id(tmp_path):
+    # track 4 was absorbed by a merge (into 2) and then by a link (into 1): the header's map
+    # holds the resolved survivor for every absorbed ID
+    ev = pending(EventKind.MERGE, "dedup", 1, tracks=(4, 9), span=[10, 90])
+    html = write(tmp_path, [ev], id_map={1: 1, 9: 2}, absorbed={"4": 1, "2": 1}).read_text()
+    assert "output id(s): 1, 2" in html and "track_ids=[1, 2]" in html
+    # without the map the absorbed endpoint has no output ID, as before
+    plain = write(tmp_path, [ev], id_map={1: 1, 9: 2}).read_text()
+    assert "track_ids=[2]" in plain

@@ -15,14 +15,14 @@ import os
 from pathlib import Path
 from urllib.parse import quote
 
-from .events import Decision, Event, EventKind
+from .events import ACCEPTED, Decision, Event, EventKind
 
 log = logging.getLogger(__name__)
 
 _CSS = """
 body{font:14px/1.4 system-ui,sans-serif;margin:16px;background:#fafafa;color:#222}
-.card{background:#fff;border:1px solid #ccc;border-radius:6px;margin:12px 0;padding:10px}
-.card img{max-width:100%;border:1px solid #ddd}
+.card,.skipcard{background:#fff;border:1px solid #ccc;border-radius:6px;margin:12px 0;padding:10px}
+.card img,.skipcard img{max-width:100%;border:1px solid #ddd}
 .meta span{margin-right:12px}.sig{color:#555}pre{background:#f0f0f0;padding:6px;overflow:auto}
 .bar{position:sticky;top:0;background:#fafafa;padding:6px 0}
 """
@@ -128,15 +128,26 @@ def _reason(ev: Event) -> str:
     return str(ev.params.get("reason") or ev.signals.get("hypothesis") or ev.kind)
 
 
-def _output_ids(ev: Event, id_map: dict) -> list:
-    """Return the output ids of the event's tracks; a track gone from the output has none."""
-    return [i for i in (id_map.get(t, id_map.get(str(t))) for t in ev.tracks) if i is not None]
+def _output_ids(ev: Event, id_map: dict, absorbed: dict | None = None) -> list:
+    """Return the output ids of the event's tracks; a track gone from the output has none.
+
+    ``absorbed`` maps an absorbed work id to the work id that finally absorbed it (the ledger
+    header's map); a track that merging or linking absorbed is shown as its survivor.
+    """
+    absorbed = absorbed or {}
+    out = []
+    for t in ev.tracks:
+        s = absorbed.get(t, absorbed.get(str(t), t))
+        i = id_map.get(s, id_map.get(str(s)))
+        if i is not None and i not in out:
+            out.append(i)
+    return out
 
 
-def _snippet(ev: Event, id_map: dict, fps: float, video_file, track_file) -> str:
+def _snippet(ev: Event, id_map: dict, fps: float, video_file, track_file, absorbed=None) -> str:
     if video_file is None:
         return ""  # without a video there is nothing to cut a clip from
-    ids = _output_ids(ev, id_map)
+    ids = _output_ids(ev, id_map, absorbed)
     margin = round(2.0 * fps)
     # draw_track_clips writes one clip per track id; each runs from that track's first frame to
     # its last, widened by these offsets (frames), so every clip has 2 s of margin on each side
@@ -190,13 +201,15 @@ def _snippet_html(snippet: str) -> str:
     return f'<button class="copy" type="button">copy clip snippet</button><pre>{_e(snippet)}</pre>'
 
 
-def _card(ev: Event, img_rel: str | None, snippet: str, reclass_map: dict, id_map: dict) -> str:
+def _card(
+    ev: Event, img_rel: str | None, snippet: str, reclass_map: dict, id_map: dict, absorbed=None
+) -> str:
     image = (
         f'<img src="{_e(img_rel)}" alt="evidence" loading="lazy">'
         if img_rel
         else "<div>no image</div>"
     )
-    out_ids = ", ".join(str(i) for i in _output_ids(ev, id_map)) or "none"
+    out_ids = ", ".join(str(i) for i in _output_ids(ev, id_map, absorbed)) or "none"
     name = _e(ev.id)
     return (
         f'<div class="card" data-id="{name}" data-key="{_e(ev.proposal_key)}" '
@@ -211,6 +224,26 @@ def _card(ev: Event, img_rel: str | None, snippet: str, reclass_map: dict, id_ma
         f'<label><input type="radio" name="{name}" value="reject"> reject</label> '
         f"{_picker(ev, reclass_map)}</div>"
         f"{_snippet_html(snippet)}</div>"
+    )
+
+
+def _skipcard(ev: Event, img_rel: str | None, id_map: dict, absorbed=None) -> str:
+    image = (
+        f'<img src="{_e(img_rel)}" alt="evidence" loading="lazy">'
+        if img_rel
+        else "<div>no image</div>"
+    )
+    out_ids = ", ".join(str(i) for i in _output_ids(ev, id_map, absorbed)) or "none"
+    why = ev.signals.get("conflicts_with") or {}
+    return (
+        f'<div class="skipcard" data-skipped="{_e(ev.id)}">{image}'
+        f'<div class="meta"><span><b>{_e(ev.kind)}</b> accepted, not applied: '
+        f'{_e(ev.signals.get("skipped_reason"))}</span>'
+        f"<span>tracks {_e(ev.tracks)}</span><span>output id(s): {_e(out_ids)}</span>"
+        f"<span>frames {_e(ev.frames[0])}-{_e(ev.frames[1])}</span>"
+        f"<span>score {ev.algo_score:.3f}</span></div>"
+        f'<div class="sig">{_e(" ".join(_top_signals(ev.signals)))}</div>'
+        f"<div>blocked by tracks {_e(why.get('tracks'))}: {_e(why.get('why'))}</div></div>"
     )
 
 
@@ -272,6 +305,7 @@ def write_review(
     reclass_map: dict,
     title: str,
     run_key: str,
+    absorbed: dict | None = None,
 ) -> Path | None:
     """Write ``OUT.review.html`` and ``OUT.review/*.jpg`` for the pending events (spec 8.1).
 
@@ -285,20 +319,30 @@ def write_review(
         for e in events
         if e.decision is Decision.HUMAN_PENDING and e.kind not in (EventKind.FILL, EventKind.SMOOTH)
     ]
-    if not pend:
+    skipped = [
+        e
+        for e in events
+        if e.kind is EventKind.MERGE
+        and e.decision in ACCEPTED
+        and e.signals.get("skipped_reason") == "conflict"
+    ]
+    skipped_ids = {id(e) for e in skipped}
+    shown = pend + skipped
+    if not shown:
         _remove_own_files(review_path, img_dir)
         return None
     images: dict = {}
     if evidence is not None:
         try:
-            images = evidence.build_many(pend)
+            images = evidence.build_many(shown)
         except Exception as err:  # a damaged video must not stop the review being written
             log.warning("could not build the review images: %s", err)
-    cards, stages = [], sorted({e.stage for e in pend})
+    cards, cards_skipped = [], []
+    stages = sorted({e.stage for e in shown})
     owned_list = _listed_images(img_dir)  # None: no valid manifest, so nothing here is ours
     owned = set(owned_list or [])
     plan: dict[str, bytes] = {}
-    for ev in pend:
+    for ev in shown:
         name = f"{ev.id}.jpg"
         data = images.get(ev.id)
         if data is not None and name not in owned and os.path.lexists(img_dir / name):
@@ -311,7 +355,7 @@ def write_review(
         names = [*(owned_list or []), *(f"{i}.jpg" for i in plan if f"{i}.jpg" not in owned)]
         (img_dir / _MANIFEST).write_text(json.dumps({"images": names}))
     written: list[str] = []
-    for ev in pend:
+    for ev in shown:
         rel = None
         if ev.id in plan:
             (img_dir / f"{ev.id}.jpg").write_bytes(plan[ev.id])
@@ -319,8 +363,12 @@ def write_review(
             rel = f"{img_dir.name}/{ev.id}.jpg"
             if ev.vlm:
                 ev.vlm["evidence"] = rel
-        snippet = _snippet(ev, id_map, fps, video_file, track_file)
-        cards.append(_card(ev, None if rel is None else quote(rel), snippet, reclass_map, id_map))
+        link = None if rel is None else quote(rel)
+        if id(ev) in skipped_ids:
+            cards_skipped.append(_skipcard(ev, link, id_map, absorbed))
+        else:
+            snippet = _snippet(ev, id_map, fps, video_file, track_file, absorbed)
+            cards.append(_card(ev, link, snippet, reclass_map, id_map, absorbed))
     _remove_listed(img_dir, keep=set(written))  # images of events that are gone
     if written:
         (img_dir / _MANIFEST).write_text(json.dumps({"images": written}))
@@ -328,6 +376,13 @@ def write_review(
         _remove_manifest_and_dir(img_dir)
     stage_opts = '<option value="">all stages</option>' + "".join(
         f'<option value="{_e(s)}">{_e(s)}</option>' for s in stages
+    )
+    skipped_html = (
+        f'<h3>Skipped merges ({len(skipped)})</h3><div id="skipped">'
+        + "".join(cards_skipped)
+        + "</div>"
+        if skipped
+        else ""
     )
     page = (
         '<!doctype html><html><head><meta charset="utf-8">'
@@ -338,7 +393,8 @@ def write_review(
         '<select id="sort"><option value="score-desc">score, high first</option>'
         '<option value="score-asc">score, low first</option><option value="order">order</option>'
         '</select> <button id="export" type="button">Export decisions</button></div>'
-        '<div id="cards">' + "".join(cards) + f"</div><script>{_JS}</script></body></html>"
+        '<div id="cards">' + "".join(cards) + "</div>"
+        f"{skipped_html}<script>{_JS}</script></body></html>"
     )
     review_path.parent.mkdir(parents=True, exist_ok=True)  # refine writes this before the ledger
     review_path.write_text(page, encoding="utf-8")

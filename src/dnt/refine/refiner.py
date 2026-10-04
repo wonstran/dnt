@@ -817,6 +817,7 @@ class TrackRefiner:
             review_path=paths["review"],
             evidence=stages.evidence,
             id_map=id_map,
+            absorbed=stages.absorbed,
             fps=fps_val,
             video_file=None if video_file is None else str(Path(video_file).resolve()),
             track_file=str(out.resolve()),

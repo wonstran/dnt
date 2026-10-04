@@ -1,9 +1,11 @@
 import pytest
 
+from dnt.refine.apply import renumber
 from dnt.refine.config import RefineConfig
 from dnt.refine.dedup import propose_merges
 from dnt.refine.events import Decision, EventKind, Ledger
 from dnt.refine.refiner import TrackRefiner, _Stages
+from dnt.refine.review import write_review
 from dnt.refine.verify import Band
 
 from ._fixtures import table
@@ -145,3 +147,26 @@ def test_the_ledger_header_and_summary_describe_the_merges(tmp_path):
     assert tracks["track"].nunique() == 2  # fill gives each ID the other's frames
     assert Ledger.read(refiner.last_result.ledger_path).header["absorbed"] == {}
     assert refiner.last_result.summary["dedup"]["applied"] == 0
+
+
+def test_the_pending_card_of_a_twice_absorbed_track_shows_the_survivors_output_id(tmp_path):
+    stages = _stages(RefineConfig.defaults(), fps=10.0)
+    out, events = stages.run(_two_hop())
+    _, id_map = renumber(out)
+    pend = next(e for e in events if e.stage == "dedup" and e.decision is Decision.HUMAN_PENDING)
+    assert pend.tracks == [3, 4]
+
+    def card(absorbed):
+        page = write_review(
+            [pend], review_path=tmp_path / "o.review.html", evidence=None, id_map=id_map,
+            absorbed=absorbed, fps=10.0, video_file="/v/cam.mp4", track_file=tmp_path / "o.txt",
+            reclass_map={}, title="o", run_key="r",
+        )
+        return page.read_text()
+
+    header_form = {str(k): int(v) for k, v in stages.absorbed.items()}  # as the ledger stores it
+    want = [id_map[1], id_map[4]]  # track 3 resolves through 2 to the survivor 1
+    html = card(header_form)
+    assert f"output id(s): {', '.join(map(str, want))}" in html
+    assert f"track_ids={want}" in html
+    assert f"track_ids={[id_map[4]]}" in card(None)  # without the map, the absorbed end is lost

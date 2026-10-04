@@ -340,3 +340,20 @@ def test_chunks_are_cut_after_sorting_the_events_by_their_first_frame(tmp_path, 
     out = b.build_many(evs)
     assert set(out) == {e.id for e in evs} and all(v is not None for v in out.values())
     assert ranges == [(0, 19), (90, 109)]  # each chunk reads one compact range
+
+
+def test_merge_plan_shows_each_track_in_its_own_row(tmp_path):
+    w = _work(_walker(1, range(0, 60, 2)), _walker(2, range(1, 60, 2)))
+    b = _builder(tmp_path, w, {1: RED, 2: BLUE})
+    ev = Event.propose(stage="dedup", kind=EventKind.MERGE, tracks=[1, 2],
+                       lineage=[[[1, 0, 58]], [[2, 1, 59]]], frames=(1, 58),
+                       params={"span": [1, 58]}, algo_score=0.9, signals={})
+    ev.id = "dedup-r0-000001"
+    plan = b.plan(ev)
+    (label_a, a), (label_b, bb) = plan.rows
+    assert (label_a, label_b) == ("A", "B")
+    assert 0 < len(a) <= 6 and 0 < len(bb) <= 6
+    assert {raw for raw, _ in a} == {1} and {raw for raw, _ in bb} == {2}
+    assert all(1 <= f <= 58 for _, f in a + bb)  # only frames inside the span
+    assert len(plan.contexts) == 1
+    assert b.build(ev) is not None
