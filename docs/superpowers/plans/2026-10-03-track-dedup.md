@@ -47,7 +47,7 @@ Failure modes the spec implies but a straight reading of the tasks would not tes
 | `src/dnt/refine/evidence.py` (modify) | `MERGE` evidence plan. |
 | `src/dnt/refine/review.py` (modify) | `absorbed` lookup, read-only "Skipped merges" section, page-selection rule. |
 | `tests/refine/test_config.py`, `test_events.py`, `test_apply.py`, `test_evidence.py`, `test_review.py` (modify) | Tests for the matching modules. |
-| `tests/refine/test_dedup.py`, `test_dedup_apply.py`, `test_dedup_lineage.py`, `test_dedup_stage.py`, `test_dedup_real.py` (create) | Tests for the new module and the wiring. |
+| `tests/refine/test_dedup.py`, `test_dedup_apply.py`, `test_dedup_lineage.py`, `test_dedup_stage.py`, `test_dedup_real.py`, `test_dedup_checks.py` (create), `_dedup_checks.py` (create) | Tests for the new module and the wiring; the shared retained-observation checker and its own tests. |
 | `docs/changelog.md`, `docs/api/refine/index.md`, `docs/api/refine/dedup.md`, `mkdocs.yml` (modify/create) | Documentation. |
 
 ---
@@ -1980,10 +1980,90 @@ Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>"
 ### Task 9: Real-data regression, documentation and final checks
 
 **Files:**
-- Create: `tests/refine/test_dedup_real.py`, `docs/api/refine/dedup.md`
+- Create: `tests/refine/_dedup_checks.py`, `tests/refine/test_dedup_checks.py`, `tests/refine/test_dedup_real.py`, `docs/api/refine/dedup.md`
 - Modify: `docs/changelog.md`, `docs/api/refine/index.md`, `mkdocs.yml`
 
-- [ ] **Step 1: Write the real-data tests** (create `tests/refine/test_dedup_real.py`)
+- [ ] **Step 1a: The retained-observation checker, with tests that always run**
+
+The real-data module is skipped as a whole when the clips are not mounted, so the checker lives in a support module and has its own tests.
+
+`tests/refine/_dedup_checks.py`:
+
+```python
+"""Checks shared by the dedup real-data tests and their own tests."""
+
+
+def check_retained(rows, raw_rows, dropped, group):
+    """Assert that every retained raw observation of ``group`` is an observed output row.
+
+    ``rows`` are the output rows of the consolidated identity (columns ``frame`` and
+    ``interp``); ``raw_rows`` is the set of ``(raw_id, frame)`` of the input; ``dropped`` is the
+    set of ``(raw_id, frame)`` that the applied ``MERGE`` events of the group list as dropped.
+    The accounting is done on raw observations first, and projected to frames only afterwards:
+    a frame where one observation lost still needs the winner's observed row.
+    """
+    original = {(r, f) for r, f in raw_rows if r in group}
+    assert dropped <= original, f"dropped rows not in the input: {sorted(dropped - original)[:5]}"
+    retained = original - dropped
+    frames = [f for _, f in retained]
+    assert len(frames) == len(set(frames)), "two retained observations compete on one frame"
+    observed = set(rows.loc[rows["interp"] == 0, "frame"])
+    missing = sorted(set(frames) - observed)
+    assert not missing, f"retained observations missing from the output: {missing[:10]}"
+```
+
+`tests/refine/test_dedup_checks.py`:
+
+```python
+import pandas as pd
+import pytest
+
+from ._dedup_checks import check_retained
+
+GROUP = (122, 125, 134)
+RAW = {(122, 10), (125, 10), (122, 11), (134, 12), (7, 10)}  # (7, 10) is not in the group
+
+
+def _rows(observed=(), filled=()):
+    return pd.DataFrame({
+        "frame": [*observed, *filled],
+        "interp": [0] * len(observed) + [1] * len(filled),
+    })
+
+
+def test_passes_when_the_winner_is_observed_on_the_shared_frame():
+    check_retained(_rows(observed=[10, 11, 12]), RAW, {(125, 10)}, GROUP)
+
+
+def test_fails_when_the_winners_observed_row_is_missing():
+    # (122, 10) won frame 10 and (125, 10) was dropped: frame 10 must still be observed
+    with pytest.raises(AssertionError, match="missing"):
+        check_retained(_rows(observed=[11, 12]), RAW, {(125, 10)}, GROUP)
+
+
+def test_fails_when_only_a_filled_row_remains_on_the_winners_frame():
+    with pytest.raises(AssertionError, match="missing"):
+        check_retained(_rows(observed=[11, 12], filled=[10]), RAW, {(125, 10)}, GROUP)
+
+
+def test_fails_when_two_retained_observations_compete_on_a_frame():
+    with pytest.raises(AssertionError, match="compete"):
+        check_retained(_rows(observed=[10, 11, 12]), RAW, set(), GROUP)
+
+
+def test_fails_when_a_dropped_row_is_not_in_the_input():
+    with pytest.raises(AssertionError, match="not in the input"):
+        check_retained(_rows(observed=[10, 11, 12]), RAW, {(125, 10), (125, 99)}, GROUP)
+
+
+def test_ignores_raw_rows_outside_the_group():
+    check_retained(_rows(observed=[10, 11, 12]), RAW, {(125, 10)}, GROUP)  # (7, 10) never counts
+```
+
+Run: `.venv/bin/python -m pytest tests/refine/test_dedup_checks.py -q`
+Expected: PASS (it needs nothing from the feature; it pins the checker before it is used).
+
+- [ ] **Step 1b: Write the real-data tests** (create `tests/refine/test_dedup_real.py`)
 
 Two groups: a focused regression of the stage alone (the calibration check of spec §12), and runs through `TrackRefiner.refine`, which exercise switch, screen, the dedup hand-off, link, orphan, fill and the final renumbering, with and without the video and the recorded appearance setup.
 
@@ -2000,6 +2080,8 @@ from dnt.refine.dedup import apply_merges, propose_merges
 from dnt.refine.events import EventKind, Ledger
 from dnt.refine.refiner import TrackRefiner
 from dnt.refine.verify import Band, route_without_vlm
+
+from ._dedup_checks import check_retained
 
 DATA = Path("/mnt/e/videos/miami/dets")
 CLIPS = Path("/mnt/e/videos/miami/clips")
@@ -2061,8 +2143,8 @@ def _check_evening(refiner, tracks, raw_rows):
               and set(e.tracks) <= set(GROUP)]
     assert merges and sum(e.signals["dropped_rows"] for e in merges) <= 13
     dropped = {(r, f) for e in merges for r, a, b in e.signals["dropped"] for f in range(a, b + 1)}
-    retained = {f for r, f in raw_rows if r in GROUP} - {f for _, f in dropped}
-    assert retained <= set(rows.loc[rows["interp"] == 0, "frame"])  # every kept observation is there
+    # if an outside track had joined the group, its drops would be missing here: investigate
+    check_retained(rows, raw_rows, dropped, GROUP)
 
 
 def _raw_rows(track_file):
@@ -2111,7 +2193,7 @@ def test_pipeline_with_the_recorded_p3_setup_and_the_video(tmp_path):
 ```
 
 Run: `.venv/bin/python -m pytest tests/refine/test_dedup_real.py -q`
-Expected: PASS when the data is mounted (the last test needs the video, the recorded encoder's package and, if the copied embedding cache does not match, a model download); otherwise SKIPPED. A skip is **not** a pass: in the handoff list which of the five tests ran. If an assertion fails, do not loosen it. Print the dedup events of the three raw tracks and the ledger's `absorbed` and `id_map`, and compare with spec §12: a failure here means switch, screen or link changed the picture the stage-only check saw, and that is exactly what the test is for.
+Expected: PASS when the data is mounted (the last test needs the video, the recorded encoder's package and, if the copied embedding cache does not match, a model download); otherwise SKIPPED. A skip is **not** a pass: in the handoff list which of the five real-data tests ran (the six checker tests of Step 1a always run). If an assertion fails, do not loosen it. Print the dedup events of the three raw tracks and the ledger's `absorbed` and `id_map`, and compare with spec §12: a failure here means switch, screen or link changed the picture the stage-only check saw, and that is exactly what the test is for.
 
 - [ ] **Step 2: Calibration check** (no code change expected)
 
@@ -2206,7 +2288,7 @@ Expected: ruff clean (no growth of the per-file baseline in `pyproject.toml`); t
 - [ ] **Step 5: Commit**
 
 ```bash
-git add tests/refine/test_dedup_real.py docs/changelog.md docs/api/refine/dedup.md docs/api/refine/index.md mkdocs.yml
+git add tests/refine/_dedup_checks.py tests/refine/test_dedup_checks.py tests/refine/test_dedup_real.py docs/changelog.md docs/api/refine/dedup.md docs/api/refine/index.md mkdocs.yml
 git commit -m "docs(refine): document the dedup stage and add the real-data regression
 
 Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>"
