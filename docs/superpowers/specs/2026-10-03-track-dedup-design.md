@@ -1,6 +1,6 @@
 # dnt.refine: Merging Interleaved Duplicate Tracks (stage `dedup`)
 
-- **Status:** draft for review (rev. 2: addresses [review 2026-10-03 21:13](../../review_2026-10-03_21-13-21.md) / [response](../../response_2026-10-03_21-45-00.md))
+- **Status:** draft for review (rev. 3: addresses [review 2026-10-03 21:24](../../review_2026-10-03_21-24-58.md) / [response](../../response_2026-10-03_22-10-00.md); rev. 2: addresses [review 2026-10-03 21:13](../../review_2026-10-03_21-13-21.md) / [response](../../response_2026-10-03_21-45-00.md))
 - **Date:** 2026-10-03
 - **Parent spec:** [2026-09-27-track-refinement-design.md](2026-09-27-track-refinement-design.md). This adds one stage to `dnt.refine`. Everything not stated here follows the parent spec (events §4.1, ledger §4.2, bands §4.3, shared primitives §5, review §8.1, config §9).
 - **Evidence:** `A1A_Collins Ave & 17th St` clips, pedestrian target (§1).
@@ -45,8 +45,8 @@ A crude scan of the raw files (two tracks overlapping at least 30 frames, one's 
 **Success criteria**
 1. On the evening clip, raw tracks 122, 125 and 134 become one track, and the P3-style output has no overlapping boxes among them.
 2. Two people walking in parallel are never merged, whether their boxes are disjoint or overlapping (for example IoU 0.5 on every frame), as long as both are observed on most of the same frames.
-3. No real observation is lost: every observed row of the merged tracks is in the output, except the rows listed in the ledger as dropped (§3.5), one per frame where several tracks had a row.
-4. A component of merged tracks never contains a pair that is vetoed or rejected (§3.5).
+3. No real observation is lost: every observed row of the merged tracks is in the output, except the rows listed in the ledger as dropped (§3.5), one per frame where several tracks had a row. A dropped row is also excluded from everything computed downstream of the merge (appearance samples, evidence images), not only from the table (§3.5).
+4. A component of merged tracks never contains a pair that is densely co-observed or rejected, **whether or not that pair was eligible for a proposal** (§3.5).
 5. Replay compatibility: a `MERGE` event has a stable `proposal_key` that does not depend on work-table IDs (§3.3, §4).
 
 ## 3. The stage
@@ -81,7 +81,7 @@ Signals, all over `[lo, hi]`:
 | Signal | Definition |
 |---|---|
 | `shared` | `|O_a ∩ O_b|`: frames observed in both tracks. |
-| `co_occupancy` | `shared / min(n_a, n_b)`: the share of the sparser track's observed frames on which the other track is also observed. It is `0.0` when `shared == 0`. It does not depend on box IoU. Examples from §1: 122/125 is `7 / 76 = 0.09`; 125/134 is `6 / 30 = 0.20`. |
+| `co_occupancy` | `shared / min(n_a, n_b)`: the share of the sparser track's observed frames on which the other track is also observed. It is `0.0` when `shared == 0`. It does not depend on box IoU. Example from §1: 122/125 is `7 / 76 = 0.09` (both counts measured). 125/134 is `6 / min(30, n_134)` with `n_134` unmeasured, so `0.20` is only its lower bound (reached when `n_134 >= 30`); it is above `0.20` otherwise, and reaches the veto at `n_134 <= 15` with the starting defaults. |
 | `comotion` | The mean over both directions of the IoU between one track's observed box and the other track's interpolated box on that frame (frames in `O_a` against `b`'s interpolation, frames in `O_b` against `a`'s). Both directions, so one dense track cannot hide a mismatch. |
 | `appearance` | Mean cosine similarity between the two tracks' embeddings (the same embeddings link uses), or `None` without a video or encoder. |
 
@@ -94,7 +94,7 @@ S_dedup = comotion_ramp(comotion) * (1 - cooccur_ramp(co_occupancy)) * appearanc
 ```
 
 - `comotion_ramp` rises from 0 at `dedup.comotion_lo` to 1 at `dedup.comotion_hi` (the parent's ramp primitive, §5.4).
-- `cooccur_ramp` rises from 0 at `dedup.cooccur_lo` to 1 at `dedup.cooccur_hi`. A pair with `co_occupancy <= cooccur_lo` is not penalized; between the two it is penalized in proportion. So 122/125 (0.09) is not penalized, and 125/134 (0.20) is penalized by a third at the starting defaults.
+- `cooccur_ramp` rises from 0 at `dedup.cooccur_lo` to 1 at `dedup.cooccur_hi`. A pair with `co_occupancy <= cooccur_lo` is not penalized; between the two it is penalized in proportion. So 122/125 (0.09) is not penalized. 125/134 is penalized by at least a third at the starting defaults, and is not a candidate at all if `n_134 <= 15`; until its counts are measured (the plan's first task) that pair's outcome is open.
 - `appearance_term` is 1.0 when `appearance` is `None`. Otherwise it is a ramp from `dedup.appearance_floor` (at similarity `app_lo`) to 1.0 (at `app_hi`). Appearance can lower a score but, with `appearance_floor` above 0, cannot veto a pair that motion strongly supports. This follows the way link treats appearance as a secondary signal.
 
 The defaults for the `comotion_*`, `cooccur_*` and `app_*` knobs are chosen in the plan against the evening tracks (positive) and the side-by-side pairs (negative), and recorded in the config table in §6.
@@ -106,20 +106,20 @@ The defaults for the `comotion_*`, `cooccur_*` and `app_*` knobs are chosen in t
 | Field | Value |
 |---|---|
 | `tracks` | `[a, b]` with `a` the **representative**: the track whose first observed frame is earlier, ties broken by work ID. This order only chooses the surviving ID (§3.5). It plays no part in the key. |
-| `lineage` | The raw spans of both tracks, as two entries in the **canonical order** below. |
+| `lineage` | The raw spans of both tracks, **in `tracks` order**: `lineage[0]` belongs to `tracks[0]` and `lineage[1]` to `tracks[1]`, the convention link events and `EvidenceBuilder` already use (parent §4.1). It is never reordered. |
 | `frames` | The overlap span `[lo, hi]`. |
 | `params` | `{"span": [lo, hi]}` |
 | `algo_score` | `S_dedup` |
-| `signals` | `shared`, `n_a`, `n_b`, `co_occupancy`, `comotion`, `appearance`: numerators and denominators included, so a reader can recompute `co_occupancy`. After application: `applied`-related fields (§3.5). |
+| `signals` | `shared`, `n_a`, `n_b`, `co_occupancy`, `comotion`, `appearance`: numerators and denominators included, so a reader can recompute `co_occupancy`. `n_a` and `n_b` correspond to `tracks[0]` and `tracks[1]`. After application: `applied`-related fields (§3.5). |
 | `edit` | `{"kind": "MERGE", "params": {"span": [lo, hi]}}`, filled when accepted. |
 
-**Canonical lineage order.** The two lineage entries (each a list of `[raw_id, f0, f1]` spans, parent §4.2) are sorted by their first span, `(raw_id, f0, f1)`, so the order depends only on immutable raw data, never on work IDs or on which track is the representative. `proposal_key` hashes the lineage as given (it does not sort), so the stage passes it already canonicalized. Two tracks cannot share a first raw span, so the order is total.
+**Key lineage.** `proposal_key` hashes the lineage it is given, in that order, and does not sort. The key of a `MERGE` must not depend on work IDs or on which track is the representative, so it is computed from a **canonical copy**: the two lineage entries sorted by their first span `(raw_id, f0, f1)`. Two tracks cannot share a first raw span, so the order is total. `Event.propose` gains an optional keyword `key_lineage`: when given, the key is computed from it and the event keeps the `lineage` it was given. `dedup.py` passes the track-order lineage as `lineage` and the canonical copy as `key_lineage`. So the stored `tracks`, `lineage`, `n_a` and `n_b` always correspond position by position, and consumers need no extra permutation.
 
-`DEFINING_PARAMS[MERGE] = ("span",)`, so the key is the SHA-256 of `(stage, MERGE, canonical lineage, span)`. It survives renumbering of work IDs, as parent §4.2 requires, including for two tracks that start on the same frame, where the representative order follows work IDs and may reverse.
+`DEFINING_PARAMS[MERGE] = ("span",)`, so the key is the SHA-256 of `(stage, MERGE, key lineage, span)`. It survives renumbering of work IDs, as parent §4.2 requires, including for two tracks that start on the same frame, where the representative order follows work IDs and may reverse.
 
 ### 3.4 Routing
 
-The stage's band is `Band.of(cfg.dedup)`. `route_without_vlm` already maps the uncertain band to `HUMAN_PENDING`, and `route_with_vlm` would ask the VLM; `dedup` always uses the no-VLM router in this version, even when a VLM backend is configured. The review page gets a card for each pending `MERGE` (§5).
+The stage's band is `Band.of(cfg.dedup)`. `route_without_vlm` already maps the uncertain band to `HUMAN_PENDING`, and `route_with_vlm` would ask the VLM; `dedup` always uses the no-VLM router in this version, even when a VLM backend is configured. The review page gets a card with controls for each pending `MERGE`, and a read-only card for each accepted merge that conflicted (§5).
 
 ### 3.5 Applying accepted merges
 
@@ -127,7 +127,7 @@ Accepted `MERGE` events are applied by a deterministic procedure that keeps ever
 
 **Cannot-link pairs.** A pair `(x, y)` of tracks may never end up in one component when any of these holds:
 1. a `MERGE` event for `(x, y)` is decided `AUTO_REJECT`, `VLM_REJECT` or `HUMAN_REJECT` (the last comes from a recorded decision when the stage re-runs under `apply`; `HUMAN_PENDING` events constrain nothing);
-2. `(x, y)` overlap enough to be tested (same class group, overlap of at least `min_overlap_seconds`, at least `min_observed` observed rows each) and fail the occupancy gate, `co_occupancy >= cooccur_hi`. This is computed for any pair of tracks in two components being joined, whether or not an event exists for it;
+2. `(x, y)` are **densely co-observed**: over the overlap of their frame ranges (at least one frame), `shared >= dedup.conflict_min_shared` and `co_occupancy >= cooccur_hi`. This is computed for any pair of tracks in two components being joined, **whether or not an event exists for it**, and it does not use `min_overlap_seconds` or `min_observed`: those gates decide which pairs are worth proposing, not which pairs are safe to put in one component. A pair co-observed on fewer than `conflict_min_shared` frames (default 3) is treated as noise and does not block a join, so a lone coincident frame from flicker cannot veto a merge, while a short overlap that is densely co-observed (20 frames at 30 fps, below the one-second span gate; or 7 frames, below `min_observed`) does;
 3. their classes are in different class groups.
 
 **Procedure.**
@@ -138,7 +138,7 @@ Accepted `MERGE` events are applied by a deterministic procedure that keeps ever
    - otherwise the two components are joined and the edge is **applied**: `applied: true`, and its rows are resolved as below.
 3. An edge that is skipped keeps its accepted decision. The ledger shows the decision and `applied: false`, so an accepted but unapplied event is explicit, as for link's `skipped_reason: "overlap"`. A person reviewing the result sees both the accepted edge and the cannot-link evidence that stopped it, and the run summary counts skipped edges per reason.
 
-For the A/B, B/C accepted and A/C vetoed case: whichever of A/B and B/C scores higher is applied; the other is skipped as `conflict` because joining it would put A and C together. The outcome depends only on scores and keys, not on the order the pairs were proposed in.
+For the A/B, B/C accepted and A/C vetoed case: whichever of A/B and B/C scores higher is applied; the other is skipped as `conflict` because joining it would put A and C together. The outcome depends only on scores and keys, not on the order the pairs were proposed in. The same holds when A/C was never proposed because its overlap is below the span or observation gate: the cannot-link check still sees it (rule 2), and the join is skipped as `conflict` with `why: "dense"`.
 
 **Rows and attribution.** Each component keeps the earliest member's track ID (the representative; ties by work ID). All members' observed rows are kept, except that on a frame where two or more rows exist, only the best row stays. "Best" is a total order on rows: higher `score`; on a tie, the smaller `raw_id`; on a further tie, the smaller `track` ID. Rows are dropped **when an applied edge joins two components**: the rows on frames where both components have one, losing under that order, are dropped and attributed to **that edge**. Each edge's signals hold:
 - `dropped_rows`: the count dropped at this edge;
@@ -146,6 +146,12 @@ For the A/B, B/C accepted and A/C vetoed case: whichever of A/B and B/C scores h
 - `merged_into`: the representative's work ID.
 
 Because every edge is applied in the total order of step 1, each dropped row has exactly one owning edge, redundant and conflicting edges own none (`dropped_rows: 0`), and the sum of `dropped_rows` over a component's applied edges is the number of rows the component lost. The final kept set is the best row per frame over the whole component, whatever order the edges were applied in, so output and counts are the same under any proposal order, and with score ties.
+
+**Downstream lineage excludes dropped rows.** A discarded observation must not influence anything computed for the merged track afterwards. Lineage spans are `[raw_id, f0, f1]` and consumers read the raw observations of that raw ID inside the span: `track_embeddings` and `dense_track_embeddings` request the raw ID's embeddings across it, and `EvidenceBuilder` indexes the raw rows in it. Today `lineage_of_rows` returns one span per raw ID from its minimum to its maximum surviving frame, so a dropped *interior* row would still be read. The rule is:
+- `_Stages` keeps `excluded`, a map `raw_id -> set of frames` that dedup dropped;
+- `lineage_of_rows(rows, excluded=None)` splits a raw ID's span at every excluded frame that falls strictly inside it, so `[122, 10, 30]` with frame 20 excluded becomes `[122, 10, 19]` and `[122, 21, 30]`. The span format is unchanged, so consumers need no change, and the spans cover exactly the retained rows' frames plus never-observed gaps, as before;
+- every `lineage_of_rows` call after dedup receives `excluded` (link's descriptors and pair events, orphan, and fill), so link scoring and the evidence of later events see only retained observations;
+- the `MERGE` events' own `lineage` is not changed: it describes the tracks as proposed, before the drop.
 
 Cyclic case: A/B, B/C and A/C all accepted, all three with a row on frame `f`. The two highest-ranked edges join the three tracks and drop two rows between them on `f` (the loser of each join); the third is `redundant` with `dropped_rows: 0`. No edge reports six.
 
@@ -179,13 +185,19 @@ The ledger header stores the fully resolved map as `absorbed`: `{work_id: surviv
 
 **Ledger.** `MERGE` events are written like all others, including `HUMAN_PENDING` ones and accepted-but-skipped ones (§3.5), with `stage: "dedup"` and IDs of the form `dedup-r0-000001`.
 
-**Review card.** A `MERGE` card shows the kind, both tracks (stage-time and output IDs), the overlap frames, `algo_score` and its signals (`co_occupancy` with its `shared` and `min(n_a, n_b)`, `comotion`, `appearance`), and, for a skipped edge, its `skipped_reason` and `conflicts_with`. Its evidence image is a pair of crops of the two tracks at alternating observed frames across the span, built by the existing `EvidenceBuilder` (a new method that reuses its crop code). With no video, the card has no image, as for other events. It has accept and reject controls and the usual `Labeler.draw_track_clips(...)` snippet for both tracks. The page's stage filter gains `dedup`.
+**Which events the report shows.** The inherited `write_review` selects only `HUMAN_PENDING` events and removes the page when there are none. For dedup it selects two groups:
+- **Pending `MERGE`** (and every other kind's pending events, as before): cards with accept and reject controls, exported in `decisions.json` as usual.
+- **Skipped `MERGE` with `skipped_reason: "conflict"`**: a **read-only** card in a separate "Skipped merges" section, with no accept or reject controls and no entry in the exported decisions. It shows why the edge was accepted yet not applied (`conflicts_with`). A reviewer cannot override a cannot-link pair in this version, so there is nothing to decide on these cards. `redundant` edges are not shown (they appear only in the ledger).
+
+The page is written when there is at least one card of either group, and removed (with its listed images and manifest, parent §8.1) only when there is none of either. The page's stage filter lists `dedup`.
+
+**Review card.** A `MERGE` card shows the kind, both tracks (stage-time and output IDs), the overlap frames, `algo_score` and its signals (`co_occupancy` with its `shared` and `min(n_a, n_b)`, `comotion`, `appearance`), and, for a skipped edge, its `skipped_reason` and `conflicts_with`. Its evidence image is a pair of crops of the two tracks at alternating observed frames across the span, built by the existing `EvidenceBuilder` (a new method that reuses its crop code); crops are labeled by `tracks[0]` with `lineage[0]` and `tracks[1]` with `lineage[1]`. With no video, the card has no image, as for other events. A pending card has the usual `Labeler.draw_track_clips(...)` snippet for both tracks.
 
 **Summary.** `summary["events"]` counts `(dedup, MERGE, decision)`, and `summary["dedup"]` counts applied, redundant and conflicting edges and the total `dropped_rows`. The run summary also records tracks before and after, which already captures the drop in unique IDs.
 
 ## 6. Configuration
 
-A new `DedupConfig` in `RefineConfig`, parsed and validated like the other stage configs (unknown keys fail; `accept_above` must exceed `reject_below`; `cooccur_lo < cooccur_hi`):
+A new `DedupConfig` in `RefineConfig`, parsed and validated like the other stage configs (unknown keys fail; `accept_above` must exceed `reject_below`; `cooccur_lo < cooccur_hi`; `conflict_min_shared >= 1`):
 
 | Field | Default | Meaning |
 |---|---|---|
@@ -196,6 +208,7 @@ A new `DedupConfig` in `RefineConfig`, parsed and validated like the other stage
 | `min_observed` | `8` | Minimum observed rows of each track in the overlap. |
 | `comotion_lo`, `comotion_hi` | `0.25`, `0.50` | Ramp for co-motion. |
 | `cooccur_lo`, `cooccur_hi` | `0.10`, `0.40` | Co-occupancy: no penalty up to `lo`, a proportional penalty to `hi`, and not a candidate at or above `hi`. |
+| `conflict_min_shared` | `3` | Fewest shared frames for a dense co-observation to block a join (§3.5). Independent of `min_overlap_seconds` and `min_observed`. |
 | `appearance_floor` | `0.60` | Lowest `appearance_term`. |
 | `app_lo`, `app_hi` | `0.40`, `0.70` | Ramp for appearance similarity. |
 
@@ -222,27 +235,28 @@ The numeric defaults above are starting values. The plan's first task fits them 
 
 Fixtures state their observation counts and the IoU on the shared frames, and the tests assert the signals, not only the outcome.
 
-1. **Interleaved pair merges, with the real counts.** `n_a = 76`, `n_b = 107`, 7 shared frames whose boxes have IoU 0.00, all on one path: `co_occupancy = 7/76`, below `cooccur_lo`; `MERGE` is auto-accepted; one track remains with all observed rows.
+1. **Interleaved pair merges, with the real counts.** `n_a = 76`, `n_b = 107`, 7 shared frames whose boxes have IoU 0.00, all on one path: `co_occupancy = 7/76`, below `cooccur_lo`; `MERGE` is auto-accepted; one track remains. The fixture holds exactly the span's rows (76 + 107 = 183 observed rows), the 7 shared frames each lose one row, so the output has **176** rows, `dropped_rows` is 7, and the `dropped` runs name exactly those 7 `(raw_id, frame)` rows.
 2. **Occupancy denominator.** `co_occupancy` equals `shared / min(n_a, n_b)` for several `(shared, n_a, n_b)` cases, including `shared = 0` (value `0.0`, no division error), and the signals carry `shared`, `n_a` and `n_b`.
 3. **Side by side, disjoint boxes.** Two people walk in parallel, both observed on every frame, boxes apart: not a candidate (`co_occupancy = 1`).
 4. **Side by side, overlapping boxes.** The same, with equal-size boxes offset by a third of their width, so IoU is 0.5 on every frame, both fully observed: not a candidate. This case fails under an IoU-based test and passes under the occupancy gate.
 5. **Simultaneous duplicate.** Two tracks on the same frames at IoU 0.9: not merged, as the spec states (out of scope).
 6. **Three-way group.** Three IDs interleave: one track under the earliest ID.
-7. **Conflict rule.** A/B and B/C are both accepted, A/C is dense (co-occupancy above the gate): the higher-ranked of A/B and B/C is applied, the other is accepted but `applied: false` with `skipped_reason: "conflict"` and `conflicts_with` naming A/C; A and C end in different tracks. A second case replaces the dense pair with a rejected A/C `MERGE` (`AUTO_REJECT`, `VLM_REJECT` and `HUMAN_REJECT`, each) with the same result. Repeat with shuffled proposal order: same output and ledger.
+7. **Conflict rule.** A/B and B/C are both accepted, A/C is dense (co-occupancy above the gate and `shared >= conflict_min_shared`): the higher-ranked of A/B and B/C is applied, the other is accepted but `applied: false` with `skipped_reason: "conflict"` and `conflicts_with` naming A/C; A and C end in different tracks. A second case replaces the dense pair with a rejected A/C `MERGE` (`AUTO_REJECT`, `VLM_REJECT` and `HUMAN_REJECT`, each) with the same result. Repeat with shuffled proposal order: same output and ledger. **Dense A/C below the proposal gates still blocks the bridge:** (a) A/C overlap just below the span gate (29 frames at 30 fps, all co-observed, distinct boxes); (b) A/C overlap with `n` below `min_observed` (7 rows each, all shared). In both, A/C has no `MERGE` event, A/B and B/C are accepted, the lower-ranked bridge is skipped as `conflict` with `why: "dense"`, and A and C end in different tracks. **Noise does not block:** A/C co-observed on only 2 frames (`shared < conflict_min_shared`) joins normally.
 8. **Dropped rows, cyclic.** A/B, B/C and A/C all accepted, all with a row on one frame, with tied scores, repeated over shuffled proposal orders: identical output tracks, identical `dropped` runs, the third edge `redundant` with `dropped_rows: 0`, and the sum of `dropped_rows` equals the rows lost.
 9. **Bands.** A score in the uncertain band becomes `HUMAN_PENDING` with no VLM call even when a backend is configured; a score below `reject_below` is `AUTO_REJECT` and changes nothing.
 10. **Gates.** Different classes, too short an overlap, and too few observed rows each produce no candidate.
 11. **Orphan hand-off.** A sparse merged representative (few observed seconds, long span) is not dropped as an orphan; a track that is an endpoint of a pending `MERGE` is deferred, not dropped, and appears in `orphan_deferred`. Both with `link.enabled: true` (with a link that absorbs the representative in one case) and `link.enabled: false`.
 12. **Order.** With `dedup.enabled: false` the output equals the previous pipeline's; with it on, link receives the merged table (a link event that would have joined two interleaved IDs does not appear).
-13. **Keys.** The `proposal_key` is unchanged when the same input is run again. A second test **renumbers the work-table track IDs while keeping raw IDs**, including a pair that starts on the same frame whose work-ID order reverses (so the representative changes): the key is the same, and the lineage is in canonical order in both.
+13. **Keys.** The `proposal_key` is unchanged when the same input is run again. A second test **renumbers the work-table track IDs while keeping raw IDs**, including a pair that starts on the same frame whose work-ID order reverses (so the representative changes): the key is the same in both runs, and the key lineage is the canonical copy in both. In both runs the event's `lineage[i]`, `tracks[i]` and `signals` `n_a`/`n_b` correspond position by position (checked against the raw IDs: for a representative with raw ID 125 and a later member with raw ID 122, `lineage[0]` starts with raw 125), and the evidence crops are labeled with the track ID that matches the lineage they were cut from.
 14. **Absorbed IDs in review.** A pending `MERGE` A/C whose endpoint A is absorbed by an accepted merge (A into B) and then B by a link: the header's `absorbed` resolves A to the final survivor, and the card and its clip snippet list the survivor's output ID.
-15. **Ledger and review.** `MERGE` events round-trip through `Ledger.write`/`read`; a pending `MERGE` produces a card with its signals; a skipped event's card shows its reason; the review stage filter lists `dedup`.
+15. **Ledger and review.** `MERGE` events round-trip through `Ledger.write`/`read`; a pending `MERGE` produces a card with controls and its signals; the review stage filter lists `dedup`. **Skipped merges are visible:** a run with only accepted edges, one skipped as `conflict`, and **no pending events** still writes the page, with a read-only card in "Skipped merges" that shows `skipped_reason` and `conflicts_with`, has no accept or reject controls, and adds no entry to the exported decisions; a `redundant` edge produces no card; with neither pending nor conflicting events the page and its listed images are removed.
 16. **Real-data regression (marked as slow or data-dependent).** Evening clip raw tracks 122, 125 and 134 become one track, and no pair among the merged IDs shares a frame in the output. It is skipped when `/mnt/e/videos/miami` is absent.
-17. **Config.** Defaults, YAML round trip, unknown-key, band-order and `cooccur` order errors.
+17. **Config.** Defaults, YAML round trip, unknown-key, band-order, `cooccur` order and `conflict_min_shared` errors.
+18. **Dropped rows leave downstream lineage.** Raw 122 has frames 10 to 30 and an interior row at frame 20 loses to the other track's row. After the merge, the track's lineage after dedup is `[122, 10, 19]` and `[122, 21, 30]`. With a recording fake appearance provider, link's embedding request for the merged track never covers `(122, 20)`; `EvidenceBuilder` for a later link event never draws it; and `lineage_of_rows` without `excluded` is unchanged (so existing callers and tests keep their behavior).
 
 ## 10. Packaging and documentation
 
-- New module `src/dnt/refine/dedup.py`; `merge_tracks` in `apply.py`; `EventKind.MERGE` and its `DEFINING_PARAMS` entry in `events.py`; `DedupConfig` in `config.py`; the step, the carried sets and the `absorbed` map in `_Stages` in `refiner.py`; the header field; a card, a filter entry and the `absorbed` lookup in `review.py`; a `MERGE` evidence method in `evidence.py`.
+- New module `src/dnt/refine/dedup.py`; `merge_tracks` and the `excluded` parameter of `lineage_of_rows` in `apply.py`; `EventKind.MERGE`, its `DEFINING_PARAMS` entry and the `key_lineage` keyword of `Event.propose` in `events.py`; `DedupConfig` in `config.py`; the step, the carried sets, the `absorbed` map and the `excluded` map (passed to every later `lineage_of_rows` call in `link.py`, `refiner.py` and the orphan pass) in `_Stages` in `refiner.py`; the header field; the cards, the "Skipped merges" section, the page-selection rule, the filter entry and the `absorbed` lookup in `review.py`; a `MERGE` evidence method in `evidence.py`.
 - Numpy-style docstrings (ruff `D` rules apply); no new entries in the per-file lint baseline.
 - `docs/api` page for `dnt.refine` already covers the package; the changelog and the refine docs describe the stage, its config and the `dedup.enabled` switch.
 - No version bump in this change; the release process in `CLAUDE.md` applies when it ships.
