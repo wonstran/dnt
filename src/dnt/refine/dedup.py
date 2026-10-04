@@ -8,11 +8,11 @@ from dataclasses import dataclass
 import numpy as np
 import pandas as pd
 
-from .apply import lineage_of_rows
+from .apply import lineage_of_rows, merge_tracks, rows_to_drop
 from .config import RefineConfig
-from .events import Event, EventKind
+from .events import ACCEPTED, Decision, Event, EventKind
 from .features import track_embeddings
-from .primitives import majority_class, ramp
+from .primitives import frame_runs, majority_class, ramp
 
 log = logging.getLogger(__name__)
 
@@ -195,3 +195,133 @@ def propose_merges(
     if appearance is None and events:
         log.info("dedup: no appearance provider; %d merge(s) scored on motion alone", len(events))
     return events
+
+
+@dataclass
+class MergeOutcome:
+    """What stage ``dedup`` hands to the rest of the run (spec 3.5, 3.6, 5)."""
+
+    work: pd.DataFrame
+    merged_reps: set[int]
+    pending_endpoints: set[int]
+    absorbed: dict[int, int]
+    excluded: dict[int, set[int]]
+    counts: dict[str, int]
+
+
+def _dense(a: Track, b: Track, dc) -> bool:
+    """Return True when ``a`` and ``b`` are densely co-observed (rule 2, spec 3.5).
+
+    This does not use ``min_overlap_seconds`` or ``min_observed``: those decide which pairs are
+    worth proposing, not which pairs are safe to put in one track.
+    """
+    ov = overlap(a, b)
+    return (
+        ov is not None and ov.shared >= dc.conflict_min_shared and ov.co_occupancy >= dc.cooccur_hi
+    )
+
+
+def apply_merges(work: pd.DataFrame, events: list[Event], cfg: RefineConfig) -> MergeOutcome:
+    """Apply the accepted ``MERGE`` events with the conflict rule of spec 3.5.
+
+    Accepted edges are walked in the total order ``(-algo_score, proposal_key)`` with a
+    union-find. An edge inside one component is ``redundant``; an edge that would join two
+    components holding a cannot-link pair is a ``conflict``; both stay accepted with
+    ``applied=False`` and a ``skipped_reason``. A cannot-link pair is a pair decided
+    ``VLM_REJECT`` or ``HUMAN_REJECT``, a pair of classes in different groups, or a pair that
+    is densely co-observed. Rows are dropped when an applied edge joins two components and are
+    attributed to that edge.
+    """
+    dc = cfg.dedup
+    counts = {"applied": 0, "redundant": 0, "conflict": 0, "dropped_rows": 0}
+    if work.empty or not events:
+        return MergeOutcome(work, set(), set(), {}, {}, counts)
+    tracks = describe(work)
+    groups = cfg.link.class_groups
+    rejected = {
+        frozenset(e.tracks): e.proposal_key
+        for e in events
+        if e.decision in (Decision.VLM_REJECT, Decision.HUMAN_REJECT)
+    }
+    accepted = sorted(
+        (e for e in events if e.decision in ACCEPTED), key=lambda e: (-e.algo_score, e.proposal_key)
+    )
+    parent = {t: t for t in tracks}
+    members = {t: [t] for t in tracks}
+
+    def find(x: int) -> int:
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    def blocker(ra: int, rb: int):
+        for x, y in sorted((min(x, y), max(x, y)) for x in members[ra] for y in members[rb]):
+            key = rejected.get(frozenset((x, y)))
+            if key is not None:
+                return x, y, "rejected", key
+            if not class_ok(tracks[x].cls, tracks[y].cls, groups):
+                return x, y, "class", None
+            if _dense(tracks[x], tracks[y], dc):
+                return x, y, "dense", None
+        return None
+
+    kept = pd.Series(True, index=work.index)
+    applied: list[Event] = []
+    for ev in accepted:
+        a, b = ev.tracks
+        ra, rb = find(a), find(b)
+        if ra == rb:
+            ev.applied = False
+            ev.signals["skipped_reason"] = "redundant"
+            counts["redundant"] += 1
+            continue
+        hit = blocker(ra, rb)
+        if hit is not None:
+            ev.applied = False
+            ev.signals["skipped_reason"] = "conflict"
+            ev.signals["conflicts_with"] = {
+                "tracks": [hit[0], hit[1]],
+                "why": hit[2],
+                "proposal_key": hit[3],
+            }
+            counts["conflict"] += 1
+            continue
+        both = work[kept & work["track"].isin(members[ra] + members[rb])]
+        lost = rows_to_drop(both)
+        kept.loc[lost] = False
+        gone = work.loc[lost]
+        ev.signals["dropped_rows"] = len(gone)
+        ev.signals["dropped"] = [
+            [int(raw), int(f0), int(f1)]
+            for raw, g in gone.groupby("raw_id")
+            for f0, f1 in frame_runs(g["frame"])
+        ]
+        parent[rb] = ra
+        members[ra] += members.pop(rb)
+        ev.applied = True
+        applied.append(ev)
+        counts["applied"] += 1
+    first = {t: int(d.frames[0]) for t, d in tracks.items()}
+    rep_of: dict[int, int] = {}
+    for group in (m for m in members.values() if len(m) > 1):
+        rep = min(group, key=lambda t: (first[t], t))
+        rep_of.update({m: rep for m in group})
+    merged, dropped = merge_tracks(work, rep_of)
+    excluded: dict[int, set[int]] = {}
+    for raw, f in zip(dropped["raw_id"], dropped["frame"], strict=True):
+        excluded.setdefault(int(raw), set()).add(int(f))
+    for ev in applied:
+        ev.signals["merged_into"] = rep_of[ev.tracks[0]]
+    pending = {
+        rep_of.get(t, t) for e in events if e.decision is Decision.HUMAN_PENDING for t in e.tracks
+    }
+    counts["dropped_rows"] = len(dropped)
+    return MergeOutcome(
+        work=merged,
+        merged_reps={rep_of[e.tracks[0]] for e in applied},
+        pending_endpoints=pending,
+        absorbed={m: r for m, r in rep_of.items() if m != r},
+        excluded=excluded,
+        counts=counts,
+    )
