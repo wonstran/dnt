@@ -107,6 +107,26 @@ def comotion(a: Track, b: Track, ov: Overlap) -> float:
     return float((ab + ba) / 2.0)
 
 
+def interleave(a: Track, b: Track, ov: Overlap) -> tuple[int, float]:
+    """Return ``(switches, rate)`` of the observing track along the overlap.
+
+    The frames on which either track is observed are walked in order; a switch is a step where
+    the observing track changes (a frame seen by both counts as neither). ``rate`` is switches per
+    step. One person split in two by the tracker alternates often; a hand-over between two
+    successive tracks switches once.
+    """
+    fa, fb = a.frames[ov.in_a], b.frames[ov.in_b]
+    frames = np.union1d(fa, fb)
+    if frames.size < 2:
+        return 0, 0.0
+    own = np.where(np.isin(frames, fb), np.where(np.isin(frames, fa), 0, 2), 1)
+    own = own[own != 0]
+    if own.size < 2:
+        return 0, 0.0
+    switches = int((own[1:] != own[:-1]).sum())
+    return switches, switches / (own.size - 1)
+
+
 def _unit_mean(frames: np.ndarray, emb: np.ndarray, lo: int, hi: int):
     keep = (frames >= lo) & (frames <= hi)
     if not keep.any():
@@ -137,7 +157,11 @@ def propose_merges(
 
     A pair is a candidate when its classes share a group, the overlap of its frame ranges is at
     least ``min_overlap_seconds``, each track has at least ``min_observed`` observed rows in it,
-    and the pair is not densely co-observed (``co_occupancy < cooccur_hi``).
+    and the pair is not densely co-observed (``co_occupancy < cooccur_hi``). A pair whose
+    observing track keeps alternating (see ``interleave``) and looks alike (appearance at least
+    ``app_hi``) is one person split in two, so its co-motion ramp is shifted down by
+    ``interleave_relax``. Without appearance the ramp is never relaxed: a neighbour walking
+    alongside alternates just as often.
     """
     dc = cfg.dedup
     if not dc.enabled or work.empty:
@@ -166,8 +190,17 @@ def propose_merges(
                 else dc.appearance_floor
                 + (1.0 - dc.appearance_floor) * float(ramp(app, dc.app_lo, dc.app_hi))
             )
+            switches, rate = interleave(first, second, ov)
+            relax = (
+                dc.interleave_relax
+                if app is not None
+                and app >= dc.app_hi
+                and switches >= dc.interleave_min_switches
+                and rate >= dc.interleave_min_rate
+                else 0.0
+            )
             score = (
-                float(ramp(cm, dc.comotion_lo, dc.comotion_hi))
+                float(ramp(cm, dc.comotion_lo - relax, dc.comotion_hi - relax))
                 * (1.0 - float(ramp(ov.co_occupancy, dc.cooccur_lo, dc.cooccur_hi)))
                 * term
             )
@@ -188,6 +221,8 @@ def propose_merges(
                         "n_b": ov.n_b,
                         "co_occupancy": ov.co_occupancy,
                         "comotion": cm,
+                        "switches": switches,
+                        "interleave_relax": relax,
                         "appearance": app,
                     },
                 )

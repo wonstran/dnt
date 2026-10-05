@@ -157,3 +157,40 @@ def test_lineage_tracks_and_counts_correspond_and_the_key_ignores_work_ids():
         raws = [int(work.loc[work["track"] == t, "raw_id"].iloc[0]) for t in ev.tracks]
         assert [lin[0][0] for lin in ev.lineage] == raws
         assert [ev.signals["n_a"], ev.signals["n_b"]] == [n[r] for r in raws]
+
+
+def _offset_alternating():
+    n = 130
+    fa, fb = list(range(0, n, 2)), list(range(1, n, 2))
+    work = _work(_rows(1, fa), _rows(2, fb, dx=13.0))
+    same = ArrayAppearance({1: (fa, np.tile([1.0, 0.0], (len(fa), 1))),
+                            2: (fb, np.tile([1.0, 0.0], (len(fb), 1)))})
+    return work, same
+
+
+def test_an_alternating_look_alike_pair_with_offset_boxes_scores_above_accept():
+    work, same = _offset_alternating()
+    cfg = RefineConfig.defaults()
+    (ev,) = propose_merges(work, cfg, FPS, same)
+    assert 0.25 < ev.signals["comotion"] < 0.5
+    assert ev.signals["interleave_relax"] == cfg.dedup.interleave_relax
+    assert ev.algo_score >= cfg.dedup.accept_above
+
+
+def test_the_interleave_relax_needs_appearance_evidence():
+    work, _ = _offset_alternating()
+    cfg = RefineConfig.defaults()
+    (ev,) = propose_merges(work, cfg, FPS)
+    assert ev.signals["interleave_relax"] == 0.0
+    assert ev.algo_score < cfg.dedup.accept_above
+
+
+def test_interleave_counts_owner_switches_not_a_single_handover():
+    from dnt.refine.dedup import describe, interleave, overlap
+
+    def sw(fa, fb):
+        t = describe(_work(_rows(1, fa), _rows(2, fb)))
+        return interleave(t[1], t[2], overlap(t[1], t[2]))
+
+    assert sw(range(0, 20, 2), range(1, 21, 2)) == (17, 1.0)
+    assert sw([0, 1, 2, 3, 10, 11, 12, 13], [4, 5, 6, 7, 14, 15])[0] == 1

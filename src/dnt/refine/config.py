@@ -216,6 +216,9 @@ class DedupConfig:
     appearance_floor: float = 0.60
     app_lo: float = 0.40
     app_hi: float = 0.70
+    interleave_min_switches: int = 4
+    interleave_min_rate: float = 0.30
+    interleave_relax: float = 0.15
 
 
 @dataclass(kw_only=True)
@@ -645,6 +648,12 @@ def _dedup_problems(dd: DedupConfig) -> list[str]:
         a, b = getattr(dd, lo), getattr(dd, hi)
         if not (num(a) and num(b) and a < b):
             p.append(f"dedup.{lo} must be below dedup.{hi}")
+    if not (whole(dd.interleave_min_switches) and dd.interleave_min_switches >= 1):
+        p.append("dedup.interleave_min_switches must be an integer >= 1")
+    if not (num(dd.interleave_min_rate) and 0.0 < dd.interleave_min_rate <= 1.0):
+        p.append("dedup.interleave_min_rate must be a number in (0, 1]")
+    if not (num(dd.interleave_relax) and 0.0 <= dd.interleave_relax < dd.comotion_lo):
+        p.append("dedup.interleave_relax must be a number in [0, dedup.comotion_lo)")
     if not (num(dd.appearance_floor) and 0.0 <= dd.appearance_floor <= 1.0):
         p.append("dedup.appearance_floor must be a number in [0, 1]")
     return p

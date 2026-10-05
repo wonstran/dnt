@@ -64,6 +64,9 @@ dedup:
   accept_above: 0.75   # auto-merge at or above this score
   reject_below: 0.40   # auto-reject below it; in between the merge goes to review
   cooccur_hi: 0.50     # observed together on this share of frames or more: never a candidate
+  interleave_min_switches: 4  # owner switches in the overlap that mark an alternating pair
+  interleave_min_rate: 0.30   # ... and the share of steps that switch
+  interleave_relax: 0.15      # alternating look-alikes (appearance >= app_hi): co-motion ramp shifts down
 ```
 
 Merged tracks keep the earlier track's ID and, on a frame where both had a row, the row with
