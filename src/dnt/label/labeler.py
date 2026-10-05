@@ -8,6 +8,7 @@ or FFmpeg backends, and utilities for extracting frames and clips from videos.
 import itertools
 import os
 import random
+import shutil
 import subprocess
 from ast import literal_eval
 from enum import Enum
@@ -32,6 +33,26 @@ import pandas as pd
 from tqdm import tqdm
 
 from ..shared.util import load_classes
+
+
+def _start_ffmpeg(cmd: list[str]) -> subprocess.Popen:
+    """Start an ffmpeg process that reads raw frames on stdin, with a clear error if it is missing."""
+    if shutil.which(cmd[0]) is None:
+        raise FileNotFoundError(
+            "ffmpeg was not found on PATH; install it (on Windows, e.g. 'winget install Gyan.FFmpeg') "
+            "or use method='opencv'."
+        )
+    return subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+
+
+def _imwrite(path: str, image: np.ndarray) -> None:
+    """Write ``image`` to ``path``; unlike ``cv2.imwrite`` this handles non-ASCII paths on Windows."""
+    ext = os.path.splitext(path)[1] or ".jpg"
+    ok, buf = cv2.imencode(ext, image)
+    if not ok:
+        raise OSError(f"Couldn't encode image for {path}")
+    buf.tofile(path)
+
 
 DRAW_COLUMNS = ["frame", "type", "coords", "color", "size", "thick", "desc", "fill", "alpha"]
 TRACK_COLUMNS = ["frame", "track", "x", "y", "w", "h", "score", "cls", "r3", "r4"]
@@ -660,7 +681,7 @@ class Labeler:
             end_frame = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) - 1
 
         tot_frames = end_frame - start_frame + 1
-        fps = int(cap.get(cv2.CAP_PROP_FPS))
+        fps = cap.get(cv2.CAP_PROP_FPS)
         width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
         frame_to_elements = {k: g for k, g in data.groupby("frame", sort=False)}
@@ -672,6 +693,9 @@ class Labeler:
             # FFmpeg command to write H.265 encoded video
             ffmpeg_cmd = [
                 "ffmpeg",
+                "-loglevel",
+                "error",
+                "-nostats",
                 "-y",  # Overwrite output file if it exists
                 "-f",
                 "rawvideo",
@@ -695,13 +719,14 @@ class Labeler:
             ]
 
             # Start FFmpeg process
-            process = subprocess.Popen(
-                ffmpeg_cmd, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE
-            )
+            process = _start_ffmpeg(ffmpeg_cmd)
         elif self.method == "chrome_safe":
             # FFmpeg command for browser-safe H.264 output.
             ffmpeg_cmd = [
                 "ffmpeg",
+                "-loglevel",
+                "error",
+                "-nostats",
                 "-y",  # Overwrite output file if it exists
                 "-f",
                 "rawvideo",
@@ -734,9 +759,7 @@ class Labeler:
             ]
 
             # Start FFmpeg process
-            process = subprocess.Popen(
-                ffmpeg_cmd, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE
-            )
+            process = _start_ffmpeg(ffmpeg_cmd)
         else:
             fourcc = cv2.VideoWriter_fourcc(*"mp4v")
             writer = cv2.VideoWriter(output_video, fourcc, fps, (width, height))
@@ -763,7 +786,7 @@ class Labeler:
                 if use_ffmpeg:
                     try:
                         process.stdin.write(frame.tobytes())
-                    except BrokenPipeError as exc:
+                    except OSError as exc:
                         ffmpeg_error = process.stderr.read().decode("utf-8", errors="replace") if process.stderr else ""
                         raise RuntimeError(
                             f"FFmpeg pipe closed early while writing frame {pos_frame}.\n{ffmpeg_error}"
@@ -792,7 +815,7 @@ class Labeler:
             if use_ffmpeg:
                 try:
                     process.stdin.write(frame.tobytes())
-                except BrokenPipeError as exc:
+                except OSError as exc:
                     ffmpeg_error = process.stderr.read().decode("utf-8", errors="replace") if process.stderr else ""
                     raise RuntimeError(
                         f"FFmpeg pipe closed early while writing frame {pos_frame}.\n{ffmpeg_error}"
@@ -1392,7 +1415,6 @@ class Labeler:
             end_frame = start_frame
 
         tot_frames = end_frame - start_frame + 1
-        fps = int(fps)
         width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
 
@@ -1453,6 +1475,9 @@ class Labeler:
             rate_control_args = bitrate_args if bitrate_args else ["-crf", str(self.crf)]
             ffmpeg_cmd = [
                 "ffmpeg",
+                "-loglevel",
+                "error",
+                "-nostats",
                 "-y",
                 "-f",
                 "rawvideo",
@@ -1473,13 +1498,14 @@ class Labeler:
                 *rate_control_args,
                 output_video,
             ]
-            process = subprocess.Popen(
-                ffmpeg_cmd, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE
-            )
+            process = _start_ffmpeg(ffmpeg_cmd)
         elif clip_method == LabelMethod.CHROME_SAFE.value:
             rate_control_args = bitrate_args if bitrate_args else ["-crf", "23"]
             ffmpeg_cmd = [
                 "ffmpeg",
+                "-loglevel",
+                "error",
+                "-nostats",
                 "-y",
                 "-f",
                 "rawvideo",
@@ -1509,9 +1535,7 @@ class Labeler:
                 "-an",
                 output_video,
             ]
-            process = subprocess.Popen(
-                ffmpeg_cmd, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE
-            )
+            process = _start_ffmpeg(ffmpeg_cmd)
         else:
             fourcc = cv2.VideoWriter_fourcc(*"mp4v")
             writer = cv2.VideoWriter(output_video, fourcc, fps, (width, height))
@@ -1532,7 +1556,7 @@ class Labeler:
             if use_ffmpeg:
                 try:
                     process.stdin.write(frame.tobytes())
-                except BrokenPipeError as exc:
+                except OSError as exc:
                     ffmpeg_error = process.stderr.read().decode("utf-8", errors="replace") if process.stderr else ""
                     raise RuntimeError(
                         f"FFmpeg pipe closed early while clipping frame {pos_frame}.\n{ffmpeg_error}"
@@ -1658,7 +1682,7 @@ class Labeler:
                 frame_file = os.path.join(output_path, prefix + "-" + str(frame) + ".jpg")
 
             if ret:
-                cv2.imwrite(frame_file, frame_read)
+                _imwrite(frame_file, frame_read)
             else:
                 break
 
@@ -1739,7 +1763,7 @@ class Labeler:
                                 output_path, prefix + "-" + str(id) + "_" + str(frame) + ".jpg"
                             )
 
-                        cv2.imwrite(frame_file, img)
+                        _imwrite(frame_file, img)
                     else:
                         break
 
@@ -1776,7 +1800,7 @@ class Labeler:
         if not cap.isOpened():
             raise OSError("Couldn't open webcam or video")
 
-        video_fps = int(cap.get(cv2.CAP_PROP_FPS))  # original fps
+        video_fps = cap.get(cv2.CAP_PROP_FPS)  # original fps
         frame = int(video_fps * time)
         cap.release()
         return frame
