@@ -6,12 +6,15 @@ from collections.abc import Sequence
 
 import numpy as np
 import pandas as pd
+from tqdm import tqdm
 
 from .crops import CROP_PAD, FrameReader, crop_box
 from .features import FeatureStore
 
 #: Crops are encoded as soon as this many batches' worth are waiting, so memory stays bounded.
 _FLUSH_BATCHES = 8
+#: Passes embedding fewer crops than this (the per-track lookups) show no progress bar.
+_MIN_CROPS_FOR_BAR = 256
 
 
 class VideoAppearance:
@@ -157,20 +160,28 @@ class VideoAppearance:
             return
         crops: list[np.ndarray] = []
         owners: list[tuple[int, int]] = []
-        with FrameReader(self.video_file) as reader:
+        total = sum(len(v) for v in need.values())
+        desc = "Embedding dense appearance" if dense else "Embedding coarse appearance"
+        with (
+            tqdm(total=total, desc=desc, unit=" crop", disable=total < _MIN_CROPS_FOR_BAR) as pbar,
+            FrameReader(self.video_file) as reader,
+        ):
             for f, img in reader.frames(need):
                 for key in sorted(need[f]):
                     crop = crop_box(img, need[f][key], self.crop_pad)
                     if crop is None:  # recorded in the cache, so no rerun reads it again
                         self.store.skip(*key)
+                        pbar.update(1)
                         continue
                     crops.append(crop)
                     owners.append(key)
                 if len(crops) >= self.batch_size * _FLUSH_BATCHES:
-                    self._flush(crops, owners)
-        self._flush(crops, owners)
+                    self._flush(crops, owners, pbar)
+            self._flush(crops, owners, pbar)
 
-    def _flush(self, crops: list[np.ndarray], owners: list[tuple[int, int]]) -> None:
+    def _flush(
+        self, crops: list[np.ndarray], owners: list[tuple[int, int]], pbar: tqdm | None = None
+    ) -> None:
         for i in range(0, len(crops), self.batch_size):
             chunk = crops[i : i + self.batch_size]
             emb = self.encoder.encode(chunk)
@@ -183,6 +194,8 @@ class VideoAppearance:
                 )
             for (raw_id, frame), e in zip(owners[i : i + self.batch_size], emb, strict=True):
                 self.store.put(raw_id, frame, e)
+            if pbar is not None:
+                pbar.update(len(chunk))
         crops.clear()
         owners.clear()
 
