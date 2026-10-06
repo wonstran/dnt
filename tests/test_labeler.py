@@ -131,3 +131,27 @@ def test_imwrite_handles_non_ascii_paths_and_roundtrips(tmp_path):
     lab._imwrite(str(path), img)
     assert path.exists()
     assert cv2.imdecode(np.fromfile(str(path), dtype=np.uint8), cv2.IMREAD_COLOR).shape == img.shape
+
+
+def _tiny_video(path, n=5):
+    import numpy as np
+
+    w = cv2.VideoWriter(str(path), cv2.VideoWriter_fourcc(*"mp4v"), 10, (64, 48))
+    for _ in range(n):
+        w.write(np.zeros((48, 64, 3), dtype=np.uint8))
+    w.release()
+
+
+@pytest.mark.parametrize("method", ["draw_tracks", "draw_dets"])
+def test_an_empty_track_or_det_file_gives_an_unlabelled_video(tmp_path, method):
+    src, out, empty = tmp_path / "in.mp4", tmp_path / "out.mp4", tmp_path / "empty.txt"
+    _tiny_video(src)
+    empty.write_text("")
+    kw = {"track_file": str(empty)} if method == "draw_tracks" else {"det_file": str(empty)}
+    df = getattr(lab.Labeler(method=lab.LabelMethod.OPENCV), method)(
+        input_video=str(src), output_video=str(out), **kw
+    )
+    assert df.empty and out.exists()
+    cap = cv2.VideoCapture(str(out))
+    assert int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) == 5
+    cap.release()

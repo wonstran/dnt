@@ -35,6 +35,14 @@ from tqdm import tqdm
 from ..shared.util import load_classes
 
 
+def _read_headerless(path: str, n_columns: int, **kwargs) -> pd.DataFrame:
+    """Read a headerless CSV; an empty file (a stage that found nothing) gives an empty table."""
+    try:
+        return pd.read_csv(path, header=None, **kwargs)
+    except pd.errors.EmptyDataError:
+        return pd.DataFrame(columns=range(n_columns))
+
+
 def _start_ffmpeg(cmd: list[str]) -> subprocess.Popen:
     """Start an ffmpeg process that reads raw frames on stdin, with a clear error if it is missing."""
     if shutil.which(cmd[0]) is None:
@@ -928,9 +936,9 @@ class Labeler:
 
         """
         if tracks is None:
-            tracks = pd.read_csv(
+            tracks = _read_headerless(
                 track_file,
-                header=None,
+                len(TRACK_COLUMNS),
                 dtype={0: int, 1: int, 2: int, 3: int, 4: int, 5: int, 6: float, 7: int, 8: int, 9: int},
             )
         tracks.columns = TRACK_COLUMNS
@@ -1096,9 +1104,9 @@ class Labeler:
 
         """
         if tracks is None:
-            tracks = pd.read_csv(
+            tracks = _read_headerless(
                 track_file,
-                header=None,
+                len(TRACK_COLUMNS),
                 dtype={0: int, 1: int, 2: int, 3: int, 4: int, 5: int, 6: float, 7: int, 8: int, 9: int},
             )
         tracks.columns = TRACK_COLUMNS
@@ -1273,7 +1281,7 @@ class Labeler:
 
         """
         if dets is None:
-            dets = pd.read_csv(det_file, header=None)
+            dets = _read_headerless(det_file, len(DET_COLUMNS))
         elif list(dets.columns) == DET_COLUMNS:
             dets = dets.set_axis(range(len(DET_COLUMNS)), axis=1)
 
