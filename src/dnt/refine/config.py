@@ -18,7 +18,13 @@ import yaml
 TARGETS = ("person", "vehicle")
 ENCODERS = ("dino", "reid", "none")
 _ENDPOINT_KEYS = {
-    "backend", "base_url", "model", "api_key_env", "api_key_file", "max_tokens", "extra_body"
+    "backend",
+    "base_url",
+    "model",
+    "api_key_env",
+    "api_key_file",
+    "max_tokens",
+    "extra_body",
 }
 BACKENDS = ("none", "openai_compat", "anthropic")
 _ENV_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")

@@ -23,6 +23,7 @@ from .primitives import (
     ramp,
     span_speed,
 )
+from .reporter import advance
 
 LEGACY_COL_NAMES = ["frame", "track", "x", "y", "w", "h", "score", "cls", "interp", "r4"]
 
@@ -870,6 +871,7 @@ def score_candidates(
     cache: dict = {}
     cands: list[Candidate] = []
     for di in sorted(descs.values(), key=lambda d: d.track):
+        advance()
         lo = int(np.searchsorted(starts, di.t_e - lc.overlap_frames, side="left"))
         hi = int(np.searchsorted(starts, di.t_e + reach, side="right"))
         for dj in order[lo:hi]:

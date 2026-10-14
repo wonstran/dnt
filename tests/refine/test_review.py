@@ -532,3 +532,25 @@ def test_a_pending_merge_resolves_absorbed_endpoints_to_the_survivors_output_id(
     # without the map the absorbed endpoint has no output ID, as before
     plain = write(tmp_path, [ev], id_map={1: 1, 9: 2}).read_text()
     assert "track_ids=[2]" in plain
+
+
+def test_output_paths_can_go_to_an_aux_dir(tmp_path):
+    from dnt.refine.refiner import check_output_paths, output_paths
+
+    out = tmp_path / "tracks" / "o.txt"
+    aux = tmp_path / "review"
+    paths = output_paths(out, aux)
+    assert {p.parent for p in paths.values()} == {aux}
+    assert {p.parent for p in output_paths(out).values()} == {out.parent}
+    with pytest.raises(ValueError, match="overwrite"):
+        check_output_paths(out, {"video_file": aux / "o.ledger.jsonl"}, aux)
+
+
+def test_review_dir_moves_only_the_review_page(tmp_path):
+    from dnt.refine.refiner import output_paths
+
+    out, aux, rev = tmp_path / "t" / "o.txt", tmp_path / "aux", tmp_path / "t" / "review"
+    paths = output_paths(out, aux, rev)
+    assert paths["review"] == rev / "o.review.html"
+    assert paths["ledger"].parent == paths["features"].parent == aux
+    assert output_paths(out, None, rev)["ledger"].parent == out.parent

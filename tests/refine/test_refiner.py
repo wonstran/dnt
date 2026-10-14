@@ -1345,3 +1345,11 @@ def test_the_returned_table_is_the_written_file(tmp_path, fill):
     pd.testing.assert_frame_equal(got, written)
     assert list(got.columns) == io.OUT_COLUMNS and "raw_id" not in got
     assert int(got["interp"].sum()) == (5 if fill else 0)
+
+
+def test_aux_dir_keeps_the_sidecars_out_of_the_track_folder(tmp_path):
+    src = _write(tmp_path / "in", table(_crit1_rows()))
+    out, aux = tmp_path / "tracks" / "o.txt", tmp_path / "review"
+    res = _refine(src, out, aux_dir=aux, fps=30.0)
+    assert [p.name for p in out.parent.iterdir()] == ["o.txt"]
+    assert res.ledger_path == aux / "o.ledger.jsonl" and res.ledger_path.exists()

@@ -35,6 +35,16 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--reclass-hints", dest="reclass_hints", help="ReClass output CSV")
     run.add_argument("--config", required=True, help="RefineConfig YAML")
     run.add_argument("--out", required=True, help="output track file")
+    run.add_argument(
+        "--aux-dir",
+        dest="aux_dir",
+        help="folder for the ledger, review page and feature cache (default: next to --out)",
+    )
+    run.add_argument(
+        "--review-dir",
+        dest="review_dir",
+        help="folder for the review page and its images (default: with the other sidecars)",
+    )
     run.add_argument("--format", choices=("dnt", "mot"), default="dnt", help="input format")
     vlm = run.add_argument_group(
         "VLM verification",
@@ -111,6 +121,8 @@ def main(argv: list[str] | None = None) -> int:
             fps=args.fps,
             fmt=args.format,
             verbose=False,
+            aux_dir=args.aux_dir,
+            review_dir=args.review_dir,
         )
         res = refiner.last_result
     except (ValueError, OSError, ImportError) as exc:

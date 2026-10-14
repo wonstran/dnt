@@ -10,11 +10,25 @@ from tqdm import tqdm
 
 from .crops import CROP_PAD, FrameReader, crop_box
 from .features import FeatureStore
+from .reporter import current
 
 #: Crops are encoded as soon as this many batches' worth are waiting, so memory stays bounded.
 _FLUSH_BATCHES = 8
 #: Passes embedding fewer crops than this (the per-track lookups) show no progress bar.
 _MIN_CROPS_FOR_BAR = 256
+
+
+class _StandaloneTask:
+    """The embedding bar when no reporter is active (library use)."""
+
+    def __init__(self, desc: str, total: int):
+        self._bar = tqdm(total=total, desc=desc, unit=" crop", disable=total < _MIN_CROPS_FOR_BAR)
+
+    def __enter__(self):
+        return self._bar
+
+    def __exit__(self, *exc):
+        self._bar.close()
 
 
 class VideoAppearance:
@@ -146,6 +160,7 @@ class VideoAppearance:
 
     def _ensure(self, windows: Sequence[tuple[int, int, int]], dense: bool) -> None:
         need: dict[int, dict[tuple[int, int], np.ndarray]] = {}
+        cached = 0
         for raw_id, f0, f1 in windows:
             rows = self._rows(raw_id, f0, f1, dense)
             if rows is None:
@@ -154,18 +169,26 @@ class VideoAppearance:
             for i in idx:
                 key = (int(raw_id), int(frames[i]))
                 if self.store.has(*key) or self.store.is_skipped(*key):
+                    cached += 1
                     continue
                 need.setdefault(key[1], {})[key] = boxes[i]
         if not need:
+            if cached and (rep := current()) is not None:
+                rep.note(cached=cached)
             return
         crops: list[np.ndarray] = []
         owners: list[tuple[int, int]] = []
         total = sum(len(v) for v in need.values())
-        desc = "Embedding dense appearance" if dense else "Embedding coarse appearance"
-        with (
-            tqdm(total=total, desc=desc, unit=" crop", disable=total < _MIN_CROPS_FOR_BAR) as pbar,
-            FrameReader(self.video_file) as reader,
-        ):
+        name = "embed dense" if dense else "embed coarse"
+        rep = current()
+        if rep is not None:
+            rep.note(embedded=total, cached=cached)
+            task = rep.task(name, total)
+        else:  # library use: the standalone bar of old
+            task = _StandaloneTask(
+                "Embedding dense appearance" if dense else "Embedding coarse appearance", total
+            )
+        with task as pbar, FrameReader(self.video_file) as reader:
             for f, img in reader.frames(need):
                 for key in sorted(need[f]):
                     crop = crop_box(img, need[f][key], self.crop_pad)
@@ -179,9 +202,7 @@ class VideoAppearance:
                     self._flush(crops, owners, pbar)
             self._flush(crops, owners, pbar)
 
-    def _flush(
-        self, crops: list[np.ndarray], owners: list[tuple[int, int]], pbar: tqdm | None = None
-    ) -> None:
+    def _flush(self, crops: list[np.ndarray], owners: list[tuple[int, int]], pbar=None) -> None:
         for i in range(0, len(crops), self.batch_size):
             chunk = crops[i : i + self.batch_size]
             emb = self.encoder.encode(chunk)

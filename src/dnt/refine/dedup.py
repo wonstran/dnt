@@ -13,6 +13,7 @@ from .config import RefineConfig
 from .events import ACCEPTED, Decision, Event, EventKind
 from .features import track_embeddings
 from .primitives import frame_runs, majority_class, ramp
+from .reporter import advance
 
 log = logging.getLogger(__name__)
 
@@ -170,6 +171,7 @@ def propose_merges(
     order = sorted(describe(work).values(), key=lambda t: (int(t.frames[0]), t.track))
     events: list[Event] = []
     for i, first in enumerate(order):
+        advance()
         for second in order[i + 1 :]:
             if second.frames[0] > first.frames[-1]:
                 break

@@ -12,6 +12,7 @@ from .config import RefineConfig, to_frames
 from .events import Event, EventKind
 from .features import Appearance, dense_track_embeddings, track_embeddings
 from .primitives import iou_matrix, kalman_nis, ramp
+from .reporter import advance, extend
 
 STAGE = "switch"
 
@@ -464,10 +465,12 @@ def propose_splits(
         info = _score_track(
             g, contact.loc[g.index].to_numpy(bool), cfg, fps, appearance, lin, delta, w
         )
+        advance()
         if info is None:
             continue
         infos[int(tid)] = (info, lin)
         cands[int(tid)] = _candidates(info, fps, cfg, nms)
+    extend(sum(1 for idx in cands.values() if idx))  # the dense pass walks these tracks
     _dense_rescore(appearance, infos, cands, cfg, w, fps, nms)
     for tid, idx in cands.items():
         if idx:

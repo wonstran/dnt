@@ -14,6 +14,7 @@ from .config import RefineConfig
 from .events import Event, EventKind
 from .hints import ReclassHint
 from .primitives import box_centers, heading_smoothness, iou_matrix, ramp, speeds_hps
+from .reporter import advance
 
 STAGE = "screen"
 ORPHAN_STAGE = "orphan"
@@ -335,6 +336,7 @@ def propose_screen(
 
     events: list[Event] = []
     for t, g in tracks.items():
+        advance()
         raw_ids = {int(r) for r in g["raw_id"].unique()}
         hint = sctx.hints.get(next(iter(raw_ids))) if len(raw_ids) == 1 else None
         segs = _segments(g, segment_cuts.get(t, []))
@@ -418,6 +420,7 @@ def propose_orphans(
     events: list[Event] = []
     deferred: list[int] = []
     for t, g in work.groupby("track", sort=True):
+        advance()
         t = int(t)
         if t in linked_tracks:
             continue

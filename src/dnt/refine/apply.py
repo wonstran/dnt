@@ -144,9 +144,7 @@ def rows_to_drop(rows: pd.DataFrame) -> pd.Index:
     return order.index[order.duplicated("frame", keep="first")]
 
 
-def merge_tracks(
-    work: pd.DataFrame, rep_of: dict[int, int]
-) -> tuple[pd.DataFrame, pd.DataFrame]:
+def merge_tracks(work: pd.DataFrame, rep_of: dict[int, int]) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Relabel every member of a merge group to its representative and keep one row per frame.
 
     ``rep_of`` maps each member track to its representative (representatives map to

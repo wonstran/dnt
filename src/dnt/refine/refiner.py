@@ -14,7 +14,6 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
-from tqdm import tqdm
 
 from .. import __version__
 from . import io
@@ -37,6 +36,7 @@ from .primitives import (
     occlusion_flags,
     speeds_hps,
 )
+from .reporter import Reporter, advance, current, extend, use
 from .review import review_image_dir, write_review
 from .screen import ScreenContext, propose_orphans, propose_screen
 from .switch import propose_splits
@@ -61,13 +61,19 @@ class RefineResult:
     events: list[Event] = field(default_factory=list)
 
 
-def output_paths(out) -> dict[str, Path]:
-    """Return the ledger, review, and feature-cache paths that sit next to ``out`` (spec 2.5)."""
+def output_paths(out, aux_dir=None, review_dir=None) -> dict[str, Path]:
+    """Return the ledger, review, and feature-cache paths of ``out`` (spec 2.5).
+
+    They sit next to ``out``, or in ``aux_dir`` (under ``out``'s file name) when it is given.
+    The review page goes to ``review_dir`` instead when that is given.
+    """
     out = Path(out)
+    base = out if aux_dir is None else Path(aux_dir) / out.name
+    review = base if review_dir is None else Path(review_dir) / out.name
     return {
-        "ledger": out.with_suffix(".ledger.jsonl"),
-        "review": out.with_suffix(".review.html"),
-        "features": out.with_suffix(".features.npz"),
+        "ledger": base.with_suffix(".ledger.jsonl"),
+        "review": review.with_suffix(".review.html"),
+        "features": base.with_suffix(".features.npz"),
     }
 
 
@@ -96,13 +102,14 @@ def resolve_fps(arg, cfg_fps, video_fps) -> tuple[float, str]:
     )
 
 
-def check_output_paths(out, inputs: dict) -> None:
+def check_output_paths(out, inputs: dict, aux_dir=None, review_dir=None) -> None:
     """Raise ValueError when ``out`` or a file written next to it is one of the ``inputs``.
 
     ``inputs`` maps argument names to paths (or None). Refining a file into itself would
     overwrite the input that the ledger records by its SHA-256, so it could never be replayed.
     """
-    written = {"out_file": Path(out), **{f"the {k} file": v for k, v in output_paths(out).items()}}
+    sidecars = {f"the {k} file": v for k, v in output_paths(out, aux_dir, review_dir).items()}
+    written = {"out_file": Path(out), **sidecars}
     for in_name, in_path in inputs.items():
         if in_path is None:
             continue
@@ -113,7 +120,7 @@ def check_output_paths(out, inputs: dict) -> None:
                     f"{out_name} ({out_path}) is {in_name} ({in_path}); refine would overwrite "
                     "its input. Write the output to another path."
                 )
-    review_dir = review_image_dir(output_paths(out)["review"])  # OUT.review
+    review_dir = review_image_dir(output_paths(out, aux_dir, review_dir)["review"])  # OUT.review
     if review_dir.exists() and not review_dir.is_dir():
         raise ValueError(
             f"{review_dir} exists and is not a directory; refine needs it for the review "
@@ -263,7 +270,10 @@ def fill_stage(
     out["raw_id"] = out.groupby("track")["raw_id"].ffill().astype(int)
     events: list[Event] = []
     gapped = out.loc[out["interp"] == 1, "track"].unique()
+    advance(_n_tracks(work))  # the smoothing pass is done; the records of the filled gaps follow
+    extend(len(gapped))
     for t, g in out[out["track"].isin(gapped)].groupby("track", sort=True):
+        advance()
         obs = g[g["interp"] == 0]
         lin = lineage_of_rows(obs, excluded)
         for a, b in frame_runs(g.loc[g["interp"] == 1, "frame"]):
@@ -339,6 +349,10 @@ def stage_views(appearance, cfg: RefineConfig):
     if appearance is None or view is None:
         return appearance, appearance
     return view(cfg.switch.min_crop_px), view(cfg.link.min_crop_px)
+
+
+def _n_tracks(work: pd.DataFrame) -> int:
+    return int(work["track"].nunique()) if len(work) else 0
 
 
 class _Stages:
@@ -433,21 +447,33 @@ class _Stages:
                 self.vlm = VLMRouting(self.vlm_runner, self.evidence, self.cfg, self.fps)
         # own detections are judged against the input rows, before any stage edits them
         self.link_ctx = drop_context_duplicates(work, self.ctx_boxes)
-        work, split_raw, cuts = self._switch(work)
-        tick("switch")
-        work = self._screen(work, split_raw, cuts)
-        tick("screen")
-        work = self._dedup(work)
-        tick("dedup")
-        work, protected, linked, pending, rep_of = self._link(work, occluded)
-        tick("link")
+        rep = current() or Reporter(enabled=False)
+
+        def stage(i, name, fn, *args):
+            n0 = _n_tracks(work)
+            skipped = not getattr(self.cfg, name).enabled or work.empty
+            # Prepare, when shown, is stage 1; the bar counts tracks, as every stage walks them
+            rep.stage_start(name, i + rep.n_stages - 7, 0 if skipped else n0)
+            out = fn(*args)
+            res = out[0] if isinstance(out, tuple) else out
+            rep.stage_done(
+                tracks_before=n0,
+                tracks_after=_n_tracks(res),
+                events=self.seq[name],
+                skipped=skipped,
+            )
+            tick(name)
+            return out
+
+        work, split_raw, cuts = stage(1, "switch", self._switch, work)
+        work = stage(2, "screen", self._screen, work, split_raw, cuts)
+        work = stage(3, "dedup", self._dedup, work)
+        work, protected, linked, pending, rep_of = stage(4, "link", self._link, work, occluded)
         self._absorb(rep_of)
         linked = linked | {rep_of.get(t, t) for t in self.merged_reps}
         pending = pending | {rep_of.get(t, t) for t in self.merge_pending}
-        work = self._orphans(work, linked, pending)
-        tick("orphan")
-        work = self._fill(work, protected)
-        tick("fill")
+        work = stage(5, "orphan", self._orphans, work, linked, pending)
+        work = stage(6, "fill", self._fill, work, protected)
         return work, self.events
 
     def _switch(self, work):
@@ -629,6 +655,8 @@ class TrackRefiner:
         video_tot: int | None = None,
         message: str | None = "",
         verbose: bool = True,
+        aux_dir=None,
+        review_dir=None,
     ) -> pd.DataFrame:
         """Refine one track file into ``out_file`` and write its ledger (spec 2.4, 2.5).
 
@@ -636,6 +664,11 @@ class TrackRefiner:
         ``out_file`` (columns ``frame, track, x, y, w, h, score, cls, interp, r4`` with integer
         boxes, sorted by frame then track). ``self.last_result`` holds the same table plus the
         ledger path, summary, and events.
+
+        The ledger, review page and feature cache go next to ``out_file``, or into ``aux_dir``
+        (created if missing) when it is given, so ``out_file``'s folder holds only the tracks.
+        ``review_dir`` sets the folder of the review page and its images on its own, for example
+        a folder under the track folder.
 
         Raises
         ------
@@ -662,8 +695,11 @@ class TrackRefiner:
                 "context_file": context_file,
                 "reclass_file": reclass_file,
             },
+            aux_dir,
+            review_dir,
         )
-        paths = output_paths(out)
+        paths = output_paths(out, aux_dir, review_dir)
+        paths["ledger"].parent.mkdir(parents=True, exist_ok=True)
         if (
             video_file is not None
             and cfg.encoder.kind != "none"
@@ -777,13 +813,15 @@ class TrackRefiner:
         )
         if message:
             desc += f" {message}"
+        tag = (
+            "" if video_index is None or video_tot is None else f"[Video {video_index}/{video_tot}]"
+        )
+        rep = Reporter(enabled=verbose, tag=tag, n_stages=7 if store is None else 8)
         # the runner (and its loop thread) exists only for the stage run that closes it
         runner = (
             None if backend is None else VLMRunner(cfg.vlm, backend, AnswerCache(cfg.vlm.cache_dir))
         )
         try:
-            if store is not None:
-                appearance.prefetch_coarse()
             stages = _Stages(
                 cfg,
                 fps_val,
@@ -796,10 +834,70 @@ class TrackRefiner:
                 video=video_file,
                 frame_count=(vinfo or {}).get("frame_count", 0),
             )
-            with tqdm(total=6, desc=desc, unit=" stage", disable=not verbose) as pbar:
-                work, events = stages.run(
-                    work, tick=lambda name: (pbar.set_postfix_str(name), pbar.update(1))
+            with rep, use(rep):
+                rep.info(desc)
+                if store is not None:
+                    rep.stage_start("Prepare", 1)
+                    appearance.prefetch_coarse()
+                    rep.stage_done()
+                work, events = stages.run(work)
+                rep.stage_start("Save", rep.n_stages, 4)  # features, review, ledger, tracks
+                if store is not None:
+                    sha = store.save(paths["features"])
+                    inputs["features"] = _file_record(paths["features"], sha, cache_key=store.key)
+                advance()
+                work, id_map = renumber(work)
+                review_path = write_review(
+                    events,
+                    review_path=paths["review"],
+                    evidence=stages.evidence,
+                    id_map=id_map,
+                    absorbed=stages.absorbed,
+                    fps=fps_val,
+                    video_file=None if video_file is None else str(Path(video_file).resolve()),
+                    track_file=str(out.resolve()),
+                    reclass_map=cfg.reclass_map,
+                    title=out.stem,
+                    run_key=run_key,
                 )
+                summary = {
+                    "before": before,
+                    "after": table_summary(work, fps_val),
+                    "events": _event_counts(events),
+                    "dedup": dict(stages.merge_counts),
+                    "vlm": _vlm_counts(runner, events),
+                    "orphan_deferred": sorted(
+                        id_map[t] for t in stages.orphan_deferred if t in id_map
+                    ),
+                    "filled_input_rows_removed": tin.n_filled_removed,
+                    "duplicate_input_rows_removed": tin.n_duplicates_removed,
+                }
+                header = {
+                    "format": LEDGER_FORMAT,
+                    "dnt_version": __version__,
+                    "round": 0,
+                    "parent": None,
+                    "config": cfg.to_dict(),
+                    "inputs": inputs,
+                    "fps": fps_val,
+                    "fps_source": fps_src,
+                    "frame_size": list(frame_size) if frame_size else None,
+                    "id_map": {str(k): v for k, v in id_map.items()},
+                    "absorbed": {str(k): int(v) for k, v in stages.absorbed.items()},
+                    "n_filled_input_rows_removed": tin.n_filled_removed,
+                    "smoothing": cfg.fill.smooth_existing,
+                    "summary": summary,
+                }
+                # The ledger goes first and the track file last, so an existing output implies its
+                # ledger (refine_batch skips existing outputs).
+                advance()
+                Ledger(header, events).write(paths["ledger"])
+                advance()
+                io.write_tracks(work, out)
+                advance()
+                log.info("refined %s: %s", out, summary["events"])
+                rep.stage_done()
+                rep.summary(before["tracks"], summary["after"]["tracks"])
         except BaseException:
             # keep the embeddings computed so far, so a rerun does not encode them again;
             # the ledger and the output are written only on success
@@ -808,54 +906,6 @@ class TrackRefiner:
         finally:
             if runner is not None:
                 runner.close()  # stop the loop thread; close the backend's client on its loop
-        if store is not None:
-            sha = store.save(paths["features"])
-            inputs["features"] = _file_record(paths["features"], sha, cache_key=store.key)
-        work, id_map = renumber(work)
-        review_path = write_review(
-            events,
-            review_path=paths["review"],
-            evidence=stages.evidence,
-            id_map=id_map,
-            absorbed=stages.absorbed,
-            fps=fps_val,
-            video_file=None if video_file is None else str(Path(video_file).resolve()),
-            track_file=str(out.resolve()),
-            reclass_map=cfg.reclass_map,
-            title=out.stem,
-            run_key=run_key,
-        )
-        summary = {
-            "before": before,
-            "after": table_summary(work, fps_val),
-            "events": _event_counts(events),
-            "dedup": dict(stages.merge_counts),
-            "vlm": _vlm_counts(runner, events),
-            "orphan_deferred": sorted(id_map[t] for t in stages.orphan_deferred if t in id_map),
-            "filled_input_rows_removed": tin.n_filled_removed,
-            "duplicate_input_rows_removed": tin.n_duplicates_removed,
-        }
-        header = {
-            "format": LEDGER_FORMAT,
-            "dnt_version": __version__,
-            "round": 0,
-            "parent": None,
-            "config": cfg.to_dict(),
-            "inputs": inputs,
-            "fps": fps_val,
-            "fps_source": fps_src,
-            "frame_size": list(frame_size) if frame_size else None,
-            "id_map": {str(k): v for k, v in id_map.items()},
-            "absorbed": {str(k): int(v) for k, v in stages.absorbed.items()},
-            "n_filled_input_rows_removed": tin.n_filled_removed,
-            "smoothing": cfg.fill.smooth_existing,
-            "summary": summary,
-        }
-        # The ledger goes first and the track file last, so an existing output implies its ledger
-        # (refine_batch skips existing outputs).
-        Ledger(header, events).write(paths["ledger"])
-        io.write_tracks(work, out)
-        log.info("refined %s: %s", out, summary["events"])
         tracks = io.output_table(work)  # exactly the rows and values written to out_file
         self.last_result = RefineResult(
             tracks=tracks,
@@ -878,6 +928,8 @@ class TrackRefiner:
         is_report: bool = True,
         message: str | None = "",
         verbose: bool = True,
+        aux_dir=None,
+        review_dir=None,
     ) -> list[str]:
         """Refine several track files, like ``Tracker.track_batch`` (spec 2.4).
 
@@ -942,6 +994,8 @@ class TrackRefiner:
                 video_tot=total,
                 message=message,
                 verbose=verbose,
+                aux_dir=aux_dir,
+                review_dir=review_dir,
             )
             results.append(str(out))
         return results

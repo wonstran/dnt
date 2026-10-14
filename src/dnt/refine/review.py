@@ -238,7 +238,7 @@ def _skipcard(ev: Event, img_rel: str | None, id_map: dict, absorbed=None) -> st
     return (
         f'<div class="skipcard" data-skipped="{_e(ev.id)}">{image}'
         f'<div class="meta"><span><b>{_e(ev.kind)}</b> accepted, not applied: '
-        f'{_e(ev.signals.get("skipped_reason"))}</span>'
+        f"{_e(ev.signals.get('skipped_reason'))}</span>"
         f"<span>tracks {_e(ev.tracks)}</span><span>output id(s): {_e(out_ids)}</span>"
         f"<span>frames {_e(ev.frames[0])}-{_e(ev.frames[1])}</span>"
         f"<span>score {ev.algo_score:.3f}</span></div>"
