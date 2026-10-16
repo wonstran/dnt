@@ -6,13 +6,14 @@ import math
 import numpy as np
 import pandas as pd
 import pytest
-from reclass_fakes import DET_FIELDS, FakeReader
+from reclass_fakes import DET_FIELDS, FakeDetector, FakeReader, vehicle_rows
 
 from dnt.refine.config import VLMConfig
 from dnt.refine.vlm.fake import FakeBackend
 from dnt.refine.vlm.runner import VLMRunner
+from dnt.shared.files import read_track
 from dnt.track import re_class
-from dnt.track.re_class import BUS, CAR, TRUCK
+from dnt.track.re_class import BUS, CAR, TRUCK, VehReClass
 
 
 def _sizes(values):
@@ -259,3 +260,241 @@ def test_budget_is_per_call(monkeypatch, tmp_path):
     assert sorted(r.error is None for r in first.values()) == [False, True]
     second = re_class._ask_vlm(cfg, lambda c: FakeBackend(script), "v.mp4", _requests(1, 2))
     assert all(r.error is None for r in second.values())  # one cached, one fresh call
+
+
+# ---- Task 7: VehReClass ----
+
+COLS = ["frame", "track", "x", "y", "w", "h", "score", "cls", "r3", "r4"]
+
+
+@pytest.fixture
+def video(tmp_path):
+    p = tmp_path / "v.mp4"
+    p.write_bytes(b"")
+    return str(p)
+
+
+def _vr(monkeypatch, script=None, bad=(), **kw):
+    det = FakeDetector(script)
+    monkeypatch.setattr(re_class, "Detector", lambda **k: det)
+    monkeypatch.setattr(re_class, "FrameReader", lambda p: FakeReader(p, bad=bad))
+    return VehReClass(**kw), det
+
+
+def _same(f, cls, conf=0.9, box=(100, 100, 200, 100)):
+    return {f: [(*box, conf, cls)]}
+
+
+def _script(frames, cls, conf=0.9, box=(100, 100, 200, 100)):
+    out = {}
+    for f in frames:
+        out |= _same(f, cls, conf, box)
+    return out
+
+
+@pytest.mark.parametrize("kw", [
+    {"vlm_crops": 0}, {"num_frames": 10.0}, {"hv_min_count": True}, {"hv_size": float("inf")},
+    {"min_gap": -1}, {"iou_threshold": 0}, {"min_support": 1.5}, {"hv_size": 0},
+])
+def test_constructor_rejects(monkeypatch, kw):
+    monkeypatch.setattr(re_class, "Detector", lambda **k: FakeDetector())
+    with pytest.raises(ValueError):
+        VehReClass(**kw)
+
+
+def test_vlm_key_missing_fails_before_detector(monkeypatch, tmp_path):
+    import dnt.refine.vlm as vlm_mod
+
+    built = []
+    monkeypatch.setattr(re_class, "Detector", lambda **k: built.append(1))
+    monkeypatch.setattr(vlm_mod, "check_vlm_dependencies", lambda cfg: None)
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    with pytest.raises(ValueError):
+        VehReClass(vlm=VLMConfig(backend="anthropic", cache_dir=str(tmp_path)))
+    assert built == []
+
+
+def test_redetect_writes_cls_on_every_row(monkeypatch, video):
+    tracks = pd.concat([
+        vehicle_rows(1, range(0, 50), (100, 100, 200, 100)),
+        vehicle_rows(2, range(0, 50), (900, 500, 60, 40)),
+    ], ignore_index=True)
+    tracks.loc[tracks.index[:3], "r3"] = 1  # filled rows still get the class
+    vr, _ = _vr(monkeypatch, _script(range(50), BUS))
+    out = vr.re_classify(tracks, video, verbose=False)
+    assert out[out.track == 1].cls.unique().tolist() == [BUS]
+    assert out[out.track == 2].cls.unique().tolist() == [CAR]  # nothing matched: fallback
+    assert list(out.columns) == COLS
+    pd.testing.assert_frame_equal(out.drop(columns="cls"), tracks.drop(columns="cls"))
+    d = vr.decisions.set_index("track")
+    assert d.loc[1, "layer"] == "redetect" and d.loc[2, "layer"] == "fallback"
+    assert list(vr.decisions.columns) == [
+        "track", "cls", "layer", "heavy", "size", "n", "support", "vlm_answer", "vlm_conf"]
+
+
+def test_one_stray_detection_does_not_decide(monkeypatch, video):
+    vr, _ = _vr(monkeypatch, _same(5, BUS))  # frame 5 is sampled (frames 0, 5, ..., 45)
+    out = vr.re_classify(vehicle_rows(1, range(100), (100, 100, 200, 100)), video, verbose=False)
+    assert out.cls.unique().tolist() == [CAR]
+
+
+def _boundary_script():
+    # samples are frames 0, 5, ..., 45 (10 rows, equal area, min_gap 5): 4 bus votes at 0.3,
+    # 3 truck votes at 0.9, 3 frames with nothing
+    return (_script((0, 5, 10, 15), BUS, conf=0.3) | _script((20, 25, 30), TRUCK, conf=0.9))
+
+
+def test_support_exactly_at_min_support_decides(monkeypatch, video):
+    vr, _ = _vr(monkeypatch, _boundary_script())
+    out = vr.re_classify(vehicle_rows(1, range(0, 50, 5), (100, 100, 200, 100)), video,
+                         verbose=False)
+    d = vr.decisions.iloc[0]
+    assert out.cls.unique().tolist() == [TRUCK]
+    assert d.layer == "redetect" and d.n == 10 and d.support == 0.3
+
+
+def test_support_just_below_min_support_goes_on(monkeypatch, video):
+    vr, _ = _vr(monkeypatch, _boundary_script(), min_support=0.31)
+    out = vr.re_classify(vehicle_rows(1, range(0, 50, 5), (100, 100, 200, 100)), video,
+                         verbose=False)
+    assert out.cls.unique().tolist() == [CAR]
+    assert vr.decisions.layer.iloc[0] == "fallback"
+
+
+def test_heavy_fallback_is_truck_and_car_not_allowed(monkeypatch, video):
+    vr, _ = _vr(monkeypatch, _script(range(100), CAR, box=(100, 100, 600, 300)), hv_size=500)
+    out = vr.re_classify(vehicle_rows(1, range(100), (100, 100, 600, 300)), video, verbose=False)
+    assert out.cls.unique().tolist() == [TRUCK]
+    assert bool(vr.decisions.heavy.iloc[0])
+
+
+def test_named_interp_and_headerless_file_agree(monkeypatch, video, tmp_path):
+    real = vehicle_rows(1, range(0, 20), (100, 100, 200, 100), interp=0)
+    filled = vehicle_rows(1, range(20, 30), (100, 100, 800, 400), interp=1)
+    named = pd.concat([real, filled], ignore_index=True).drop(columns="r3")
+    named = named[["frame", "track", "x", "y", "w", "h", "score", "cls", "interp", "r4"]]
+    path = tmp_path / "t.txt"
+    named.to_csv(path, header=False, index=False)
+    script = _script(range(20), CAR) | _script(range(20, 30), BUS, box=(100, 100, 800, 400))
+    vr, _ = _vr(monkeypatch, script, hv_size=500)
+    a = vr.re_classify(named, video, verbose=False)
+    da = vr.decisions.copy()
+    b = vr.re_classify(str(path), video, verbose=False)
+    assert a.cls.tolist() == b.cls.tolist() == [CAR] * 30
+    pd.testing.assert_frame_equal(da, vr.decisions)
+    assert list(a.columns) == list(named.columns) and list(b.columns) == COLS
+
+
+def test_all_filled_track_falls_back(monkeypatch, video):
+    vr, _ = _vr(monkeypatch, _script(range(10), BUS))
+    out = vr.re_classify(vehicle_rows(1, range(10), (100, 100, 200, 100), r3=1), video, verbose=False)
+    assert out.cls.unique().tolist() == [CAR]
+    row = vr.decisions.iloc[0]
+    assert row.layer == "fallback" and not row.heavy and row.n == 0
+
+
+def test_all_frames_unreadable_falls_back(monkeypatch, video):
+    vr, _ = _vr(monkeypatch, _script(range(10), BUS), bad=set(range(10)))
+    out = vr.re_classify(vehicle_rows(1, range(10), (100, 100, 200, 100)), video, verbose=False)
+    assert out.cls.unique().tolist() == [CAR]
+    assert vr.decisions.n.iloc[0] == 0 and math.isnan(vr.decisions.support.iloc[0])
+
+
+def test_unread_frame_leaves_only_tracks_that_sampled_it(monkeypatch, video):
+    tracks = pd.concat([
+        vehicle_rows(1, [0, 5, 10], (100, 100, 200, 100)),
+        vehicle_rows(2, [5, 20], (400, 100, 200, 100)),
+        vehicle_rows(3, [30, 40], (700, 100, 200, 100)),
+    ], ignore_index=True)
+    vr, det = _vr(monkeypatch, bad={5})
+    vr.re_classify(tracks, video, verbose=False)
+    assert vr.decisions.set_index("track").n.to_dict() == {1: 2, 2: 1, 3: 2}
+    assert det.seen == [0, 10, 20, 30, 40]
+
+
+def test_float_frame_column_matches_int(monkeypatch, video):
+    tracks = vehicle_rows(1, range(30), (100, 100, 200, 100))
+    vr, _ = _vr(monkeypatch, _script(range(30), BUS))
+    a = vr.re_classify(tracks, video, verbose=False)
+    b = vr.re_classify(tracks.astype({"frame": float}), video, verbose=False)
+    assert a.cls.tolist() == b.cls.tolist() == [BUS] * 30
+
+
+def test_track_ids_subset_and_unknown(monkeypatch, video, caplog):
+    tracks = pd.concat([vehicle_rows(1, range(10), (100, 100, 200, 100)),
+                        vehicle_rows(2, range(10), (100, 100, 200, 100))], ignore_index=True)
+    vr, _ = _vr(monkeypatch, _script(range(10), BUS))
+    out = vr.re_classify(tracks, video, track_ids=[2, 99], verbose=False)
+    assert out[out.track == 1].cls.unique().tolist() == [-1]
+    assert out[out.track == 2].cls.unique().tolist() == [BUS]
+    assert "1 track ID" in caplog.text
+
+
+def test_track_ids_numpy_array(monkeypatch, video, caplog):
+    tracks = vehicle_rows(1, range(10), (100, 100, 200, 100))
+    vr, _ = _vr(monkeypatch, _script(range(10), BUS))
+    out = vr.re_classify(tracks, video, track_ids=np.array([1, 7]), verbose=False)
+    assert out.cls.unique().tolist() == [BUS] and "1 track ID" in caplog.text
+
+
+def test_empty_inputs(monkeypatch, video, tmp_path):
+    vr, _ = _vr(monkeypatch)
+    empty = tmp_path / "e.txt"
+    empty.write_bytes(b"")
+    for src in (pd.DataFrame(columns=COLS), str(empty)):
+        out_file = tmp_path / "o.txt"
+        out = vr.re_classify(src, video, out_file=str(out_file), verbose=False)
+        assert out.empty and out_file.stat().st_size == 0 and vr.decisions.empty
+    with pytest.raises(FileNotFoundError):
+        vr.re_classify(pd.DataFrame(columns=COLS), str(tmp_path / "missing.mp4"))
+
+
+def test_out_file_round_trip(monkeypatch, video, tmp_path):
+    tracks = vehicle_rows(1, range(10), (100, 100, 200, 100))
+    vr, _ = _vr(monkeypatch, _script(range(10), BUS))
+    out = vr.re_classify(tracks, video, out_file=str(tmp_path / "o.txt"), verbose=False)
+    back = read_track(tmp_path / "o.txt")
+    assert back[7].tolist() == out.cls.tolist()
+
+
+def test_vlm_decides_undecided_track(monkeypatch, video, tmp_path):
+    backend = FakeBackend({"vehclass:1": _answer("bus", 0.8), "vehclass:2": _answer("bus", 0.5)})
+    tracks = pd.concat([vehicle_rows(1, range(30), (100, 100, 200, 100)),
+                        vehicle_rows(2, range(30), (400, 100, 200, 100))], ignore_index=True)
+    vr, _ = _vr(monkeypatch, vlm=_vlm(tmp_path), vlm_backend_factory=lambda c: backend)
+    out = vr.re_classify(tracks, video, verbose=False)
+    d = vr.decisions.set_index("track")
+    assert out[out.track == 1].cls.unique().tolist() == [BUS] and d.loc[1, "layer"] == "vlm"
+    assert out[out.track == 2].cls.unique().tolist() == [CAR] and d.loc[2, "layer"] == "fallback"
+    assert d.loc[2, "vlm_answer"] == "bus" and d.loc[2, "vlm_conf"] == 0.5  # below min_conf 0.7
+
+
+@pytest.mark.parametrize("dtype", [int, float])
+def test_vlm_with_int_or_float_track_ids(monkeypatch, video, tmp_path, dtype):
+    backend = FakeBackend({"vehclass:1": _answer("bus", 0.8)})
+    tracks = vehicle_rows(1, range(30), (100, 100, 200, 100)).astype({"track": dtype})
+    vr, _ = _vr(monkeypatch, vlm=_vlm(tmp_path), vlm_backend_factory=lambda c: backend)
+    out = vr.re_classify(tracks, video, verbose=False)
+    assert out.cls.unique().tolist() == [BUS]
+    assert vr.decisions.layer.iloc[0] == "vlm"
+    pd.testing.assert_series_equal(out["track"], tracks["track"])  # IDs and dtype unchanged
+    assert [c["tag"] for c in backend.calls] == ["vehclass:1"]
+
+
+def test_vlm_unclear_and_error_fall_back(monkeypatch, video, tmp_path):
+    backend = FakeBackend({"vehclass:1": _answer("unclear"), "vehclass:2": RuntimeError("boom")})
+    tracks = pd.concat([vehicle_rows(1, range(30), (100, 100, 200, 100)),
+                        vehicle_rows(2, range(30), (400, 100, 600, 300))], ignore_index=True)
+    vr, _ = _vr(monkeypatch, vlm=_vlm(tmp_path), vlm_backend_factory=lambda c: backend,
+                hv_size=250)
+    out = vr.re_classify(tracks, video, verbose=False)
+    assert out[out.track == 1].cls.unique().tolist() == [CAR]
+    assert out[out.track == 2].cls.unique().tolist() == [TRUCK]
+
+
+def test_no_vlm_runner_when_nothing_pending(monkeypatch, video, tmp_path):
+    built = []
+    vr, _ = _vr(monkeypatch, _script(range(10), BUS), vlm=_vlm(tmp_path),
+                vlm_backend_factory=lambda c: built.append(1))
+    vr.re_classify(vehicle_rows(1, range(10), (100, 100, 200, 100)), video, verbose=False)
+    assert built == []

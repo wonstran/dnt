@@ -8,7 +8,7 @@ import logging
 import math
 import numbers
 import os
-from collections.abc import Iterable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from pathlib import Path
 from typing import NamedTuple
 
@@ -19,6 +19,9 @@ from tqdm import tqdm
 from ..detect import Detector, DetectorModel
 from ..engine.iob import iobs
 from ..refine.crops import FrameReader, crop_box
+from ..refine.io import filled_mask
+from ..shared.files import read_track, write_track
+from .tracker import Tracker
 
 log = logging.getLogger(__name__)
 
@@ -533,3 +536,296 @@ class ReClass:
             df.to_csv(out_file, index=False)
 
         return df
+
+
+_DECISION_COLUMNS = [
+    "track",
+    "cls",
+    "layer",
+    "heavy",
+    "size",
+    "n",
+    "support",
+    "vlm_answer",
+    "vlm_conf",
+]
+_TRACK_COLUMNS = ("frame", "track", "x", "y", "w", "h", "cls")
+
+
+def _setting_problems(
+    hv_size, hv_min_count, num_frames, min_gap, iou_threshold, min_support, vlm_crops
+) -> list[str]:
+    def is_int(v):
+        return isinstance(v, numbers.Integral) and not isinstance(v, bool)
+
+    def is_num(v):
+        return isinstance(v, numbers.Real) and not isinstance(v, bool) and math.isfinite(v)
+
+    p = []
+    if hv_size is not None and not (is_num(hv_size) and hv_size > 0):
+        p.append("hv_size must be None or a finite number > 0")
+    for name, v in (
+        ("hv_min_count", hv_min_count),
+        ("num_frames", num_frames),
+        ("vlm_crops", vlm_crops),
+    ):
+        if not (is_int(v) and v >= 1):
+            p.append(f"{name} must be an integer >= 1")
+    if not (is_int(min_gap) and min_gap >= 0):
+        p.append("min_gap must be an integer >= 0")
+    for name, v in (("iou_threshold", iou_threshold), ("min_support", min_support)):
+        if not (is_num(v) and 0 < v <= 1):
+            p.append(f"{name} must be a number in (0, 1]")
+    return p
+
+
+def _read_tracks(tracks) -> pd.DataFrame:
+    """Return a copy of a track table, or read a headerless track file into one."""
+    if isinstance(tracks, pd.DataFrame):
+        if tracks.empty:
+            return tracks.copy()
+        missing = [c for c in _TRACK_COLUMNS if c not in tracks.columns]
+        if missing:
+            raise ValueError(f"tracks lacks columns {missing}")
+        return tracks.copy()
+    try:
+        df = read_track(tracks)
+    except pd.errors.EmptyDataError:
+        return pd.DataFrame(columns=Tracker.TRACK_FIELDS)
+    if df.shape[1] != len(Tracker.TRACK_FIELDS):
+        raise ValueError(
+            f"{tracks}: expected {len(Tracker.TRACK_FIELDS)} columns, got {df.shape[1]}"
+        )
+    df.columns = Tracker.TRACK_FIELDS
+    return df
+
+
+class VehReClass:
+    """Classify vehicle tracks as car, bus or truck with a size, re-detection and VLM cascade.
+
+    Each track goes through the layers in order and stops at the first that decides (see the
+    design spec ``2026-10-15-vehicle-reclass-design.md``):
+
+    1. size: at least ``hv_min_count`` real rows with ``max(w, h) >= hv_size`` flag the track
+       heavy, which allows only bus and truck from then on;
+    2. re-detection: spaced, large frames are detected once, and each frame votes for the
+       most confident allowed class overlapping the track box;
+    3. VLM: a tile of crops is shown to the configured model;
+    4. fallback: truck for a heavy track, car otherwise.
+
+    Parameters
+    ----------
+    hv_size : float or None
+        Heavy-vehicle size in pixels; None turns layer 1 off. Default None.
+    hv_min_count : int
+        Real rows that must reach ``hv_size``. Default 3.
+    num_frames : int
+        Frames sampled per track for re-detection. Default 10.
+    min_gap : int
+        Minimum distance in frames between samples (layers 2 and 3). Default 5.
+    iou_threshold : float
+        IoU a re-detection needs with the track box, in (0, 1]. Default 0.5.
+    min_support : float
+        Share of sampled frames the winning class needs, in (0, 1]. Default 0.3.
+    vlm : dnt.refine.config.VLMConfig or None
+        Layer 3 settings; None turns layer 3 off. Its ``min_conf`` is the answer threshold.
+    vlm_crops : int
+        Crops tiled into the one image per track. Default 3.
+    model : DetectorModel or str
+        Re-detection model. Default RT-DETR-x.
+    weights : str or None
+        Custom weights passed to ``Detector``.
+    device : str
+        Detector device. Default ``"auto"``.
+    vlm_api_key : str or None
+        API key; takes precedence over ``vlm.api_key_file`` and the environment.
+    vlm_backend_factory : callable or None
+        Builds the backend from the resolved ``VLMConfig`` (tests); skips the preflight.
+
+    Raises
+    ------
+    ValueError
+        For a broken setting, an invalid VLM config, one resolving to backend ``none``, or a
+        missing API key.
+    ImportError
+        When the VLM backend's package is not installed.
+
+    """
+
+    CAR, BUS, TRUCK = CAR, BUS, TRUCK
+
+    def __init__(
+        self,
+        hv_size: float | None = None,
+        hv_min_count: int = 3,
+        num_frames: int = 10,
+        min_gap: int = 5,
+        iou_threshold: float = 0.5,
+        min_support: float = 0.3,
+        vlm=None,
+        vlm_crops: int = 3,
+        model: DetectorModel | str = DetectorModel.RTDETRx,
+        weights: str | None = None,
+        device: str = "auto",
+        *,
+        vlm_api_key: str | None = None,
+        vlm_backend_factory: Callable | None = None,
+    ) -> None:
+        """Validate the settings, prepare the VLM, then build the detector."""
+        problems = _setting_problems(
+            hv_size, hv_min_count, num_frames, min_gap, iou_threshold, min_support, vlm_crops
+        )
+        if problems:
+            raise ValueError("invalid VehReClass settings: " + "; ".join(problems))
+        self.hv_size = hv_size
+        self.hv_min_count = hv_min_count
+        self.num_frames = num_frames
+        self.min_gap = min_gap
+        self.iou_threshold = iou_threshold
+        self.min_support = min_support
+        self.vlm_crops = vlm_crops
+        self._vlm_api_key = vlm_api_key
+        self._vlm_backend_factory = vlm_backend_factory
+        self.vlm = (
+            None
+            if vlm is None
+            else _prepare_vlm(vlm, vlm_api_key, check=vlm_backend_factory is None)
+        )
+        self.detector = Detector(model=model, weights=weights, device=device)
+        self.decisions = pd.DataFrame(columns=_DECISION_COLUMNS)
+
+    def _backend_factory(self):
+        if self._vlm_backend_factory is not None:
+            return self._vlm_backend_factory
+        from ..refine.vlm import make_backend
+
+        return lambda cfg: make_backend(cfg, api_key=self._vlm_api_key)
+
+    @staticmethod
+    def _select(table: pd.DataFrame, track_ids) -> list:
+        present = pd.unique(table["track"]).tolist()
+        if track_ids is None:
+            return present
+        known = set(present)
+        wanted = list(track_ids)
+        ids = list(dict.fromkeys(t for t in wanted if t in known))
+        unknown = sum(1 for t in wanted if t not in known)
+        if unknown:
+            log.warning("%d track ID(s) in track_ids are not in the tracks; ignored", unknown)
+        return ids
+
+    def re_classify(
+        self,
+        tracks: pd.DataFrame | str,
+        input_video: str,
+        track_ids: list | None = None,
+        out_file: str | None = None,
+        verbose: bool = True,
+    ) -> pd.DataFrame:
+        """Classify vehicle tracks and write the class into ``cls``.
+
+        Parameters
+        ----------
+        tracks : pandas.DataFrame or str
+            A track table (at least ``frame, track, x, y, w, h, cls``) or a headerless track
+            file. Filled rows (``r3 == 1`` or ``interp == 1``) are never used as evidence.
+        input_video : str
+            The source video.
+        track_ids : list or None
+            Tracks to classify; None classifies all. Unknown IDs are ignored with a warning.
+        out_file : str or None
+            Where to write the result, headerless, in the input's column layout.
+        verbose : bool
+            Show a progress bar while detecting.
+
+        Returns
+        -------
+        pandas.DataFrame
+            The input table with ``cls`` set on every row of each classified track; the
+            per-track reasons are in ``self.decisions``.
+
+        Raises
+        ------
+        FileNotFoundError
+            If ``input_video`` does not exist (checked first, even for empty input).
+        ValueError
+            If the video cannot be opened or the track input is malformed.
+
+        """
+        if not Path(input_video).exists():
+            raise FileNotFoundError(f"Video file not found: {input_video}")
+        table = _read_tracks(tracks)
+        self.decisions = pd.DataFrame(columns=_DECISION_COLUMNS)
+        if table.empty:
+            if out_file:
+                write_track(table, out_file)
+            return table
+
+        ids = self._select(table, track_ids)
+        real = table.loc[~filled_mask(table)]
+        groups = dict(tuple(real.groupby("track", sort=False)))
+        none = real.iloc[0:0]
+        rows: dict = {}
+        samples: dict = {}
+        for t in ids:
+            g = groups.get(t, none)
+            size = _size(g, self.hv_min_count)
+            heavy = self.hv_size is not None and size >= self.hv_size
+            rows[t] = {
+                "track": t,
+                "cls": None,
+                "layer": None,
+                "heavy": bool(heavy),
+                "size": size,
+                "n": 0,
+                "support": math.nan,
+                "vlm_answer": None,
+                "vlm_conf": math.nan,
+            }
+            samples[t] = _spaced_sample(g, self.num_frames, self.min_gap)
+
+        frames = {f for s in samples.values() for f, _ in s}
+        with FrameReader(str(input_video)) as reader:
+            by_frame, unread = _detect_frames(
+                self.detector, reader, frames, verbose=verbose, desc="Re-classifying vehicles"
+            )
+        for t in ids:
+            r = rows[t]
+            allowed = (BUS, TRUCK) if r["heavy"] else (CAR, BUS, TRUCK)
+            boxes = {f: b for f, b in samples[t] if f not in unread}
+            v = _vote(boxes, by_frame, allowed, self.iou_threshold)
+            r["n"], r["support"] = v.n, v.support
+            if v.cls is not None and v.support >= self.min_support:
+                r["cls"], r["layer"] = v.cls, "redetect"
+
+        pending = {
+            t: (_spaced_sample(groups[t], self.vlm_crops, self.min_gap), rows[t]["heavy"])
+            for t in ids
+            if rows[t]["layer"] is None and t in groups
+        }
+        if self.vlm is not None and pending:
+            answers = _ask_vlm(self.vlm, self._backend_factory(), str(input_video), pending)
+            for t, a in answers.items():
+                r = rows[t]
+                r["vlm_answer"], r["vlm_conf"] = a.answer, a.confidence
+                ok = (
+                    a.error is None
+                    and a.answer in _ANSWER_CLASS
+                    and math.isfinite(a.confidence)
+                    and a.confidence >= self.vlm.min_conf
+                )
+                if ok:
+                    r["cls"], r["layer"] = _ANSWER_CLASS[a.answer], "vlm"
+
+        for r in rows.values():
+            if r["layer"] is None:
+                r["cls"], r["layer"] = (TRUCK if r["heavy"] else CAR), "fallback"
+
+        out = table.copy()
+        cls_map = {t: r["cls"] for t, r in rows.items()}
+        hit = out["track"].isin(list(cls_map))
+        out.loc[hit, "cls"] = out.loc[hit, "track"].map(cls_map).astype(int)
+        if out_file:
+            write_track(out, out_file)
+        self.decisions = pd.DataFrame(list(rows.values()), columns=_DECISION_COLUMNS)
+        return out
