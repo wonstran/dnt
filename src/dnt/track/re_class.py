@@ -3,6 +3,8 @@
 Use detection results, with support for configurable models, thresholds, and classes.
 """
 
+import logging
+from collections.abc import Iterable, Iterator
 from pathlib import Path
 
 import numpy as np
@@ -11,10 +13,69 @@ from tqdm import tqdm
 
 from ..detect import Detector, DetectorModel
 from ..engine.iob import iobs
+from ..refine.crops import FrameReader
+
+log = logging.getLogger(__name__)
+
+#: Detection columns, copied at import so tests may replace ``Detector``.
+_DET_FIELDS = list(Detector.DET_FIELDS)
+
+
+def _read_frames(reader, frames: Iterable[int]) -> Iterator[tuple[int, np.ndarray | None]]:
+    """Yield ``(frame, BGR image or None)`` for each unique frame, in increasing order.
+
+    Each frame is requested on its own, so a frame the reader cannot decode yields ``None``
+    and reading goes on: ``FrameReader`` seeks on the next request after a failure.
+    """
+    for f in sorted({int(v) for v in frames}):
+        try:
+            ((_, img),) = reader.frames([f])
+        except ValueError:
+            log.debug("cannot read frame %d of %s; it is left out", f, getattr(reader, "path", "?"))
+            yield f, None
+            continue
+        yield f, img
+
+
+def _detect_frames(
+    detector,
+    reader,
+    frames: Iterable[int],
+    *,
+    verbose: bool = False,
+    desc: str = "Detecting frames",
+) -> tuple[dict[int, pd.DataFrame], set[int]]:
+    """Detect each unique frame once, in increasing order.
+
+    Returns the detections of every frame that was read, and the frames that were not.
+    """
+    wanted = sorted({int(v) for v in frames})
+    by_frame: dict[int, pd.DataFrame] = {}
+    unread: set[int] = set()
+    pbar = tqdm(total=len(wanted), unit="frame", desc=desc) if verbose else None
+    for f, img in _read_frames(reader, wanted):
+        if img is None:
+            unread.add(f)
+        else:
+            by_frame[f] = detector.detect_image(img, frame=f)
+        if pbar is not None:
+            pbar.update()
+    if pbar is not None:
+        pbar.close()
+    return by_frame, unread
+
+
+def _dets_for(by_frame: dict[int, pd.DataFrame], frames: Iterable[int]) -> pd.DataFrame:
+    """Return the detections of ``frames`` as one table (empty, with columns, when none)."""
+    parts = [by_frame[int(f)] for f in frames if int(f) in by_frame]
+    parts = [p for p in parts if not p.empty]
+    if not parts:
+        return pd.DataFrame(columns=_DET_FIELDS)
+    return pd.concat(parts, ignore_index=True)
 
 
 class ReClass:
-    """ReClass is responsible for re-classifying object tracks in video frames using detection results.
+    """ReClass re-classifies object tracks in video frames using detection results.
 
     Attributes
     ----------
@@ -206,17 +267,23 @@ class ReClass:
         if track_ids is None:
             track_ids = tracks["track"].unique().tolist()
 
-        results = []
-        if verbose:
-            pbar = tqdm(total=len(track_ids), unit="track", desc="Re-classifying tracks")
+        samples = {}
         for track_id in track_ids:
             target_track = tracks[tracks["track"] == track_id].copy()
             target_track["area"] = target_track["w"] * target_track["h"]
             target_track.sort_values(by="area", inplace=True, ascending=False)
+            samples[track_id] = target_track.head(self.num_frames)
 
-            top_frames = target_track.head(self.num_frames) if len(target_track) >= self.num_frames else target_track
+        frames = {int(f) for s in samples.values() for f in s["frame"]}
+        with FrameReader(str(input_video)) as reader:
+            by_frame, _ = _detect_frames(
+                self.detector, reader, frames, verbose=verbose, desc="Re-classifying tracks"
+            )
 
-            dets = self.detector.detect_frames(input_video, top_frames["frame"].values.tolist())
+        results = []
+        for track_id in track_ids:
+            top_frames = samples[track_id]
+            dets = _dets_for(by_frame, top_frames["frame"])
 
             matched = []
             for cls in self.match_class:
@@ -232,10 +299,6 @@ class ReClass:
                 avg_score = 0
 
             results.append([track_id, cls, round(avg_score, 2)])
-            if verbose:
-                pbar.update()
-        if verbose:
-            pbar.close()
 
         df = pd.DataFrame(results, columns=["track", "cls", "avg_score"])
         if out_file:
