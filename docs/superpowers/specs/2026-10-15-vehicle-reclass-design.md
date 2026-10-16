@@ -1,0 +1,235 @@
+# dnt.track: Classifying Vehicle Tracks as Car, Bus or Truck (`VehReClass`)
+
+- **Status:** draft for review
+- **Date:** 2026-10-15
+- **Related:** `dnt.track.re_class.ReClass` (the rider re-classifier for person tracks). The review of that
+  module on 2026-10-15 found the issues cited below as "review issue N".
+
+## 1. Problem
+
+Vehicle track files come out of tracking with no usable class. The `cls` column is `-1`
+(`Tracker(output_score_cls=False)`), or the detector used a single generic vehicle class. The downstream
+stages need each vehicle track labeled **car (2), bus (5) or truck (7)**, the COCO classes.
+
+`ReClass` cannot do this. It asks whether a small object (a bicycle or skateboard) sits *inside* a person box.
+Here the question is which class the *same box* belongs to. Its scoring also lets one matching frame decide a
+whole track (review issue 1).
+
+## 2. Goal and scope
+
+**Goal.** Give every vehicle track one class for the whole track, using the cheapest evidence that settles it:
+
+1. the track's size (a big track is a heavy vehicle, so bus or truck);
+2. re-detection with a strong detector on spaced, large frames;
+3. a vision-language model (VLM) on crops, for tracks that re-detection cannot settle;
+4. a fixed fallback.
+
+**In scope**
+
+- A new class `VehReClass` in `src/dnt/track/re_class.py`, exported from `dnt.track`.
+- Private helpers in the same file for spaced frame sampling and one-pass batched detection, shared with
+  `ReClass`.
+- `ReClass` moves onto those helpers: one detection pass instead of one per track, and no nested progress bars
+  (review issues 5 and 6). Its scoring and output stay as they are.
+- Removing the stale `try/except ModuleNotFoundError` around the re_class import in `track/__init__.py`
+  (review issue 7). It would hide a broken `VehReClass` import as `None`.
+
+**Out of scope**
+
+- Fixing `ReClass`'s rider scoring (review issues 1 to 4). That is a separate change.
+- Separating large trucks from pickups. COCO class 7 covers both, and this design uses COCO classes as they are.
+- Per-zone or perspective-aware size thresholds. The threshold is one pixel value per camera or video.
+- Feeding vehicle results to `refine` as hints. `refine`'s hints stay rider cues.
+- Writing a per-track summary file.
+
+## 3. API
+
+```python
+from dnt.track import VehReClass
+
+vr = VehReClass(
+    hv_size=None,              # px; layer 1 off when None
+    num_frames=10,             # layer 2: frames sampled per track
+    min_gap=5,                 # layer 2 and 3: minimum frame distance between samples
+    iou_threshold=0.5,         # layer 2: a re-detection must overlap the track box this much
+    min_support=0.3,           # layer 2: share of sampled frames the winning class needs
+    vlm=None,                  # layer 3 off when None; a dnt.refine VLMConfig otherwise
+    vlm_min_conf=0.6,          # layer 3: minimum answer confidence
+    vlm_crops=3,               # layer 3: crops tiled into the one image per track
+    model=DetectorModel.RTDETRx,
+    weights=None,
+    device="auto",
+)
+tracks = vr.re_classify(
+    tracks,                    # track file path (headerless, Tracker.TRACK_FIELDS) or a DataFrame
+    input_video,
+    track_ids=None,            # None: every track; else only these tracks are classified
+    out_file=None,             # headerless CSV, same layout as the input
+    verbose=True,
+)
+vr.decisions                   # DataFrame of the last run; see §6
+```
+
+Class constants: `CAR = 2`, `BUS = 5`, `TRUCK = 7`. They are not constructor parameters.
+
+The constructor validates its numbers: `hv_size` is None or > 0, `num_frames >= 1`, `min_gap >= 0`,
+`iou_threshold` and `min_support` lie in (0, 1], and `vlm_min_conf` lies in [0, 1]. A bad value raises
+`ValueError`. When `vlm` is set, the constructor also checks the VLM dependencies and API key the way `refine`
+does (`check_vlm_dependencies`, `resolve_api_key`), so a missing package or key fails before any detection
+runs. The detector is built in the constructor, as in `ReClass`.
+
+## 4. Data flow
+
+1. **Read.** A path is read with `shared.files.read_track` and given the `Tracker.TRACK_FIELDS` names. A
+   DataFrame must hold at least `frame, track, x, y, w, h, cls`. Extra columns such as `interp` are kept.
+2. **Real rows.** A row is *real* unless the frame has an `interp` column equal to 1 (filled in by
+   `interpolate_tracks_rts`). Sizes, samples and crops use real rows only. A track with no real rows goes
+   straight to the fallback.
+3. **Layer 1, size** (§5.1) for every selected track.
+4. **Layer 2, re-detection** (§5.2). The sampled frames of all selected tracks are merged, sorted and
+   detected in **one pass** over the video.
+5. **Layer 3, VLM** (§5.3) for the tracks layer 2 left undecided, as one `VLMRunner.ask_many` batch.
+6. **Fallback** (§5.4) for the rest.
+7. **Write.** `cls` is set on **every row** of each classified track, interpolated rows included. No other
+   column, row or row order changes. When `out_file` is given, the table is written with
+   `shared.files.write_track` (headerless).
+
+## 5. The cascade
+
+Each track goes through the layers in order and stops at the first one that decides.
+
+### 5.1 Layer 1: size
+
+- `size` = the 95th percentile of `max(w, h)` over the track's real rows. The percentile, not the maximum,
+  keeps one merged or glitched box from tripping the threshold.
+- `size >= hv_size` flags the track **heavy**. From then on only bus and truck are allowed classes.
+- An unflagged track allows car, bus and truck, because a truck far from the camera can look small.
+- Layer 1 never decides a class on its own. With `hv_size=None` no track is flagged.
+
+### 5.2 Layer 2: re-detection
+
+**Sampling.** The track's real rows are ranked by area `w * h`, largest first. Walking that order, a row is
+taken when its frame is at least `min_gap` frames from every frame already taken, until `num_frames` are taken
+or the rows run out. Ties in area go to the earlier frame, so the result is deterministic. With `min_gap=0` this
+is the plain top-N by area.
+
+**Detection.** The union of all tracks' sampled frames is read in increasing order with
+`refine.crops.FrameReader`, and each frame is detected once with the constructor's detector. A sampled frame
+the video cannot decode is **dropped**: it is removed from that track's sample and logged at debug level.
+Detection needs an image-level entry point on `Detector` (the body of `detect_frames`'s per-frame predict and
+box conversion, factored out), so `detect_frames` and both re-classifiers share it.
+
+**Voting.** With *n* the number of sampled frames that were read:
+
+1. In each frame, the candidate detections are those whose class is allowed for the track (§5.1) and whose
+   IoU with the track box is at least `iou_threshold`.
+2. If there are candidates, the one with the **highest detector confidence** casts that frame's single vote,
+   weighted by its confidence. Confidence, not IoU, picks it, because the detector often puts both a bus and a
+   truck box on one vehicle and its confidence says which it believes. A frame with no candidate casts no vote
+   but still counts in *n*.
+3. For each allowed class: `score = sum of its vote weights / n` and `support = its vote count / n`.
+4. The class with the highest `score` wins (ties go to the class with more votes, then the lower class ID). It
+   **decides** the track if its `support >= min_support`. Otherwise, or when *n* is 0, the track goes to layer 3.
+
+Dividing by *n* rather than by the number of matched frames keeps one stray detection from deciding a track
+(the flaw of review issue 1).
+
+Example: *n* = 10. Bus wins 4 frames at confidence 0.8, truck wins 2 at 0.6, 4 frames have no match. Bus has
+score 0.32 and support 0.4, so the track is **bus**. Had bus won 2 frames, its support would be 0.2 and the
+track would go on to layer 3.
+
+### 5.3 Layer 3: VLM
+
+Runs only when `vlm` is set and the track is still undecided.
+
+- **Image.** Pick `vlm_crops` real rows with the §5.2 sampling rule (largest first, `min_gap` apart). Crop
+  each with `refine.crops.crop_box` and tile the crops side by side into one JPEG, each scaled to a common
+  height. Frames are read in the same sorted way as layer 2. A track with no usable crop goes to the fallback.
+- **Question.** One `vlm.runner.Question` per track: the crops show the same vehicle, and the model picks one
+  option. The options are `car, bus, truck, unclear`, or `bus, truck, unclear` for a heavy-flagged track. The
+  prompt text lives next to the other prompts in `refine/vlm/prompts.py`.
+- **Asking.** All questions go to one `VLMRunner.ask_many` call. That gives the configured backend
+  (`anthropic` or `openai_compat`), its retries on transient errors, voting (`vlm.votes`) and the answer cache.
+- **Decision.** An answer other than `unclear` with `confidence >= vlm_min_conf` decides the track. An
+  `unclear` answer, a lower confidence, or a verdict with an `error` sends the track to the fallback. An error
+  is logged as a warning naming the track.
+
+**Cost.** Every track layer 2 leaves undecided costs one VLM question per vote. That includes ordinary cars
+seen at poor angles. With `vlm=None` the cascade stops after layer 2 and costs nothing.
+
+### 5.4 Fallback
+
+A heavy-flagged track becomes **truck** (7), the likelier heavy class on most roads. Any other track becomes
+**car** (2).
+
+## 6. `decisions`
+
+After `re_classify`, `vr.decisions` is a DataFrame with one row per classified track:
+
+| column | meaning |
+|---|---|
+| `track` | track ID |
+| `cls` | the class written |
+| `layer` | `redetect`, `vlm` or `fallback` (layer 1 only narrows, so it is never the deciding layer) |
+| `heavy` | whether layer 1 flagged the track |
+| `size` | the §5.1 size in px (NaN with no real rows) |
+| `n` | sampled frames read in layer 2 |
+| `support` | the layer 2 winner's support (NaN when *n* is 0) |
+| `vlm_answer`, `vlm_conf` | the layer 3 answer and confidence (None and NaN when layer 3 did not run) |
+
+It is not written to disk. It exists to tune `hv_size`, `min_support` and `vlm_min_conf`.
+
+## 7. Errors and edge cases
+
+| Case | Behavior |
+|---|---|
+| Empty track table | Returns it unchanged. An `out_file` is still written (empty). `decisions` is empty. No error. |
+| Missing video | `FileNotFoundError`, before any detection. |
+| Video that cannot be opened | `ValueError` from `FrameReader`. |
+| `track_ids` with IDs not in the table | Ignored, with one warning giving the count. |
+| Undecodable sampled frames | Dropped from *n* (§5.2). |
+| Track with no real rows | Fallback, with `heavy` False. |
+| VLM dependencies or key missing | Error in the constructor (§3). |
+| VLM transient failure | Retried by `VLMRunner`. A track still without an answer falls back, with a warning. |
+| Input `cls` already set | Overwritten for classified tracks. Rows of other tracks are untouched. |
+
+## 8. Changes to existing code
+
+- `src/dnt/track/re_class.py`: add `VehReClass` and the private sampling and batched-detection helpers.
+  `ReClass.re_classify` uses the batched-detection helper. Its sampling stays plain top-N by area, so its
+  results do not change.
+- `src/dnt/detect/yolo/detector.py`: factor the per-frame predict and box conversion out of `detect_frames`
+  into an image-level method that both `detect_frames` and the helpers call. `detect_frames` output stays
+  byte-identical.
+- `src/dnt/track/__init__.py`: import and export `VehReClass`, and drop the `try/except ModuleNotFoundError`
+  fallback.
+- `src/dnt/refine/vlm/prompts.py`: add the vehicle-class prompt.
+- Docs: `docs/api/track/re_class.md` already renders the whole module, so `VehReClass` appears without a nav
+  change. Fix the `ReClass` docstring errors from review issue 8 while touching the file. Update CLAUDE.md's
+  note that `ReClass` may be `None`.
+
+`dnt.track` importing `dnt.refine` follows an existing direction (`track/post_process.py` already imports
+`refine.interpolate`). The VLM backends are imported only when `vlm` is set.
+
+## 9. Testing
+
+Unit tests in `tests/test_veh_reclass.py`. They need no GPU and no network: a fake detector (monkeypatched as
+the existing `ReClass` tests do) and `refine.vlm.fake.FakeBackend`, with small synthetic videos or a faked
+`FrameReader`.
+
+- **Size:** a track just below, at and above `hv_size`. Interpolated rows ignored. `hv_size=None` flags
+  nothing. One huge outlier box does not flag a track (95th percentile).
+- **Sampling:** largest first, `min_gap` respected, deterministic ties, short tracks, `min_gap=0` equals top-N.
+- **Voting:** the IoU gate, highest confidence wins within a frame, classes outside the allowed set are
+  ignored for heavy tracks, `support` at and just below `min_support`, one stray detection in 10 frames does
+  not decide, undecodable frames leave *n*.
+- **Single detection pass:** frames shared by two tracks are detected once, in increasing order.
+- **VLM:** a confident answer decides, `unclear` and low confidence fall back, an error falls back with a
+  warning, heavy tracks get the two-class options, `vlm=None` skips the layer.
+- **Fallback:** heavy becomes truck, other becomes car, no real rows becomes car.
+- **Output:** `cls` on every row of a classified track, other columns and row order unchanged, `track_ids`
+  leaves other tracks alone, the headerless `out_file` reads back with `read_track`, empty input works.
+- **`decisions`:** one row per classified track with the deciding layer.
+- **Regression:** `ReClass.re_classify` gives the same result before and after the helper change, and
+  `detect_frames` output is unchanged.
+- **Constructor:** bad numbers raise `ValueError`. A VLM config with a missing key fails in the constructor.
