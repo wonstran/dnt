@@ -1,6 +1,7 @@
 import inspect
 from pathlib import Path
 
+import cv2
 import numpy as np
 import pandas as pd
 import pytest
@@ -533,3 +534,16 @@ def test_detect_batch_skips_return_df_and_clears_stale_part_on_overwrite(fake, s
     d.detect_batch([str(video)], output_path=str(tmp_path), verbose=False)
     assert seen[-1] == (False, True)  # otherwise the partial run is kept to resume from
 
+
+
+def test_detect_image_matches_detect_frames(fake, synthetic_video):
+    video, _ = synthetic_video
+    d = det_mod.Detector(model=DetectorModel.YOLO26n, device="cpu", fast=False)
+    cap = cv2.VideoCapture(str(video))
+    cap.set(cv2.CAP_PROP_POS_FRAMES, 3)
+    ok, img = cap.read()
+    cap.release()
+    assert ok
+    pd.testing.assert_frame_equal(
+        d.detect_image(img, frame=3), d.detect_frames(str(video), [3], verbose=False)
+    )
