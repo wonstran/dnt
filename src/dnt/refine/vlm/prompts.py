@@ -20,6 +20,9 @@ VEHICLE_SCREEN = [
     "unsure",
 ]
 SAME = ["same_individual", "different", "unsure"]
+#: Vehicle class answers (``dnt.track.VehReClass``); heavy tracks are asked without ``car``.
+VEHICLE_CLASS = ["car", "bus", "truck", "unclear"]
+HEAVY_CLASS = ["bus", "truck", "unclear"]
 #: Rider answers and the ``RefineConfig.reclass_map`` key each one selects.
 RIDER_OPTIONS = {"cyclist": "cyclist", "motorcycle_rider": "motorcycle", "scooter_rider": "scooter"}
 
@@ -36,6 +39,10 @@ _GLOSS = {
     "same_individual": "the same individual in both rows",
     "different": "two different individuals",
     "unsure": "you cannot tell",
+    "car": "a passenger car, SUV or minivan",
+    "bus": "a bus or coach that carries passengers",
+    "truck": "a truck of any size, including pickup trucks, box trucks and semi-trailers",
+    "unclear": "you cannot tell",
 }
 
 
@@ -80,7 +87,11 @@ def build_prompt(event: Event, target: str, options: list[str], *, fps: float) -
                 "of one track (a context frame follows when present). What is the tracked "
                 "object?"
             )
-    lines = [body, "", "Options:"]
+    return "\n".join([body, *_answer_lines(options)])
+
+
+def _answer_lines(options: list[str]) -> list[str]:
+    lines = ["", "Options:"]
     lines += [f"- {o}: {_GLOSS[o]}" for o in options]
     lines += [
         "",
@@ -88,4 +99,13 @@ def build_prompt(event: Event, target: str, options: list[str], *, fps: float) -
         '{"answer": "<one of the options>", "confidence": <number from 0 to 1>, '
         '"reason": "<one short sentence>"}',
     ]
-    return "\n".join(lines)
+    return lines
+
+
+def vehicle_class_prompt(options: list[str]) -> str:
+    """Return the vehicle-class question for ``options`` (deterministic text)."""
+    body = (
+        "The crops show one road vehicle at different moments of one track, left to right. "
+        "Which kind of vehicle is it?"
+    )
+    return "\n".join([body, *_answer_lines(options)])

@@ -1,12 +1,16 @@
 """VehReClass: helpers (Task 5), VLM layer (Task 6) and the class (Task 7)."""
 
+import json
 import math
 
 import numpy as np
 import pandas as pd
 import pytest
-from reclass_fakes import DET_FIELDS
+from reclass_fakes import DET_FIELDS, FakeReader
 
+from dnt.refine.config import VLMConfig
+from dnt.refine.vlm.fake import FakeBackend
+from dnt.refine.vlm.runner import VLMRunner
 from dnt.track import re_class
 from dnt.track.re_class import BUS, CAR, TRUCK
 
@@ -138,3 +142,120 @@ def test_vote_heavy_ignores_car():
 def test_vote_no_frames():
     v = re_class._vote({}, {}, (CAR, BUS, TRUCK), 0.5)
     assert v.cls is None and v.n == 0 and math.isnan(v.support)
+
+
+# ---- Task 6: VLM layer ----
+
+
+def _vlm(tmp_path, **kw):
+    base = dict(backend="openai_compat", model="m", base_url="http://localhost:9/v1",
+                cache_dir=str(tmp_path / "cache"))
+    return VLMConfig(**(base | kw))
+
+
+def _answer(ans, conf=0.9):
+    return json.dumps({"answer": ans, "confidence": conf, "reason": "r"})
+
+
+def test_tile_is_jpeg_and_none_without_crops():
+    img = re_class._tile([np.zeros((40, 80, 3), np.uint8), np.zeros((20, 10, 3), np.uint8)])
+    assert img[:2] == b"\xff\xd8"
+    assert re_class._tile([]) is None
+
+
+def test_prepare_vlm_resolves_endpoint_and_checks_it(monkeypatch, tmp_path):
+    import dnt.refine.vlm as vlm_mod
+
+    seen = []
+    monkeypatch.setattr(vlm_mod, "check_vlm_dependencies", lambda cfg: seen.append(cfg.backend))
+    vlm = VLMConfig(cache_dir=str(tmp_path), use="local", endpoints={
+        "local": {"backend": "openai_compat", "model": "q", "base_url": "http://localhost:9/v1"}})
+    cfg = re_class._prepare_vlm(vlm, None, check=True)
+    assert (cfg.backend, cfg.model, seen) == ("openai_compat", "q", ["openai_compat"])
+    assert vlm.use == "local"  # the caller's object is unchanged
+
+
+@pytest.mark.parametrize("vlm", [
+    VLMConfig(use="nope"),
+    VLMConfig(backend="openai_compat", model="m", votes=0),
+    VLMConfig(),  # resolves to backend none
+])
+def test_prepare_vlm_rejects(vlm):
+    with pytest.raises(ValueError):
+        re_class._prepare_vlm(vlm, None, check=False)
+
+
+def test_prepare_vlm_missing_anthropic_key(monkeypatch, tmp_path):
+    import dnt.refine.vlm as vlm_mod
+
+    monkeypatch.setattr(vlm_mod, "check_vlm_dependencies", lambda cfg: None)
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    with pytest.raises(ValueError, match="ANTHROPIC_API_KEY"):
+        re_class._prepare_vlm(VLMConfig(backend="anthropic", cache_dir=str(tmp_path)), None, check=True)
+
+
+def _requests(*tracks, heavy=False):
+    box = (100.0, 100.0, 300.0, 150.0)
+    return {t: ([(10 * t + i * 5, box) for i in range(3)], heavy) for t in tracks}
+
+
+def test_ask_vlm_answers_and_options(monkeypatch, tmp_path):
+    monkeypatch.setattr(re_class, "FrameReader", FakeReader)
+    backend = FakeBackend({"vehclass:1": _answer("bus"), "vehclass:2": _answer("truck")})
+    got = re_class._ask_vlm(_vlm(tmp_path), lambda cfg: backend, "v.mp4",
+                            _requests(1) | _requests(2, heavy=True))
+    assert got[1] == re_class._VLMResult("bus", 0.9, None)
+    assert got[2].answer == "truck"
+    opts = {c["tag"]: c["options"] for c in backend.calls}
+    assert opts == {"vehclass:1": ["car", "bus", "truck", "unclear"],
+                    "vehclass:2": ["bus", "truck", "unclear"]}
+    assert backend.closed == 1
+
+
+def test_ask_vlm_keeps_original_ids(monkeypatch, tmp_path):
+    monkeypatch.setattr(re_class, "FrameReader", FakeReader)
+    backend = FakeBackend({"vehclass:1": _answer("bus"), "vehclass:2": _answer("truck")})
+    reqs = {1.0: _requests(1)[1], 2: _requests(2)[2]}
+    got = re_class._ask_vlm(_vlm(tmp_path), lambda cfg: backend, "v.mp4", reqs)
+    assert set(got) == {1.0, 2} and got[1.0].answer == "bus" and got[2].answer == "truck"
+    assert sorted(c["tag"] for c in backend.calls) == ["vehclass:1", "vehclass:2"]
+
+
+def test_tag_id():
+    assert [re_class._tag_id(v) for v in (1, 1.0, np.int64(3), np.float64(4.0), 2.5)] == [
+        "1", "1", "3", "4", "2.5"]
+
+
+def test_partial_crop_failure_still_asks(monkeypatch, tmp_path):
+    monkeypatch.setattr(re_class, "FrameReader", lambda p: FakeReader(p, bad={15}))
+    backend = FakeBackend({"*": _answer("bus")})
+    got = re_class._ask_vlm(_vlm(tmp_path), lambda cfg: backend, "v.mp4", _requests(1))
+    assert got[1].answer == "bus" and len(backend.calls) == 1
+
+
+def test_track_without_usable_crop_is_not_asked(monkeypatch, tmp_path):
+    monkeypatch.setattr(re_class, "FrameReader", lambda p: FakeReader(p, bad={10, 15, 20}))
+    backend = FakeBackend({"*": _answer("bus")})
+    got = re_class._ask_vlm(_vlm(tmp_path), lambda cfg: backend, "v.mp4", _requests(1))
+    assert got == {} and backend.calls == []
+
+
+def test_ask_vlm_closes_runner_when_ask_many_raises(monkeypatch, tmp_path):
+    monkeypatch.setattr(re_class, "FrameReader", FakeReader)
+    closed = []
+    monkeypatch.setattr(VLMRunner, "ask_many", lambda self, q: (_ for _ in ()).throw(RuntimeError("x")))
+    real_close = VLMRunner.close
+    monkeypatch.setattr(VLMRunner, "close", lambda self: (closed.append(1), real_close(self)))
+    with pytest.raises(RuntimeError):
+        re_class._ask_vlm(_vlm(tmp_path), lambda cfg: FakeBackend({}), "v.mp4", _requests(1))
+    assert closed == [1]
+
+
+def test_budget_is_per_call(monkeypatch, tmp_path):
+    monkeypatch.setattr(re_class, "FrameReader", FakeReader)
+    cfg = _vlm(tmp_path, max_calls=1, max_concurrency=1)
+    script = {"*": _answer("bus")}
+    first = re_class._ask_vlm(cfg, lambda c: FakeBackend(script), "v.mp4", _requests(1, 2))
+    assert sorted(r.error is None for r in first.values()) == [False, True]
+    second = re_class._ask_vlm(cfg, lambda c: FakeBackend(script), "v.mp4", _requests(1, 2))
+    assert all(r.error is None for r in second.values())  # one cached, one fresh call

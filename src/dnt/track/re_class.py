@@ -3,8 +3,11 @@
 Use detection results, with support for configurable models, thresholds, and classes.
 """
 
+import copy
 import logging
 import math
+import numbers
+import os
 from collections.abc import Iterable, Iterator
 from pathlib import Path
 from typing import NamedTuple
@@ -15,7 +18,7 @@ from tqdm import tqdm
 
 from ..detect import Detector, DetectorModel
 from ..engine.iob import iobs
-from ..refine.crops import FrameReader
+from ..refine.crops import FrameReader, crop_box
 
 log = logging.getLogger(__name__)
 
@@ -163,6 +166,140 @@ def _vote(
         return _Vote(None, 0.0, n)
     winner = min(count, key=lambda c: (-weight[c], -count[c], c))
     return _Vote(winner, count[winner] / n, n)
+
+
+_TILE_HEIGHT = 160
+_TILE_GAP = 6
+_JPEG_QUALITY = 85
+_ANSWER_CLASS = {"car": CAR, "bus": BUS, "truck": TRUCK}
+
+
+def _tile(crops: list[np.ndarray]) -> bytes | None:
+    """Scale RGB crops to one height, place them side by side, and return JPEG bytes."""
+    import cv2
+
+    parts = []
+    for c in crops:
+        h, w = c.shape[:2]
+        width = max(1, round(w * _TILE_HEIGHT / h))
+        parts.append(cv2.resize(c, (width, _TILE_HEIGHT), interpolation=cv2.INTER_AREA))
+    if not parts:
+        return None
+    width = sum(p.shape[1] for p in parts) + _TILE_GAP * (len(parts) + 1)
+    canvas = np.full((_TILE_HEIGHT + 2 * _TILE_GAP, width, 3), 128, np.uint8)
+    x = _TILE_GAP
+    for p in parts:
+        canvas[_TILE_GAP : _TILE_GAP + _TILE_HEIGHT, x : x + p.shape[1]] = p
+        x += p.shape[1] + _TILE_GAP
+    bgr = cv2.cvtColor(canvas, cv2.COLOR_RGB2BGR)
+    ok, buf = cv2.imencode(".jpg", bgr, [cv2.IMWRITE_JPEG_QUALITY, _JPEG_QUALITY])
+    return buf.tobytes() if ok else None
+
+
+def _prepare_vlm(vlm, api_key: str | None, *, check: bool):
+    """Validate and resolve a copy of ``vlm``; with ``check``, preflight it.
+
+    Raises ``ValueError`` for invalid settings, a config resolving to backend ``none``, or a
+    missing key; ``ImportError`` when the backend's package is missing.
+    """
+    from ..refine.config import vlm_problems
+
+    problems, cfg = vlm_problems(copy.deepcopy(vlm))
+    if problems:
+        raise ValueError("invalid vlm config: " + "; ".join(problems))
+    if cfg.backend == "none":
+        raise ValueError("vlm resolves to backend 'none'; pass vlm=None to turn layer 3 off")
+    if check:
+        from ..refine import vlm as vlm_mod
+
+        vlm_mod.check_vlm_dependencies(cfg)
+        _check_vlm_key(cfg, api_key)
+    return cfg
+
+
+def _check_vlm_key(cfg, api_key: str | None) -> None:
+    """Raise ``ValueError`` when the backend needs a key and none is found (no network)."""
+    from ..refine.vlm import missing_key_message, resolve_api_key
+
+    if cfg.backend == "anthropic":
+        if resolve_api_key(cfg, "ANTHROPIC_API_KEY", api_key) is None:
+            raise ValueError(
+                missing_key_message("anthropic", cfg.api_key_env or "ANTHROPIC_API_KEY")
+            )
+    elif cfg.backend == "openai_compat":
+        key = resolve_api_key(cfg, "OPENAI_API_KEY", api_key)
+        if key is None and not (cfg.base_url or os.environ.get("OPENAI_BASE_URL")):
+            raise ValueError(
+                missing_key_message("openai_compat", cfg.api_key_env or "OPENAI_API_KEY")
+                + "; a local server needs vlm.base_url instead"
+            )
+
+
+class _VLMResult(NamedTuple):
+    answer: str | None
+    confidence: float
+    error: str | None
+
+
+def _ask_vlm(cfg, backend_factory, input_video: str, requests) -> dict:
+    """Ask one question per track about a tile of its crops.
+
+    ``requests`` maps a track ID to ``(samples, heavy)``. A track with no usable crop is left
+    out. The runner is built only when there is a question, and it is always closed.
+    """
+    from ..refine.vlm.cache import AnswerCache
+    from ..refine.vlm.prompts import HEAVY_CLASS, VEHICLE_CLASS, vehicle_class_prompt
+    from ..refine.vlm.runner import Question, VLMRunner
+
+    want: dict[int, list[tuple[object, tuple]]] = {}
+    for t, (samples, _) in requests.items():
+        for f, box in samples:
+            want.setdefault(int(f), []).append((t, box))
+    crops: dict[object, list[tuple[int, np.ndarray]]] = {t: [] for t in requests}
+    with FrameReader(str(input_video)) as reader:
+        for f, img in _read_frames(reader, want):
+            if img is None:
+                continue
+            for t, box in want[f]:
+                c = crop_box(img, box)
+                if c is not None:
+                    crops[t].append((f, c))
+    questions, asked = [], []
+    for t, (_, heavy) in requests.items():
+        image = _tile([c for _, c in sorted(crops[t], key=lambda fc: fc[0])])
+        if image is None:
+            log.debug("track %s has no usable crop for the VLM", t)
+            continue
+        options = list(HEAVY_CLASS if heavy else VEHICLE_CLASS)
+        questions.append(
+            Question(
+                tag=f"vehclass:{_tag_id(t)}",
+                image=image,
+                prompt=vehicle_class_prompt(options),
+                options=options,
+            )
+        )
+        asked.append(t)  # the original ID, kept as is; the tag is only diagnostic text
+    if not questions:
+        return {}
+    runner = VLMRunner(cfg, backend_factory(cfg), AnswerCache(cfg.cache_dir))
+    try:
+        verdicts = runner.ask_many(questions)
+    finally:
+        runner.close()
+    out = {}
+    for t, v in zip(asked, verdicts, strict=True):
+        if v.error:
+            log.warning("track %s: no VLM answer (%s); it falls back", t, v.error)
+        out[t] = _VLMResult(v.answer, float(v.confidence), v.error)
+    return out
+
+
+def _tag_id(t) -> str:
+    """Display a track ID for a question tag: an integral float such as ``1.0`` shows as ``1``."""
+    if isinstance(t, numbers.Real) and not isinstance(t, bool) and float(t).is_integer():
+        return str(int(t))
+    return str(t)
 
 
 class ReClass:
