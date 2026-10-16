@@ -1,6 +1,7 @@
 """VehReClass: helpers (Task 5), VLM layer (Task 6) and the class (Task 7)."""
 
 import json
+import logging
 import math
 
 import numpy as np
@@ -164,6 +165,19 @@ def test_tile_is_jpeg_and_none_without_crops():
     assert re_class._tile([]) is None
 
 
+def test_tile_of_prescaled_crops_is_byte_identical():
+    rng = np.random.default_rng(0)
+    crops = [
+        rng.integers(0, 255, (40, 80, 3), dtype=np.uint8),
+        rng.integers(0, 255, (333, 17, 3), dtype=np.uint8),
+        rng.integers(0, 255, (160, 90, 3), dtype=np.uint8),  # already tile height
+        rng.integers(0, 255, (5, 400, 3), dtype=np.uint8),
+    ]
+    scaled = [re_class._fit_height(c) for c in crops]
+    assert all(c.shape[0] == re_class._TILE_HEIGHT for c in scaled)
+    assert re_class._tile(scaled) == re_class._tile(crops)
+
+
 def test_prepare_vlm_resolves_endpoint_and_checks_it(monkeypatch, tmp_path):
     import dnt.refine.vlm as vlm_mod
 
@@ -186,13 +200,53 @@ def test_prepare_vlm_rejects(vlm):
         re_class._prepare_vlm(vlm, None, check=False)
 
 
+def test_detect_frames_warns_once_about_unread_frames(caplog):
+    reader = FakeReader("v.mp4", bad={5, 10})
+    with caplog.at_level(logging.WARNING, logger=re_class.log.name):
+        by_frame, unread = re_class._detect_frames(FakeDetector(), reader, [0, 5, 10, 15])
+    assert sorted(by_frame) == [0, 15] and unread == {5, 10}
+    msgs = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(msgs) == 1 and "2 of 4" in msgs[0] and "v.mp4" in msgs[0]
+
+
+def test_detect_frames_silent_when_all_read(caplog):
+    with caplog.at_level(logging.WARNING, logger=re_class.log.name):
+        re_class._detect_frames(FakeDetector(), FakeReader("v.mp4"), [0, 5])
+    assert caplog.records == []
+
+
+def test_ask_vlm_warns_once_about_unreadable_crop_frames(monkeypatch, tmp_path, caplog):
+    monkeypatch.setattr(re_class, "FrameReader", lambda p: FakeReader(p, bad={15, 20}))
+    backend = FakeBackend({"*": _answer("bus")})
+    with caplog.at_level(logging.WARNING, logger=re_class.log.name):
+        re_class._ask_vlm(_vlm(tmp_path), lambda cfg: backend, "v.mp4", _requests(1))
+    msgs = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(msgs) == 1 and "2 of 3" in msgs[0] and "v.mp4" in msgs[0]
+
+
 def test_prepare_vlm_missing_anthropic_key(monkeypatch, tmp_path):
     import dnt.refine.vlm as vlm_mod
 
     monkeypatch.setattr(vlm_mod, "check_vlm_dependencies", lambda cfg: None)
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
-    with pytest.raises(ValueError, match="ANTHROPIC_API_KEY"):
+    with pytest.raises(ValueError, match="VehReClass") as e:
         re_class._prepare_vlm(VLMConfig(backend="anthropic", cache_dir=str(tmp_path)), None, check=True)
+    msg = str(e.value)
+    assert "ANTHROPIC_API_KEY" in msg and "vlm_api_key" in msg and "vlm.api_key_file" in msg
+    assert "TrackRefiner" not in msg and "--vlm" not in msg
+
+
+def test_prepare_vlm_missing_openai_key_names_local_server(monkeypatch, tmp_path):
+    import dnt.refine.vlm as vlm_mod
+
+    monkeypatch.setattr(vlm_mod, "check_vlm_dependencies", lambda cfg: None)
+    monkeypatch.delenv("MY_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+    cfg = VLMConfig(backend="openai_compat", model="m", api_key_env="MY_KEY",
+                    cache_dir=str(tmp_path))
+    with pytest.raises(ValueError, match="VehReClass") as e:
+        re_class._prepare_vlm(cfg, None, check=True)
+    assert "MY_KEY" in str(e.value) and "vlm.base_url" in str(e.value)
 
 
 def _requests(*tracks, heavy=False):
@@ -309,9 +363,16 @@ def test_vlm_key_missing_fails_before_detector(monkeypatch, tmp_path):
     monkeypatch.setattr(re_class, "Detector", lambda **k: built.append(1))
     monkeypatch.setattr(vlm_mod, "check_vlm_dependencies", lambda cfg: None)
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="VehReClass"):
         VehReClass(vlm=VLMConfig(backend="anthropic", cache_dir=str(tmp_path)))
     assert built == []
+
+
+def test_api_key_with_backend_factory_is_rejected(monkeypatch, tmp_path):
+    monkeypatch.setattr(re_class, "Detector", lambda **k: FakeDetector())
+    with pytest.raises(ValueError, match="vlm_api_key"):
+        VehReClass(vlm=_vlm(tmp_path), vlm_api_key="k", vlm_backend_factory=lambda c: None)
+    VehReClass(vlm_api_key="k")  # harmless without a vlm
 
 
 def test_redetect_writes_cls_on_every_row(monkeypatch, video):
@@ -366,6 +427,14 @@ def test_heavy_fallback_is_truck_and_car_not_allowed(monkeypatch, video):
     out = vr.re_classify(vehicle_rows(1, range(100), (100, 100, 600, 300)), video, verbose=False)
     assert out.cls.unique().tolist() == [TRUCK]
     assert bool(vr.decisions.heavy.iloc[0])
+
+
+def test_size_just_below_hv_size_is_not_heavy(monkeypatch, video):
+    vr, _ = _vr(monkeypatch, _script(range(100), CAR, box=(100, 100, 600, 300)), hv_size=601)
+    out = vr.re_classify(vehicle_rows(1, range(100), (100, 100, 600, 300)), video, verbose=False)
+    assert out.cls.unique().tolist() == [CAR]
+    row = vr.decisions.iloc[0]
+    assert not row.heavy and row["size"] == 600 and row.layer == "redetect"
 
 
 def test_named_interp_and_headerless_file_agree(monkeypatch, video, tmp_path):
@@ -481,15 +550,22 @@ def test_vlm_with_int_or_float_track_ids(monkeypatch, video, tmp_path, dtype):
     assert [c["tag"] for c in backend.calls] == ["vehclass:1"]
 
 
-def test_vlm_unclear_and_error_fall_back(monkeypatch, video, tmp_path):
+def test_vlm_unclear_and_error_fall_back(monkeypatch, video, tmp_path, caplog):
     backend = FakeBackend({"vehclass:1": _answer("unclear"), "vehclass:2": RuntimeError("boom")})
     tracks = pd.concat([vehicle_rows(1, range(30), (100, 100, 200, 100)),
                         vehicle_rows(2, range(30), (400, 100, 600, 300))], ignore_index=True)
     vr, _ = _vr(monkeypatch, vlm=_vlm(tmp_path), vlm_backend_factory=lambda c: backend,
                 hv_size=250)
-    out = vr.re_classify(tracks, video, verbose=False)
+    with caplog.at_level(logging.WARNING, logger=re_class.log.name):
+        out = vr.re_classify(tracks, video, verbose=False)
     assert out[out.track == 1].cls.unique().tolist() == [CAR]
     assert out[out.track == 2].cls.unique().tolist() == [TRUCK]
+    msgs = [r.getMessage() for r in caplog.records if r.name == re_class.log.name]
+    assert len(msgs) == 1 and "track 2" in msgs[0] and "boom" in msgs[0]
+    d = vr.decisions.set_index("track")
+    assert d.loc[1, "vlm_answer"] == "unclear" and d.loc[1, "vlm_conf"] == 0.9
+    assert d.loc[2, "vlm_answer"] is None and math.isnan(d.loc[2, "vlm_conf"])
+    assert d.loc[2, "layer"] == "fallback"
 
 
 def test_no_vlm_runner_when_nothing_pending(monkeypatch, video, tmp_path):

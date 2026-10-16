@@ -151,9 +151,9 @@
   can now be applied too: 2 of the 8 applied links on the audited clips (beginning 98->134,
   middle 221->222) were border links, and both were among the audited, correct ones.
 - `ReClass` reads every sampled frame once, in order, instead of reopening the video per track,
-  and skips a frame the video cannot decode instead of stopping. With `verbose=True` its progress
-  bar counts frames, not tracks. A video OpenCV cannot open now raises `ValueError`; before, every
-  track silently got `default_class`.
+  and skips a frame the video cannot decode. With `verbose=True` its progress bar counts frames,
+  not tracks. A video OpenCV cannot open now raises `ValueError`; before, every track silently got
+  `default_class`. A summary warning is logged when sampled frames cannot be read.
 - `dnt.track.ReClass` is always importable; the fallback that set it to `None` is removed.
 
 ## 0.3.4 — 2026-10-01

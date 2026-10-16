@@ -1,6 +1,9 @@
-"""Provide the ReClass class for re-classifying object tracks in video frames.
+"""Provide ReClass and VehReClass, which re-classify object tracks from video frames.
 
-Use detection results, with support for configurable models, thresholds, and classes.
+``ReClass`` matches a track's boxes against detections of chosen classes (for example
+bicycles and scooters) and assigns the best-matching class. ``VehReClass`` classifies vehicle
+tracks as car, bus or truck with a cascade of a size rule, re-detection voting, an optional
+vision-language model, and a fallback.
 """
 
 import copy
@@ -10,7 +13,7 @@ import numbers
 import os
 from collections.abc import Callable, Iterable, Iterator
 from pathlib import Path
-from typing import NamedTuple
+from typing import TYPE_CHECKING, NamedTuple
 
 import numpy as np
 import pandas as pd
@@ -22,6 +25,9 @@ from ..refine.crops import FrameReader, crop_box
 from ..refine.io import filled_mask
 from ..shared.files import read_track, write_track
 from .tracker import Tracker
+
+if TYPE_CHECKING:
+    from ..refine.config import VLMConfig
 
 log = logging.getLogger(__name__)
 
@@ -70,6 +76,14 @@ def _detect_frames(
             pbar.update()
     if pbar is not None:
         pbar.close()
+    if unread:
+        log.warning(
+            "%d of %d sampled frames of %s could not be read; tracks that sampled them "
+            "have less evidence",
+            len(unread),
+            len(wanted),
+            getattr(reader, "path", "?"),
+        )
     return by_frame, unread
 
 
@@ -177,15 +191,22 @@ _JPEG_QUALITY = 85
 _ANSWER_CLASS = {"car": CAR, "bus": BUS, "truck": TRUCK}
 
 
+def _fit_height(crop: np.ndarray) -> np.ndarray:
+    """Scale a crop to the tile height, keeping its aspect ratio; a fitted crop is kept."""
+    import cv2
+
+    h, w = crop.shape[:2]
+    if h == _TILE_HEIGHT:
+        return crop
+    width = max(1, round(w * _TILE_HEIGHT / h))
+    return cv2.resize(crop, (width, _TILE_HEIGHT), interpolation=cv2.INTER_AREA)
+
+
 def _tile(crops: list[np.ndarray]) -> bytes | None:
     """Scale RGB crops to one height, place them side by side, and return JPEG bytes."""
     import cv2
 
-    parts = []
-    for c in crops:
-        h, w = c.shape[:2]
-        width = max(1, round(w * _TILE_HEIGHT / h))
-        parts.append(cv2.resize(c, (width, _TILE_HEIGHT), interpolation=cv2.INTER_AREA))
+    parts = [_fit_height(c) for c in crops]
     if not parts:
         return None
     width = sum(p.shape[1] for p in parts) + _TILE_GAP * (len(parts) + 1)
@@ -220,20 +241,29 @@ def _prepare_vlm(vlm, api_key: str | None, *, check: bool):
     return cfg
 
 
+def _missing_key_message(backend: str, env: str) -> str:
+    """Return the error for a backend with no API key; it names the ways VehReClass takes one."""
+    return (
+        f"VehReClass: vlm.backend {backend} needs an API key and none was found. Pass it as "
+        f"VehReClass(..., vlm_api_key=...), set vlm.api_key_file to a file that holds it, "
+        f"or set the {env} environment variable (vlm.api_key_env names another variable)"
+    )
+
+
 def _check_vlm_key(cfg, api_key: str | None) -> None:
     """Raise ``ValueError`` when the backend needs a key and none is found (no network)."""
-    from ..refine.vlm import missing_key_message, resolve_api_key
+    from ..refine.vlm import resolve_api_key
 
     if cfg.backend == "anthropic":
         if resolve_api_key(cfg, "ANTHROPIC_API_KEY", api_key) is None:
             raise ValueError(
-                missing_key_message("anthropic", cfg.api_key_env or "ANTHROPIC_API_KEY")
+                _missing_key_message("anthropic", cfg.api_key_env or "ANTHROPIC_API_KEY")
             )
     elif cfg.backend == "openai_compat":
         key = resolve_api_key(cfg, "OPENAI_API_KEY", api_key)
         if key is None and not (cfg.base_url or os.environ.get("OPENAI_BASE_URL")):
             raise ValueError(
-                missing_key_message("openai_compat", cfg.api_key_env or "OPENAI_API_KEY")
+                _missing_key_message("openai_compat", cfg.api_key_env or "OPENAI_API_KEY")
                 + "; a local server needs vlm.base_url instead"
             )
 
@@ -259,14 +289,24 @@ def _ask_vlm(cfg, backend_factory, input_video: str, requests) -> dict:
         for f, box in samples:
             want.setdefault(int(f), []).append((t, box))
     crops: dict[object, list[tuple[int, np.ndarray]]] = {t: [] for t in requests}
+    unread = 0
     with FrameReader(str(input_video)) as reader:
         for f, img in _read_frames(reader, want):
             if img is None:
+                unread += 1
                 continue
             for t, box in want[f]:
                 c = crop_box(img, box)
                 if c is not None:
-                    crops[t].append((f, c))
+                    crops[t].append((f, _fit_height(c)))  # keep only tile-sized crops in memory
+    if unread:
+        log.warning(
+            "%d of %d crop frames of %s could not be read; tracks that sampled them have "
+            "fewer crops for the VLM",
+            unread,
+            len(want),
+            input_video,
+        )
     questions, asked = [], []
     for t, (_, heavy) in requests.items():
         image = _tile([c for _, c in sorted(crops[t], key=lambda fc: fc[0])])
@@ -285,7 +325,8 @@ def _ask_vlm(cfg, backend_factory, input_video: str, requests) -> dict:
         asked.append(t)  # the original ID, kept as is; the tag is only diagnostic text
     if not questions:
         return {}
-    runner = VLMRunner(cfg, backend_factory(cfg), AnswerCache(cfg.cache_dir))
+    cache = AnswerCache(cfg.cache_dir)  # built first: a failure here must not leak a backend
+    runner = VLMRunner(cfg, backend_factory(cfg), cache)
     try:
         verdicts = runner.ask_many(questions)
     finally:
@@ -464,7 +505,7 @@ class ReClass:
         Raises
         ------
         ValueError
-            If input tracks DataFrame is empty.
+            If input tracks DataFrame is empty, or the video cannot be opened by OpenCV.
         FileNotFoundError
             If input_video does not exist.
 
@@ -604,8 +645,7 @@ def _read_tracks(tracks) -> pd.DataFrame:
 class VehReClass:
     """Classify vehicle tracks as car, bus or truck with a size, re-detection and VLM cascade.
 
-    Each track goes through the layers in order and stops at the first that decides (see the
-    design spec ``2026-10-15-vehicle-reclass-design.md``):
+    Each track goes through the layers in order and stops at the first that decides:
 
     1. size: at least ``hv_min_count`` real rows with ``max(w, h) >= hv_size`` flag the track
        heavy, which allows only bus and truck from then on;
@@ -639,15 +679,16 @@ class VehReClass:
     device : str
         Detector device. Default ``"auto"``.
     vlm_api_key : str or None
-        API key; takes precedence over ``vlm.api_key_file`` and the environment.
+        API key; takes precedence over ``vlm.api_key_file`` and the environment. Not allowed
+        together with ``vlm_backend_factory``, which builds the backend itself.
     vlm_backend_factory : callable or None
         Builds the backend from the resolved ``VLMConfig`` (tests); skips the preflight.
 
     Raises
     ------
     ValueError
-        For a broken setting, an invalid VLM config, one resolving to backend ``none``, or a
-        missing API key.
+        For a broken setting, an invalid VLM config, one resolving to backend ``none``, a
+        missing API key, or ``vlm_api_key`` given together with ``vlm_backend_factory``.
     ImportError
         When the VLM backend's package is not installed.
 
@@ -663,7 +704,7 @@ class VehReClass:
         min_gap: int = 5,
         iou_threshold: float = 0.5,
         min_support: float = 0.3,
-        vlm=None,
+        vlm: "VLMConfig | None" = None,
         vlm_crops: int = 3,
         model: DetectorModel | str = DetectorModel.RTDETRx,
         weights: str | None = None,
@@ -673,6 +714,10 @@ class VehReClass:
         vlm_backend_factory: Callable | None = None,
     ) -> None:
         """Validate the settings, prepare the VLM, then build the detector."""
+        if vlm_api_key is not None and vlm_backend_factory is not None:
+            raise ValueError(
+                "vlm_api_key is ignored when vlm_backend_factory builds the backend; pass one"
+            )
         problems = _setting_problems(
             hv_size, hv_min_count, num_frames, min_gap, iou_threshold, min_support, vlm_crops
         )
@@ -808,7 +853,10 @@ class VehReClass:
             answers = _ask_vlm(self.vlm, self._backend_factory(), str(input_video), pending)
             for t, a in answers.items():
                 r = rows[t]
-                r["vlm_answer"], r["vlm_conf"] = a.answer, a.confidence
+                if a.error:  # no answer was given; the warning already names the error
+                    r["vlm_answer"], r["vlm_conf"] = None, math.nan
+                else:
+                    r["vlm_answer"], r["vlm_conf"] = a.answer, a.confidence
                 ok = (
                     a.error is None
                     and a.answer in _ANSWER_CLASS
