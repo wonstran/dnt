@@ -4,8 +4,10 @@ Use detection results, with support for configurable models, thresholds, and cla
 """
 
 import logging
+import math
 from collections.abc import Iterable, Iterator
 from pathlib import Path
+from typing import NamedTuple
 
 import numpy as np
 import pandas as pd
@@ -72,6 +74,95 @@ def _dets_for(by_frame: dict[int, pd.DataFrame], frames: Iterable[int]) -> pd.Da
     if not parts:
         return pd.DataFrame(columns=_DET_FIELDS)
     return pd.concat(parts, ignore_index=True)
+
+
+#: COCO class IDs used by the vehicle re-classifier.
+CAR, BUS, TRUCK = 2, 5, 7
+
+
+def _size(rows: pd.DataFrame, k: int) -> float:
+    """Return the ``k``-th largest ``max(w, h)`` of ``rows``, or NaN with fewer than ``k`` rows."""
+    if len(rows) < k:
+        return math.nan
+    sides = np.maximum(rows["w"].to_numpy(float), rows["h"].to_numpy(float))
+    return float(np.sort(sides)[-k])
+
+
+def _spaced_sample(
+    rows: pd.DataFrame, n: int, min_gap: int
+) -> list[tuple[int, tuple[float, float, float, float]]]:
+    """Pick up to ``n`` rows, largest box first, with frames at least ``min_gap`` apart.
+
+    Ties in area go to the earlier frame. A frame is never taken twice.
+    """
+    if rows.empty:
+        return []
+    order = rows.assign(_area=rows["w"] * rows["h"], _frame=rows["frame"].astype(int))
+    order = order.sort_values(["_area", "_frame"], ascending=[False, True], kind="mergesort")
+    taken: list[tuple[int, tuple[float, float, float, float]]] = []
+    for f, x, y, w, h in order[["_frame", "x", "y", "w", "h"]].itertuples(index=False):
+        if any(abs(f - t) < min_gap or f == t for t, _ in taken):
+            continue
+        taken.append((int(f), (float(x), float(y), float(w), float(h))))
+        if len(taken) == n:
+            break
+    return taken
+
+
+def _iou(box: tuple, boxes) -> np.ndarray:
+    """IoU of one ``(x, y, w, h)`` box with each row of ``boxes``; 0 where the union is empty."""
+    x, y, w, h = (float(v) for v in box)
+    b = np.asarray(boxes, dtype=float).reshape(-1, 4)
+    iw = np.clip(np.minimum(x + w, b[:, 0] + b[:, 2]) - np.maximum(x, b[:, 0]), 0, None)
+    ih = np.clip(np.minimum(y + h, b[:, 1] + b[:, 3]) - np.maximum(y, b[:, 1]), 0, None)
+    inter = iw * ih
+    union = w * h + b[:, 2] * b[:, 3] - inter
+    return np.divide(inter, union, out=np.zeros_like(inter), where=union > 0)
+
+
+class _Vote(NamedTuple):
+    """Outcome of voting over a track's sampled frames."""
+
+    cls: int | None
+    support: float
+    n: int
+
+
+def _vote(
+    boxes: dict[int, tuple],
+    by_frame: dict[int, pd.DataFrame],
+    allowed: tuple[int, ...],
+    iou_threshold: float,
+) -> _Vote:
+    """Vote for a class over the sampled frames (spec 5.2).
+
+    Each frame's single vote goes to the allowed-class detection with the highest confidence
+    among those overlapping the track box by at least ``iou_threshold``; it is weighted by that
+    confidence. ``support`` is the winner's votes divided by the number of frames ``n``.
+    """
+    n = len(boxes)
+    weight: dict[int, float] = {}
+    count: dict[int, int] = {}
+    for f, box in boxes.items():
+        d = by_frame.get(int(f))
+        if d is None or d.empty:
+            continue
+        d = d[d["class"].isin(allowed)]
+        if d.empty:
+            continue
+        d = d[_iou(box, d[["x", "y", "w", "h"]].to_numpy(float)) >= iou_threshold]
+        if d.empty:
+            continue
+        best = d.loc[d["conf"].astype(float).idxmax()]
+        c = int(best["class"])
+        weight[c] = weight.get(c, 0.0) + float(best["conf"])
+        count[c] = count.get(c, 0) + 1
+    if n == 0:
+        return _Vote(None, math.nan, 0)
+    if not count:
+        return _Vote(None, 0.0, n)
+    winner = min(count, key=lambda c: (-weight[c], -count[c], c))
+    return _Vote(winner, count[winner] / n, n)
 
 
 class ReClass:
