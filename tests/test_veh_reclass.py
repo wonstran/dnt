@@ -634,3 +634,27 @@ def test_unflagged_car_vote_still_decides(monkeypatch, video, tmp_path):
     d = vr.decisions.iloc[0]
     assert out.cls.unique().tolist() == [CAR]
     assert d.layer == "redetect" and d.redetect_cls == CAR and built == []
+
+
+@pytest.mark.parametrize(("kw", "desc"), [
+    ({}, "Re-classifying vehicles"),
+    ({"video_index": 2, "video_tot": 5}, "Re-classifying vehicles 2 of 5"),
+    ({"video_index": 2}, "Re-classifying vehicles"),  # both are needed, as in Detector/Tracker
+])
+def test_progress_bar_shows_video_index_of_tot(monkeypatch, video, kw, desc):
+    seen = []
+
+    class Bar:
+        def __init__(self, *a, **k):
+            seen.append(k.get("desc"))
+
+        def update(self, *a):
+            pass
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(re_class, "tqdm", Bar)
+    vr, _ = _vr(monkeypatch, _script(range(10), CAR))
+    vr.re_classify(vehicle_rows(1, range(10), (100, 100, 200, 100)), video, verbose=True, **kw)
+    assert seen == [desc]

@@ -771,6 +771,8 @@ class VehReClass:
         track_ids: list | None = None,
         out_file: str | None = None,
         verbose: bool = True,
+        video_index: int | None = None,
+        video_tot: int | None = None,
     ) -> pd.DataFrame:
         """Classify vehicle tracks and write the class into ``cls``.
 
@@ -787,6 +789,10 @@ class VehReClass:
             Where to write the result, headerless, in the input's column layout.
         verbose : bool
             Show a progress bar while detecting.
+        video_index : int, optional
+            Index of this video in a batch, used only for progress display.
+        video_tot : int, optional
+            Total number of videos in the batch, used only for progress display.
 
         Returns
         -------
@@ -836,9 +842,12 @@ class VehReClass:
             samples[t] = _spaced_sample(g, self.num_frames, self.min_gap)
 
         frames = {f for s in samples.values() for f, _ in s}
+        desc = "Re-classifying vehicles"
+        if video_index is not None and video_tot is not None:
+            desc += f" {video_index} of {video_tot}"
         with FrameReader(str(input_video)) as reader:
             by_frame, unread = _detect_frames(
-                self.detector, reader, frames, verbose=verbose, desc="Re-classifying vehicles"
+                self.detector, reader, frames, verbose=verbose, desc=desc
             )
         for t in ids:
             r = rows[t]
