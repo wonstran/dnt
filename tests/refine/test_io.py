@@ -5,6 +5,7 @@ import pandas as pd
 import pytest
 
 from dnt.refine import io
+from dnt.refine.io import filled_mask
 
 from ._fixtures import box_rows, table
 
@@ -204,3 +205,17 @@ def test_refine_rejects_an_inf_box_before_writing_anything(tmp_path):
     with pytest.raises(ValueError, match="non-finite value on line 2"):
         TrackRefiner().refine(path, tmp_path / "o.txt", fps=10, verbose=False)
     assert not (tmp_path / "o.txt").exists() and not (tmp_path / "o.ledger.jsonl").exists()
+
+
+def test_filled_mask_r3_or_interp():
+    df = pd.DataFrame({"r3": [1, -1, -1, 0], "interp": [0, 1, 0, 0]})
+    assert filled_mask(df).tolist() == [True, True, False, False]
+
+
+def test_filled_mask_missing_or_text_counts_as_real():
+    df = pd.DataFrame({"interp": [None, "x", 1]})
+    assert filled_mask(df).tolist() == [False, False, True]
+
+
+def test_filled_mask_without_flag_columns():
+    assert filled_mask(pd.DataFrame({"frame": [1, 2]})).tolist() == [False, False]
