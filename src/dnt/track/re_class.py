@@ -588,6 +588,7 @@ _DECISION_COLUMNS = [
     "size",
     "n",
     "support",
+    "redetect_cls",
     "vlm_answer",
     "vlm_conf",
 ]
@@ -650,8 +651,11 @@ class VehReClass:
     1. size: at least ``hv_min_count`` real rows with ``max(w, h) >= hv_size`` flag the track
        heavy, which allows only bus and truck from then on;
     2. re-detection: spaced, large frames are detected once, and each frame votes for the
-       most confident allowed class overlapping the track box;
-    3. VLM: a tile of crops is shown to the configured model;
+       most confident allowed class overlapping the track box; a car vote decides, but a bus
+       or truck vote decides only for a heavy track, because COCO's truck (and bus) also covers
+       vans and pickups, which count as car here;
+    3. VLM: a tile of crops is shown to the configured model, whose glossary defines car as
+       any light vehicle (vans and pickups included) and truck as a heavy goods vehicle;
     4. fallback: truck for a heavy track, car otherwise.
 
     Parameters
@@ -825,6 +829,7 @@ class VehReClass:
                 "size": size,
                 "n": 0,
                 "support": math.nan,
+                "redetect_cls": None,
                 "vlm_answer": None,
                 "vlm_conf": math.nan,
             }
@@ -840,8 +845,12 @@ class VehReClass:
             allowed = (BUS, TRUCK) if r["heavy"] else (CAR, BUS, TRUCK)
             boxes = {f: b for f, b in samples[t] if f not in unread}
             v = _vote(boxes, by_frame, allowed, self.iou_threshold)
-            r["n"], r["support"] = v.n, v.support
-            if v.cls is not None and v.support >= self.min_support:
+            r["n"], r["support"], r["redetect_cls"] = v.n, v.support, v.cls
+            # COCO's "truck" (and "bus") also covers vans and pickups, which count as car here,
+            # so a bus or truck vote decides only when size has flagged the track heavy;
+            # otherwise the track goes on to the VLM (or falls back to car)
+            confirmed = v.cls == CAR or r["heavy"]
+            if v.cls is not None and v.support >= self.min_support and confirmed:
                 r["cls"], r["layer"] = v.cls, "redetect"
 
         pending = {
@@ -876,5 +885,7 @@ class VehReClass:
         out.loc[hit, "cls"] = out.loc[hit, "track"].map(cls_map).astype(int)
         if out_file:
             write_track(out, out_file)
-        self.decisions = pd.DataFrame(list(rows.values()), columns=_DECISION_COLUMNS)
+        decisions = pd.DataFrame(list(rows.values()), columns=_DECISION_COLUMNS)
+        decisions["redetect_cls"] = decisions["redetect_cls"].astype("Int64")  # <NA>: no votes
+        self.decisions = decisions
         return out

@@ -39,9 +39,14 @@ _GLOSS = {
     "same_individual": "the same individual in both rows",
     "different": "two different individuals",
     "unsure": "you cannot tell",
-    "car": "a passenger car, SUV or minivan",
-    "bus": "a bus or coach that carries passengers",
-    "truck": "a truck of any size, including pickup trucks, box trucks and semi-trailers",
+    "car": (
+        "a light vehicle: passenger car, SUV, minivan, pickup truck, or passenger or cargo "
+        "van (for example Ford Transit, Mercedes Sprinter)"
+    ),
+    "bus": "a bus or coach that carries many passengers (not a passenger van)",
+    "truck": (
+        "a heavy goods vehicle: box truck, dump truck, tanker or semi-trailer (not a pickup or van)"
+    ),
     "unclear": "you cannot tell",
 }
 
