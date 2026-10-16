@@ -87,6 +87,13 @@
   In-vehicle drops need a context file with the vehicles' boxes (`context_file=`, or
   `--context`); without one the in-vehicle cue is skipped. Applying review decisions follows in
   a later release.
+- `dnt.track.VehReClass` classifies vehicle tracks as car, bus or truck and writes the class into
+  `cls` on every row. Each track goes through up to three layers: a size check (`hv_size`, at
+  least `hv_min_count` real rows) that limits a big vehicle to bus or truck; re-detection on 10
+  large frames spaced at least 5 frames apart, where the winning class needs 30% of the frames;
+  and, when `vlm=` is set, one VLM question per undecided track using `dnt.refine`'s backends and
+  cache. Undecided tracks become truck if flagged heavy, car otherwise. `vr.decisions` shows
+  which layer decided each track.
 
 ### Changed
 - With a VLM backend and a video, the edits that stay capped below auto-accept without one
@@ -143,6 +150,11 @@
   prior, `0.8 + 0.2 * b` with `b` 0 for a pair near the image border, so links near the border
   can now be applied too: 2 of the 8 applied links on the audited clips (beginning 98->134,
   middle 221->222) were border links, and both were among the audited, correct ones.
+- `ReClass` reads every sampled frame once, in order, instead of reopening the video per track,
+  and skips a frame the video cannot decode instead of stopping. With `verbose=True` its progress
+  bar counts frames, not tracks. A video OpenCV cannot open now raises `ValueError`; before, every
+  track silently got `default_class`.
+- `dnt.track.ReClass` is always importable; the fallback that set it to `None` is removed.
 
 ## 0.3.4 — 2026-10-01
 

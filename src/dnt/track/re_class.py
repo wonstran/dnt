@@ -458,7 +458,8 @@ class ReClass:
             - cls : int
                 Re-classified class ID. Set to default_class if no match found.
             - avg_score : float
-                Maximum IoB score among matched detections, rounded to 2 decimals.
+                Mean IoB over the frames whose best overlap reached the threshold,
+                rounded to 2 decimals (0 when no class matched).
 
         Raises
         ------
@@ -476,7 +477,7 @@ class ReClass:
         Examples
         --------
         >>> import pandas as pd
-        >>> from .re_class import ReClass
+        >>> from dnt.track import ReClass
         >>> tracks = pd.DataFrame({
         ...     'frame': [0, 1, 2],
         ...     'track': [1, 1, 1],
@@ -486,7 +487,7 @@ class ReClass:
         ...     'h': [100, 100, 100],
         ... })
         >>> rc = ReClass(num_frames=2, threshold=0.75, match_class=[1, 36])
-        >>> result = rc.re_classify(tracks, 'video.mp4')
+        >>> result = rc.re_classify(tracks, 'video.mp4')  # doctest: +SKIP
         >>> print(result)  # DataFrame with [track, cls, avg_score]
 
         """

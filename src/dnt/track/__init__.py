@@ -3,15 +3,10 @@
 This module provides tracking utilities and classes for object detection.
 """
 
-try:
-    from .re_class import ReClass as ReClass
-except ModuleNotFoundError:
-    # Keep tracker imports usable even when optional re-class dependencies
-    # (for example `cython_bbox`) are not installed.
-    ReClass = None  # type: ignore[assignment]
-
 from .post_process import interpolate_tracks_rts as interpolate_tracks_rts
 from .post_process import link_tracklets as link_tracklets
+from .re_class import ReClass as ReClass
+from .re_class import VehReClass as VehReClass
 from .tracker import (
     BoostTrackConfig as BoostTrackConfig,
 )
@@ -67,6 +62,7 @@ __all__ = [
     "SFSORTConfig",
     "StrongSORTConfig",
     "Tracker",
+    "VehReClass",
     "interpolate_tracks_rts",
     "link_tracklets",
 ]

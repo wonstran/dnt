@@ -18,3 +18,9 @@ def test_labeler_uses_package_util():
     from dnt.label.labeler import load_classes
 
     assert load_classes.__module__ == "dnt.shared.util"
+
+
+def test_track_exports_both_reclassifiers():
+    from dnt.track import ReClass, VehReClass
+
+    assert ReClass is not None and VehReClass.TRUCK == 7
