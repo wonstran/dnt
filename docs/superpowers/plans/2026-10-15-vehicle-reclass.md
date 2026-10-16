@@ -10,7 +10,7 @@
 
 **Spec:** [docs/superpowers/specs/2026-10-15-vehicle-reclass-design.md](../specs/2026-10-15-vehicle-reclass-design.md) (rev. 2). Read §3, §4 and §5 before Task 5. Review and response: [review_2026-10-15-22-04-16.md](../../review_2026-10-15-22-04-16.md), [response_2026-10-15_22-40-00.md](../../response_2026-10-15_22-40-00.md).
 
-**Plan revisions:** rev. 2 addresses [review 2026-10-15 22:36](../../review_2026-10-15-22-36-11.md) / [response](../../response_2026-10-15_23-05-00.md): VLM results keep the original track IDs (Task 6), and voting tests pin the confidence-weighted winner, the tie breakers and the `min_support` boundary (Tasks 5 and 7).
+**Plan revisions:** rev. 2 addresses [review 2026-10-15 22:36](../../review_2026-10-15-22-36-11.md) / [response](../../response_2026-10-15_23-05-00.md): VLM results keep the original track IDs (Task 6), and voting tests pin the confidence-weighted winner, the tie breakers and the `min_support` boundary (Tasks 5 and 7). Rev. 3 addresses [review 2026-10-15 22:48](../../review_2026-10-15-22-48-49.md) / [response](../../response_2026-10-15_23-20-00.md): the more-votes tie-break test now pits vote count against class ID.
 
 ## Global Constraints
 
@@ -818,10 +818,13 @@ def test_vote_confidence_sum_beats_vote_count():
 
 
 def test_vote_equal_score_more_votes_wins():
-    # bus: 2 x 0.45 = 0.9; truck: 1 x 0.9 = 0.9 (exactly equal in binary floating point)
-    by = {0: _dets(0, (100, 100, 200, 100, 0.45, BUS)), 1: _dets(1, (100, 100, 200, 100, 0.45, BUS)),
-          2: _dets(2, (100, 100, 200, 100, 0.9, TRUCK))}
-    assert re_class._vote({f: BOX for f in range(3)}, by, (CAR, BUS, TRUCK), 0.5).cls == BUS
+    # truck: 2 x 0.45 = 0.9; bus: 1 x 0.9 = 0.9 (exactly equal in binary floating point).
+    # Truck has more votes but the higher class ID, so this fails an implementation that
+    # skips the vote-count tie break and goes straight to the lower class ID.
+    by = {0: _dets(0, (100, 100, 200, 100, 0.45, TRUCK)),
+          1: _dets(1, (100, 100, 200, 100, 0.45, TRUCK)),
+          2: _dets(2, (100, 100, 200, 100, 0.9, BUS))}
+    assert re_class._vote({f: BOX for f in range(3)}, by, (CAR, BUS, TRUCK), 0.5).cls == TRUCK
 
 
 def test_vote_equal_score_and_votes_lower_class_wins():
