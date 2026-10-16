@@ -10,6 +10,8 @@
 
 **Spec:** [docs/superpowers/specs/2026-10-15-vehicle-reclass-design.md](../specs/2026-10-15-vehicle-reclass-design.md) (rev. 2). Read §3, §4 and §5 before Task 5. Review and response: [review_2026-10-15-22-04-16.md](../../review_2026-10-15-22-04-16.md), [response_2026-10-15_22-40-00.md](../../response_2026-10-15_22-40-00.md).
 
+**Plan revisions:** rev. 2 addresses [review 2026-10-15 22:36](../../review_2026-10-15-22-36-11.md) / [response](../../response_2026-10-15_23-05-00.md): VLM results keep the original track IDs (Task 6), and voting tests pin the confidence-weighted winner, the tie breakers and the `min_support` boundary (Tasks 5 and 7).
+
 ## Global Constraints
 
 - Run Python with the project venv: `.venv/bin/python -m pytest ...`. Record the default-suite count (`.venv/bin/python -m pytest -q`) before Task 1; it must only grow.
@@ -29,7 +31,7 @@
 
 Inputs the spec implies but does not spell out, most likely to bite first. Each has a test in the task named in brackets.
 
-1. **Float frame numbers.** A DataFrame whose `frame` column is float (`12.0`), as some post-processing produces, must classify exactly like the int version. [Task 7, `test_float_frame_column_matches_int`]
+1. **Float frame numbers and float track IDs.** A DataFrame whose `frame` or `track` column is float (`12.0`, `1.0`), as some post-processing produces, must classify exactly like the int version, including a track that reaches the VLM; the output keeps the input's `track` values and dtype. [Task 7, `test_float_frame_column_matches_int`, `test_vlm_with_int_or_float_track_ids`; Task 6, `test_ask_vlm_keeps_original_ids`]
 2. **Every sampled frame unreadable** (track frames past the video's end). `n` is 0, support is NaN, the track falls back without an exception. [Task 7, `test_all_frames_unreadable_falls_back`]
 3. **Duplicate `(track, frame)` rows.** Sampling never takes one frame twice, even with `min_gap=0`. [Task 5, `test_sample_never_repeats_a_frame`]
 4. **Degenerate boxes** (`w` or `h` of 0, or a box outside the image). IoU is 0 rather than NaN, and a track with no usable crop is left out of the VLM batch instead of sending an empty image. [Task 5, `test_iou_zero_area_is_zero`; Task 6, `test_track_without_usable_crop_is_not_asked`]
@@ -805,6 +807,30 @@ def test_vote_spec_example():
     assert (v.cls, v.support, v.n) == (BUS, pytest.approx(0.4), 10)
 
 
+def test_vote_confidence_sum_beats_vote_count():
+    # 4 bus votes at 0.3 (sum 1.2) lose to 3 truck votes at 0.9 (sum 2.7): a count-only
+    # winner would pick bus
+    boxes = {f: BOX for f in range(10)}
+    by = {f: _dets(f, (100, 100, 200, 100, 0.3, BUS)) for f in range(4)}
+    by |= {f: _dets(f, (100, 100, 200, 100, 0.9, TRUCK)) for f in (4, 5, 6)}
+    v = re_class._vote(boxes, by, (CAR, BUS, TRUCK), 0.5)
+    assert (v.cls, v.support, v.n) == (TRUCK, pytest.approx(0.3), 10)
+
+
+def test_vote_equal_score_more_votes_wins():
+    # bus: 2 x 0.45 = 0.9; truck: 1 x 0.9 = 0.9 (exactly equal in binary floating point)
+    by = {0: _dets(0, (100, 100, 200, 100, 0.45, BUS)), 1: _dets(1, (100, 100, 200, 100, 0.45, BUS)),
+          2: _dets(2, (100, 100, 200, 100, 0.9, TRUCK))}
+    assert re_class._vote({f: BOX for f in range(3)}, by, (CAR, BUS, TRUCK), 0.5).cls == BUS
+
+
+def test_vote_equal_score_and_votes_lower_class_wins():
+    by = {0: _dets(0, (100, 100, 200, 100, 0.9, TRUCK)), 1: _dets(1, (100, 100, 200, 100, 0.9, BUS))}
+    assert re_class._vote({0: BOX, 1: BOX}, by, (CAR, BUS, TRUCK), 0.5).cls == BUS
+    by = {0: _dets(0, (100, 100, 200, 100, 0.9, BUS)), 1: _dets(1, (100, 100, 200, 100, 0.9, CAR))}
+    assert re_class._vote({0: BOX, 1: BOX}, by, (CAR, BUS, TRUCK), 0.5).cls == CAR
+
+
 def test_vote_one_stray_has_low_support():
     boxes = {f: BOX for f in range(10)}
     v = re_class._vote(boxes, {3: _dets(3, (100, 100, 200, 100, 0.99, BUS))}, (CAR, BUS, TRUCK), 0.5)
@@ -946,7 +972,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 - Consumes: `vlm_problems` (Task 2), `_read_frames` (Task 4), `refine.crops.crop_box`, `refine.vlm` (`check_vlm_dependencies`, `resolve_api_key`, `missing_key_message`), `refine.vlm.runner` (`Question`, `VLMRunner`), `refine.vlm.cache.AnswerCache`.
 - Produces:
   - `prompts.VEHICLE_CLASS = ["car", "bus", "truck", "unclear"]`, `prompts.HEAVY_CLASS = ["bus", "truck", "unclear"]`, `prompts.vehicle_class_prompt(options: list[str]) -> str`.
-  - In `re_class.py`: `_tile(crops: list[numpy.ndarray]) -> bytes | None` (RGB crops in, JPEG out); `_prepare_vlm(vlm, api_key, *, check: bool) -> VLMConfig`; `_VLMResult(NamedTuple)`: `answer: str | None`, `confidence: float`, `error: str | None`; `_ask_vlm(cfg, backend_factory, input_video, requests: dict[int, tuple[list[tuple[int, tuple]], bool]]) -> dict[int, _VLMResult]` where each request is `(crop samples, heavy)`.
+  - In `re_class.py`: `_tile(crops: list[numpy.ndarray]) -> bytes | None` (RGB crops in, JPEG out); `_prepare_vlm(vlm, api_key, *, check: bool) -> VLMConfig`; `_VLMResult(NamedTuple)`: `answer: str | None`, `confidence: float`, `error: str | None`; `_ask_vlm(cfg, backend_factory, input_video, requests: dict[TrackId, tuple[list[tuple[int, tuple]], bool]]) -> dict[TrackId, _VLMResult]` where each request is `(crop samples, heavy)` and the result keys are the **same objects** as the request keys (any hashable track ID: `int`, `float`, numpy scalar); `_tag_id(t) -> str` (display only).
 
 - [ ] **Step 1: Write the failing prompt test** (append to `tests/refine/test_vlm_cache_prompts.py`)
 
@@ -1086,6 +1112,20 @@ def test_ask_vlm_answers_and_options(monkeypatch, tmp_path):
     assert backend.closed == 1
 
 
+def test_ask_vlm_keeps_original_ids(monkeypatch, tmp_path):
+    monkeypatch.setattr(re_class, "FrameReader", FakeReader)
+    backend = FakeBackend({"vehclass:1": _answer("bus"), "vehclass:2": _answer("truck")})
+    reqs = {1.0: _requests(1)[1], 2: _requests(2)[2]}
+    got = re_class._ask_vlm(_vlm(tmp_path), lambda cfg: backend, "v.mp4", reqs)
+    assert set(got) == {1.0, 2} and got[1.0].answer == "bus" and got[2].answer == "truck"
+    assert sorted(c["tag"] for c in backend.calls) == ["vehclass:1", "vehclass:2"]
+
+
+def test_tag_id():
+    assert [re_class._tag_id(v) for v in (1, 1.0, np.int64(3), np.float64(4.0), 2.5)] == [
+        "1", "1", "3", "4", "2.5"]
+
+
 def test_partial_crop_failure_still_asks(monkeypatch, tmp_path):
     monkeypatch.setattr(re_class, "FrameReader", lambda p: FakeReader(p, bad={15}))
     backend = FakeBackend({"*": _answer("bus")})
@@ -1223,7 +1263,7 @@ def _ask_vlm(cfg, backend_factory, input_video: str, requests) -> dict[int, _VLM
                 c = crop_box(img, box)
                 if c is not None:
                     crops[t].append((f, c))
-    questions = []
+    questions, asked = [], []
     for t, (_, heavy) in requests.items():
         image = _tile([c for _, c in sorted(crops[t], key=lambda fc: fc[0])])
         if image is None:
@@ -1231,9 +1271,10 @@ def _ask_vlm(cfg, backend_factory, input_video: str, requests) -> dict[int, _VLM
             continue
         options = list(HEAVY_CLASS if heavy else VEHICLE_CLASS)
         questions.append(
-            Question(tag=f"vehclass:{t}", image=image, prompt=vehicle_class_prompt(options),
-                     options=options)
+            Question(tag=f"vehclass:{_tag_id(t)}", image=image,
+                     prompt=vehicle_class_prompt(options), options=options)
         )
+        asked.append(t)  # the original ID, kept as is; the tag is only diagnostic text
     if not questions:
         return {}
     runner = VLMRunner(cfg, backend_factory(cfg), AnswerCache(cfg.cache_dir))
@@ -1241,14 +1282,22 @@ def _ask_vlm(cfg, backend_factory, input_video: str, requests) -> dict[int, _VLM
         verdicts = runner.ask_many(questions)
     finally:
         runner.close()
-    out: dict[int, _VLMResult] = {}
-    for q, v in zip(questions, verdicts, strict=True):
-        t = int(q.tag.partition(":")[2])
+    out = {}
+    for t, v in zip(asked, verdicts, strict=True):
         if v.error:
-            log.warning("track %d: no VLM answer (%s); it falls back", t, v.error)
+            log.warning("track %s: no VLM answer (%s); it falls back", t, v.error)
         out[t] = _VLMResult(v.answer, float(v.confidence), v.error)
     return out
+
+
+def _tag_id(t) -> str:
+    """Display a track ID for a question tag: an integral float such as ``1.0`` shows as ``1``."""
+    if isinstance(t, numbers.Real) and not isinstance(t, bool) and float(t).is_integer():
+        return str(int(t))
+    return str(t)
 ```
+
+The result is keyed by the **original** track ID (the key of `requests`), never by a value parsed back out of the tag, so a float `track` column such as `1.0` works. Add `import numbers` to the module imports in this task (Task 7 uses it too).
 
 Check the field names of `Question` in `src/dnt/refine/vlm/runner.py` (`tag, image, prompt, options`) before running; they are the ones used above.
 
@@ -1355,6 +1404,29 @@ def test_one_stray_detection_does_not_decide(monkeypatch, video):
     vr, _ = _vr(monkeypatch, _same(5, BUS))  # frame 5 is sampled (frames 0, 5, ..., 45)
     out = vr.re_classify(vehicle_rows(1, range(100), (100, 100, 200, 100)), video, verbose=False)
     assert out.cls.unique().tolist() == [CAR]
+
+
+def _boundary_script():
+    # samples are frames 0, 5, ..., 45 (10 rows, equal area, min_gap 5): 4 bus votes at 0.3,
+    # 3 truck votes at 0.9, 3 frames with nothing
+    return (_script((0, 5, 10, 15), BUS, conf=0.3) | _script((20, 25, 30), TRUCK, conf=0.9))
+
+
+def test_support_exactly_at_min_support_decides(monkeypatch, video):
+    vr, _ = _vr(monkeypatch, _boundary_script())
+    out = vr.re_classify(vehicle_rows(1, range(0, 50, 5), (100, 100, 200, 100)), video,
+                         verbose=False)
+    d = vr.decisions.iloc[0]
+    assert out.cls.unique().tolist() == [TRUCK]
+    assert d.layer == "redetect" and d.n == 10 and d.support == 0.3
+
+
+def test_support_just_below_min_support_goes_on(monkeypatch, video):
+    vr, _ = _vr(monkeypatch, _boundary_script(), min_support=0.31)
+    out = vr.re_classify(vehicle_rows(1, range(0, 50, 5), (100, 100, 200, 100)), video,
+                         verbose=False)
+    assert out.cls.unique().tolist() == [CAR]
+    assert vr.decisions.layer.iloc[0] == "fallback"
 
 
 def test_heavy_fallback_is_truck_and_car_not_allowed(monkeypatch, video):
@@ -1465,6 +1537,18 @@ def test_vlm_decides_undecided_track(monkeypatch, video, tmp_path):
     assert d.loc[2, "vlm_answer"] == "bus" and d.loc[2, "vlm_conf"] == 0.5  # below min_conf 0.7
 
 
+@pytest.mark.parametrize("dtype", [int, float])
+def test_vlm_with_int_or_float_track_ids(monkeypatch, video, tmp_path, dtype):
+    backend = FakeBackend({"vehclass:1": _answer("bus", 0.8)})
+    tracks = vehicle_rows(1, range(30), (100, 100, 200, 100)).astype({"track": dtype})
+    vr, _ = _vr(monkeypatch, vlm=_vlm(tmp_path), vlm_backend_factory=lambda c: backend)
+    out = vr.re_classify(tracks, video, verbose=False)
+    assert out.cls.unique().tolist() == [BUS]
+    assert vr.decisions.layer.iloc[0] == "vlm"
+    pd.testing.assert_series_equal(out["track"], tracks["track"])  # IDs and dtype unchanged
+    assert [c["tag"] for c in backend.calls] == ["vehclass:1"]
+
+
 def test_vlm_unclear_and_error_fall_back(monkeypatch, video, tmp_path):
     backend = FakeBackend({"vehclass:1": _answer("unclear"), "vehclass:2": RuntimeError("boom")})
     tracks = pd.concat([vehicle_rows(1, range(30), (100, 100, 200, 100)),
@@ -1489,7 +1573,7 @@ def test_no_vlm_runner_when_nothing_pending(monkeypatch, video, tmp_path):
 Run: `.venv/bin/python -m pytest tests/test_veh_reclass.py -k "not tile and not prepare and not ask_vlm and not usable_crop and not budget" -v`
 Expected: FAIL with `ImportError: cannot import name 'VehReClass'`.
 
-- [ ] **Step 3: Implement** (end of `re_class.py`; add imports `import numbers`, `from collections.abc import Callable`, `from ..refine.io import filled_mask`, `from ..shared.files import read_track, write_track`, `from .tracker import Tracker`)
+- [ ] **Step 3: Implement** (end of `re_class.py`; add imports `from collections.abc import Callable`, `from ..refine.io import filled_mask`, `from ..shared.files import read_track, write_track`, `from .tracker import Tracker`)
 
 ```python
 _DECISION_COLUMNS = ["track", "cls", "layer", "heavy", "size", "n", "support", "vlm_answer", "vlm_conf"]
