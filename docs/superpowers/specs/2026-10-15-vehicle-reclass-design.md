@@ -222,9 +222,11 @@ Runs only when `vlm` is set and the track is still undecided.
 - **Question.** One `vlm.runner.Question` per track: the crops show the same vehicle, and the model picks one
   option. The options are `car, bus, truck, unclear`, or `bus, truck, unclear` for a heavy-flagged track. The
   prompt text lives next to the other prompts in `refine/vlm/prompts.py`. Its glossary (rev. 3) defines car
-  as a light vehicle (passenger car, SUV, minivan, pickup, passenger or cargo van), bus as a bus or coach that
-  carries many passengers (not a passenger van), and truck as a heavy goods vehicle (box truck, dump truck,
-  tanker, semi-trailer; not a pickup or van).
+  as a light vehicle (passenger car, SUV, minivan, pickup truck such as a Ford F-150 or Chevy Silverado, or
+  van) and tells the model that pickup trucks must be answered as car and never as truck, bus as a bus or coach
+  that carries many passengers (not a passenger van), and truck as a heavy commercial goods vehicle (box truck,
+  dump truck, tanker, semi-trailer; not a pickup truck or van). The exact wording is pinned by
+  `test_vehicle_glossary_is_light_vs_heavy`.
 - **Asking.** All questions go to one `VLMRunner.ask_many` call. That gives the configured backend
   (`anthropic` or `openai_compat`), its retries on transient errors, voting (`vlm.votes`) and the answer cache.
 - **Runner lifecycle.** Each `re_classify` call builds its own backend and `VLMRunner` from the resolved config
