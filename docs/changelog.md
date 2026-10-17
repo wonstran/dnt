@@ -96,6 +96,15 @@
   which layer decided each track.
 
 ### Changed
+- Stage 1 treats a reversal of heading as a motion break (new `switch.heading_reversal`, on for
+  the vehicle target and off for the person target; `switch.heading_min_speed`, default 10
+  pixels per second, and `switch.ramps.heading`, default `[0.3, 0.8]`). A vehicle cannot turn
+  around between two frames, but a few pixels per frame is below the Kalman filter's noise, so
+  two vehicles joined at the edge of the frame (a box truck leaving, a van entering) scored
+  0.62 from appearance alone and were sent to the VLM, which judged the blurry edge crops the
+  same vehicle. With the signal the split scores 0.97 and is accepted. On the 20-minute
+  afternoon vehicle clip it changed one score and added one pending proposal, and on its
+  pedestrians it changed nothing. The two new ledger signals are `heading` and `heading_cos`.
 - With a VLM backend and a video, the edits that stay capped below auto-accept without one
   (motion-only ID-switch splits, links across occlusions or with an ambiguous margin, static
   and mixed false-track drops, and rider reclasses without a subtype) are decided by the VLM

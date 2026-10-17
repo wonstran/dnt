@@ -160,12 +160,15 @@ class SwitchConfig:
     bimodal_silhouette_min: float = 0.25
     swap_boost: float = 0.2
     min_crop_px: int = 40
+    heading_reversal: bool = False
+    heading_min_speed: float = 10.0
     ramps: dict[str, list[float]] = field(
         default_factory=lambda: {
             "z_app": [2.0, 5.0],
             "silhouette": [0.25, 0.5],
             "jump": [0.15, 0.4],
             "cross": [0.0, 0.4],
+            "heading": [0.3, 0.8],
         }
     )
 
@@ -483,6 +486,7 @@ class RefineConfig:
         if target == "vehicle":
             cfg.class_ids = [2, 5, 7]
             cfg.link.class_groups = [[2, 7]]
+            cfg.switch.heading_reversal = True  # a vehicle cannot turn around between two frames
         return cfg
 
     @classmethod
@@ -594,6 +598,16 @@ class RefineConfig:
         for name, v in durations.items():
             if isinstance(v, int | float) and not v > 0:
                 p.append(f"{name} must be a positive number of seconds, not {v}")
+        hs = self.switch.heading_min_speed
+        if not (
+            isinstance(hs, int | float)
+            and not isinstance(hs, bool)
+            and math.isfinite(hs)
+            and hs >= 0
+        ):
+            p.append(
+                f"switch.heading_min_speed must be a number of pixels per second >= 0, not {hs}"
+            )
         if isinstance(lc.max_passes, int) and lc.max_passes < 1:
             p.append(f"link.max_passes must be at least 1, not {lc.max_passes}")
         if self.fps is not None and self.fps <= 0:
