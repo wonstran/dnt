@@ -114,11 +114,12 @@ def test_a_same_run_detection_context_does_not_flag_the_rows_own_boxes():
     assert not P.occlusion_flags(work, dets, 0.3).any()  # 0% occluded (was 100%)
     assert P.context_duplicates(work, dets).all()
     assert P.drop_context_duplicates(work, dets).empty
-    # a genuine occluder (a second box over row 10, which has its own detection) still flags it
-    other = pd.DataFrame({"frame": [5], "track": [-1], "x": [100.0 + 10.0 + 8.0], "y": [200.0],
+    # a genuine occluder (a box over row 10 below the match IoU, which has its own detection)
+    # still flags it
+    other = pd.DataFrame({"frame": [5], "track": [-1], "x": [100.0 + 10.0 + 12.0], "y": [200.0],
                           "w": [30.0], "h": [60.0], "cls": [0]})
     assert 0.3 <= P.iou_matrix(work.loc[10, ["x", "y", "w", "h"]].to_numpy(float),
-                               other[["x", "y", "w", "h"]].to_numpy(float))[0, 0] < 0.9
+                               other[["x", "y", "w", "h"]].to_numpy(float))[0, 0] < 0.5
     both = pd.concat([dets, other], ignore_index=True)
     flags = P.occlusion_flags(work, both, 0.3)
     assert flags[flags].index.tolist() == [10]
@@ -158,21 +159,47 @@ def test_a_different_box_below_the_match_iou_still_flags():
     assert len(P.drop_context_duplicates(work, ctx)) == 1
 
 
-def test_one_to_one_keeps_a_second_box_over_a_row_as_an_occluder():
-    # the row's own detection (IoU 0.9) and another box (IoU 0.6): only the better one is own
-    row, own, other = (0, 0.0, 0.0), (0, 2.0, 0.0), (0, 10.0, 0.0)
+def test_every_box_over_a_row_at_the_match_iou_is_a_duplicate_not_an_occluder():
+    # the row's own detection (IoU 0.9) and a second box over it (IoU 0.6): both are duplicates,
+    # whatever the order (a detector that proposes several boxes on one object, for example one
+    # per class); a third box below 0.5 is still another object
+    row, own, second, other = (0, 0.0, 0.0), (0, 2.0, 0.0), (0, 10.0, 0.0), (0, 17.0, 0.0)
     assert _iou((*row, 40, 40), (*own, 40, 40)) >= 0.9
-    assert 0.5 <= _iou((*row, 40, 40), (*other, 40, 40)) < 0.7
+    assert 0.5 <= _iou((*row, 40, 40), (*second, 40, 40)) < 0.7
+    assert 0.3 <= _iou((*row, 40, 40), (*other, 40, 40)) < 0.5
     work = _boxes(row)
-    for ctx, own_mask in ((_boxes(own, other), [True, False]), (_boxes(other, own), [False, True])):
-        assert P.context_duplicates(work, ctx).tolist() == own_mask
-        assert P.occlusion_flags(work, ctx, 0.3).tolist() == [True]
-        assert P.drop_context_duplicates(work, ctx)["x"].tolist() == [10.0]
+    for ctx in (_boxes(own, second), _boxes(second, own)):
+        assert P.context_duplicates(work, ctx).tolist() == [True, True]
+        assert P.occlusion_flags(work, ctx, 0.3).tolist() == [False]
+        assert P.drop_context_duplicates(work, ctx).empty
+    ctx = _boxes(own, second, other)
+    assert P.context_duplicates(work, ctx).tolist() == [True, True, False]
+    assert P.occlusion_flags(work, ctx, 0.3).tolist() == [True]
+    assert P.drop_context_duplicates(work, ctx)["x"].tolist() == [17.0]
 
 
-def test_two_rows_and_two_detections_are_matched_crosswise():
-    # row A's best box is d1, but the assignment with the largest total IoU gives d1 to row B
-    # and d2 to row A, and both pairs reach 0.5; a per-row best match would leave d2 unmatched
+def test_multi_class_proposals_on_one_vehicle_do_not_flag_it_as_occluded():
+    # a detection file of the same run with car, bus and truck proposals over every vehicle,
+    # none of them removed by per-class NMS: before, only the best proposal per row was its own
+    # detection, and the others made most rows "occluded"
+    n = 30
+    work = pd.DataFrame({"frame": np.arange(n), "track": 1, "x": 100.0 + np.arange(n) * 3.0,
+                         "y": 200.0, "w": 120.0, "h": 60.0})
+    parts = []
+    for cls, dx, dw in ((2, 0.0, 0.0), (5, 6.0, 10.0), (7, -8.0, 14.0)):  # IoU about 1, .86, .78
+        parts.append(work.assign(track=-1, cls=cls, x=work["x"] + dx, w=work["w"] + dw))
+    dets = pd.concat(parts, ignore_index=True)
+    rows = work[["x", "y", "w", "h"]].to_numpy(float)
+    ious = [P.iou_matrix(rows[f], dets.loc[dets.frame == f, ["x", "y", "w", "h"]].to_numpy(float))
+            for f in range(n)]
+    assert min(i.min() for i in ious) >= P.CONTEXT_MATCH_IOU
+    assert P.context_duplicates(work, dets).all()
+    assert P.drop_context_duplicates(work, dets).empty
+    assert not P.occlusion_flags(work, dets, 0.3).any()
+
+
+def test_two_rows_and_two_detections_are_each_a_duplicate_of_a_nearby_row():
+    # d1 overlaps both rows and d2 overlaps row A, each at 0.5 or more
     a, b, d1, d2 = (0, 0.0, 0.0), (0, -8.0, 0.0), (0, -2.0, 0.0), (0, 13.0, 0.0)
     m = {(r, d): _iou((*r, 40, 40), (*d, 40, 40)) for r in (a, b) for d in (d1, d2)}
     assert m[a, d1] > m[a, d2] >= 0.5 and m[b, d1] >= 0.5 > m[b, d2]
@@ -197,11 +224,14 @@ def test_own_detection_matching_with_empty_frames_and_tables():
 
 
 def test_own_detection_matching_with_more_boxes_than_rows_and_more_rows_than_boxes():
-    # one row, three boxes: its own detection, an occluder at IoU 0.6, and a box far away
+    # one row, three boxes: its own detection, a second box over it at IoU 0.6 (also a
+    # duplicate), and a box far away
     work = _boxes((0, 0.0, 0.0))
     ctx = _boxes((0, 10.0, 0.0), (0, 300.0, 0.0), (0, 1.0, 0.0))
-    assert P.context_duplicates(work, ctx).tolist() == [False, False, True]
-    assert P.occlusion_flags(work, ctx, 0.3).tolist() == [True]
+    assert P.context_duplicates(work, ctx).tolist() == [True, False, True]
+    assert P.occlusion_flags(work, ctx, 0.3).tolist() == [False]
+    # a box over the row at IoU 0.41 is another object and occludes it
+    assert P.occlusion_flags(work, _boxes((0, 1.0, 0.0), (0, 17.0, 0.0)), 0.3).tolist() == [True]
     # three rows far apart, one box: it is only the nearest row's own detection
     work = _boxes((0, 0.0, 0.0), (0, 200.0, 0.0), (0, 400.0, 0.0))
     ctx = _boxes((0, 203.0, 0.0))
@@ -212,7 +242,7 @@ def test_own_detection_matching_with_more_boxes_than_rows_and_more_rows_than_box
 
 
 def test_own_detection_matching_survives_coordinates_that_overflow():
-    # x + w overflows to inf, so the IoU is NaN: the assignment must not reject the matrix
+    # x + w overflows to inf, so the IoU is NaN: it must count as no overlap, not raise
     for big in (1e200, 1e300, 1e308):
         work = _boxes((0, big, 0.0, big, 10.0))
         ctx = _boxes((0, big, 0.0, big, 10.0))

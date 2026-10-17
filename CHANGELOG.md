@@ -117,10 +117,14 @@
   exits with code 2 and names the extra when the package is missing. `TrackRefiner` accepts
   `encoder_factory=` to supply your own encoder.
 - A context box now counts as a row's own detection, and is left out of the occlusion mask and
-  of the link stage's occluders, when the frame's rows and context boxes, matched one to one,
-  pair it with that row at IoU 0.5 or more. Before, it needed IoU 0.9 with any row, so a
+  of the link stage's occluders, when it overlaps a row of its frame at IoU 0.5 or more. Every
+  such box counts, not only the best one per row, so a multi-class detection file of the same
+  run (car, bus and truck proposals over one vehicle) no longer makes the vehicle look occluded
+  by its own proposals. The cost: a real second object that overlaps a row at IoU 0.5 or more
+  can no longer be told from a duplicate proposal, so it neither flags the row as occluded nor
+  witnesses a gap. Before, it needed IoU 0.9 with any row, so a
   detection file of the same run as context flagged about a fifth of the rows as occluded.
-  Stage 3 drops the rows' own detections from `context` with the same one-to-one matching
+  Stage 3 drops the rows' own detections from `context` with the same rule
   (`refine` does it before the stage; `score_candidates` called directly now expects `context`
   without them), so a detection file of the same run is supported as context: on three real
   pedestrian clips the share of rows flagged as occluded fell from about 20% to 7-11%.

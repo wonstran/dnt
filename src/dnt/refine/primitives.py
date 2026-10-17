@@ -181,11 +181,13 @@ def frame_runs(frames) -> list[tuple[int, int]]:
     return [(int(r[0]), int(r[-1])) for r in cluster_by_gap(f, 1)]
 
 
-#: Per frame, the work boxes and the context boxes are matched one to one (the assignment with
-#: the largest total IoU). A context box matched to a work box with IoU >= this is taken to be
-#: that row's own detection (for example, a detection file from the same run passed as context),
-#: not another object. Such boxes are left out of the occlusion mask and of stage 3's witness
-#: occluders (final-review rulings R22 and R6); the stage 2 context cues still see them.
+#: A context box that overlaps a work box of its frame with IoU >= this is taken to be that
+#: row's own detection (for example, a detection file from the same run passed as context), not
+#: another object. Every such box counts, not only the best one per row: a detector that proposes
+#: several boxes on one vehicle (one per class, say car, bus and truck) must not make the vehicle
+#: look occluded by its own proposals. Such boxes are left out of the occlusion mask and of
+#: stage 3's witness occluders (final-review rulings R22 and R6); the stage 2 context cues still
+#: see them.
 CONTEXT_MATCH_IOU = 0.5
 
 
@@ -194,10 +196,10 @@ def context_duplicates(
 ) -> np.ndarray:
     """Return, per context row, whether it is a work row's own detection.
 
-    In each frame the work boxes and the context boxes are matched one to one, maximizing the
-    total IoU (``scipy.optimize.linear_sum_assignment``). A context box is a row's own detection
-    when it is matched and the pair's IoU is >= ``thr``. One to one means a second box over the
-    same row stays an occluder: only the row's best match is its own detection.
+    A context box is a row's own detection when its IoU with some work box of the same frame is
+    >= ``thr``. Every box that overlaps a row that much counts, so several proposals over one
+    vehicle (for example one per class from a multi-class detector) are all duplicates, and none
+    of them is an occluder. A box that overlaps every row below ``thr`` is another object.
 
     Parameters
     ----------
@@ -216,8 +218,6 @@ def context_duplicates(
     """
     if context is None or not len(context):
         return np.zeros(0 if context is None else len(context), dtype=bool)
-    from scipy.optimize import linear_sum_assignment
-
     dup = np.zeros(len(context), dtype=bool)
     frames = context["frame"].to_numpy(int)
     ctx_boxes = context[["x", "y", "w", "h"]].to_numpy(float)
@@ -228,11 +228,9 @@ def context_duplicates(
         own = by_frame.get(int(frames[idx[0]]))
         if own is None:
             continue
-        # absurd finite coordinates can overflow to an IoU of NaN, which the assignment rejects
+        # absurd finite coordinates can overflow to an IoU of NaN, which counts as no overlap
         m = np.nan_to_num(iou_matrix(ctx_boxes[idx], own), nan=0.0)
-        rows, cols = linear_sum_assignment(m, maximize=True)
-        matched = m[rows, cols] >= thr
-        dup[idx[rows[matched]]] = True
+        dup[idx] = m.max(axis=1) >= thr
     return dup
 
 
