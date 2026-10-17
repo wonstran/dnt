@@ -157,3 +157,17 @@ def test_vehicle_class_prompt_lists_options_and_reply_format():
     assert "- car:" in text and "- bus:" in text and "- truck:" in text and "- unclear:" in text
     assert text.endswith('"reason": "<one short sentence>"}')
     assert "- car:" not in vehicle_class_prompt(HEAVY_CLASS)
+
+
+def test_vehicle_glossary_is_light_vs_heavy():
+    text = vehicle_class_prompt(VEHICLE_CLASS)
+    lines = text.splitlines()
+    assert (
+        "- car: a light vehicle: passenger car, SUV, minivan, pickup truck (e.g. Ford F-150, "
+        "Chevy Silverado), or van. Note: Pickup trucks MUST be answered as car, NEVER as truck."
+    ) in lines
+    assert "- bus: a bus or coach that carries many passengers (not a passenger van)" in lines
+    assert (
+        "- truck: a heavy commercial goods vehicle: box truck, dump truck, tanker, semi-trailer "
+        "(NOT a pickup truck or van)."
+    ) in lines

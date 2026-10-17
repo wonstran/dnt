@@ -1,6 +1,6 @@
 # dnt.track: Classifying Vehicle Tracks as Car, Bus or Truck (`VehReClass`)
 
-- **Status:** draft for review (rev. 2: addresses [review 2026-10-15 22:04](../../review_2026-10-15-22-04-16.md) / [response](../../response_2026-10-15_22-40-00.md))
+- **Status:** implemented (rev. 3, 2026-10-16: car means any light vehicle, so re-detection may promote to bus or truck only for a heavy-flagged track, see §5.2; rev. 2: addresses [review 2026-10-15 22:04](../../review_2026-10-15-22-04-16.md) / [response](../../response_2026-10-15_22-40-00.md))
 - **Date:** 2026-10-15
 - **Related:** `dnt.track.re_class.ReClass` (the rider re-classifier for person tracks). The review of that
   module on 2026-10-15 found the issues cited below as "review issue N".
@@ -193,13 +193,23 @@ box conversion, factored out), so `detect_frames` and both re-classifiers share 
    but still counts in *n*.
 3. For each allowed class: `score = sum of its vote weights / n` and `support = its vote count / n`.
 4. The class with the highest `score` wins (ties go to the class with more votes, then the lower class ID). It
-   **decides** the track if its `support >= min_support`. Otherwise, or when *n* is 0, the track goes to layer 3.
+   **decides** the track if its `support >= min_support` **and** it is car or the track is heavy-flagged.
+   Otherwise, or when *n* is 0, the track goes to layer 3.
+
+**Why a bus or truck vote needs the size flag (rev. 3).** In this project car means any light vehicle,
+including pickups and passenger or cargo vans (Ford Transit, Mercedes Sprinter), and truck means a heavy goods
+vehicle. COCO's `truck` covers all of these, and a large van close to the camera is routinely detected as truck
+with high confidence (found on the afternoon Collins Ave clip, tracks 20 and 37: truck in 8 of 10 frames,
+support 0.8). So a bus or truck winner on a track that size has not flagged heavy does not decide: the track
+goes to the VLM, which sees all four options, or falls back to car. The winner is still recorded in
+`decisions.redetect_cls`.
 
 Dividing by *n* rather than by the number of matched frames keeps one stray detection from deciding a track
 (the flaw of review issue 1).
 
 Example: *n* = 10. Bus wins 4 frames at confidence 0.8, truck wins 2 at 0.6, 4 frames have no match. Bus has
-score 0.32 and support 0.4, so the track is **bus**. Had bus won 2 frames, its support would be 0.2 and the
+score 0.32 and support 0.4, so a heavy-flagged track is **bus** (an unflagged one goes to layer 3). Had bus
+won 2 frames, its support would be 0.2 and the
 track would go on to layer 3.
 
 ### 5.3 Layer 3: VLM
@@ -211,7 +221,12 @@ Runs only when `vlm` is set and the track is still undecided.
   height. Frames are read in the same sorted way as layer 2. A track with no usable crop goes to the fallback.
 - **Question.** One `vlm.runner.Question` per track: the crops show the same vehicle, and the model picks one
   option. The options are `car, bus, truck, unclear`, or `bus, truck, unclear` for a heavy-flagged track. The
-  prompt text lives next to the other prompts in `refine/vlm/prompts.py`.
+  prompt text lives next to the other prompts in `refine/vlm/prompts.py`. Its glossary (rev. 3) defines car
+  as a light vehicle (passenger car, SUV, minivan, pickup truck such as a Ford F-150 or Chevy Silverado, or
+  van) and tells the model that pickup trucks must be answered as car and never as truck, bus as a bus or coach
+  that carries many passengers (not a passenger van), and truck as a heavy commercial goods vehicle (box truck,
+  dump truck, tanker, semi-trailer; not a pickup truck or van). The exact wording is pinned by
+  `test_vehicle_glossary_is_light_vs_heavy`.
 - **Asking.** All questions go to one `VLMRunner.ask_many` call. That gives the configured backend
   (`anthropic` or `openai_compat`), its retries on transient errors, voting (`vlm.votes`) and the answer cache.
 - **Runner lifecycle.** Each `re_classify` call builds its own backend and `VLMRunner` from the resolved config
@@ -244,6 +259,7 @@ After `re_classify`, `vr.decisions` is a DataFrame with one row per classified t
 | `size` | the §5.1 size in px (NaN with fewer than `hv_min_count` real rows) |
 | `n` | sampled frames read in layer 2 |
 | `support` | the layer 2 winner's support (NaN when *n* is 0) |
+| `redetect_cls` | the layer 2 winner, also when it did not decide (nullable integer; `<NA>` with no votes) |
 | `vlm_answer`, `vlm_conf` | the layer 3 answer and confidence (None and NaN when layer 3 did not run) |
 
 It is not written to disk. It exists to tune `hv_size`, `hv_min_count`, `min_support` and `vlm.min_conf`.

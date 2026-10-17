@@ -39,9 +39,15 @@ _GLOSS = {
     "same_individual": "the same individual in both rows",
     "different": "two different individuals",
     "unsure": "you cannot tell",
-    "car": "a passenger car, SUV or minivan",
-    "bus": "a bus or coach that carries passengers",
-    "truck": "a truck of any size, including pickup trucks, box trucks and semi-trailers",
+    "car": (
+        "a light vehicle: passenger car, SUV, minivan, pickup truck (e.g. Ford F-150, Chevy "
+        "Silverado), or van. Note: Pickup trucks MUST be answered as car, NEVER as truck."
+    ),
+    "bus": "a bus or coach that carries many passengers (not a passenger van)",
+    "truck": (
+        "a heavy commercial goods vehicle: box truck, dump truck, tanker, semi-trailer "
+        "(NOT a pickup truck or van)."
+    ),
     "unclear": "you cannot tell",
 }
 

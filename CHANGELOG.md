@@ -92,8 +92,11 @@
   least `hv_min_count` real rows) that limits a big vehicle to bus or truck; re-detection on 10
   large frames spaced at least 5 frames apart, where the winning class needs 30% of the frames;
   and, when `vlm=` is set, one VLM question per undecided track using `dnt.refine`'s backends and
-  cache. Undecided tracks become truck if flagged heavy, car otherwise. `vr.decisions` shows
-  which layer decided each track.
+  cache. Undecided tracks become truck if flagged heavy, car otherwise. Car means any light
+  vehicle, vans and pickups included, and truck a heavy goods vehicle: since COCO's truck also
+  covers vans and pickups, a bus or truck vote from re-detection decides only for a size-flagged
+  track, and otherwise the VLM is asked (or the track becomes car). `vr.decisions` shows which
+  layer decided each track and, in `redetect_cls`, what re-detection voted.
 
 ### Changed
 - Stage 1 treats a reversal of heading as a motion break (new `switch.heading_reversal`, on for

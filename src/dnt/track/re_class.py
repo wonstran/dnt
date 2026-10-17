@@ -588,6 +588,7 @@ _DECISION_COLUMNS = [
     "size",
     "n",
     "support",
+    "redetect_cls",
     "vlm_answer",
     "vlm_conf",
 ]
@@ -650,8 +651,11 @@ class VehReClass:
     1. size: at least ``hv_min_count`` real rows with ``max(w, h) >= hv_size`` flag the track
        heavy, which allows only bus and truck from then on;
     2. re-detection: spaced, large frames are detected once, and each frame votes for the
-       most confident allowed class overlapping the track box;
-    3. VLM: a tile of crops is shown to the configured model;
+       most confident allowed class overlapping the track box; a car vote decides, but a bus
+       or truck vote decides only for a heavy track, because COCO's truck (and bus) also covers
+       vans and pickups, which count as car here;
+    3. VLM: a tile of crops is shown to the configured model, whose glossary defines car as
+       any light vehicle (vans and pickups included) and truck as a heavy goods vehicle;
     4. fallback: truck for a heavy track, car otherwise.
 
     Parameters
@@ -767,6 +771,8 @@ class VehReClass:
         track_ids: list | None = None,
         out_file: str | None = None,
         verbose: bool = True,
+        video_index: int | None = None,
+        video_tot: int | None = None,
     ) -> pd.DataFrame:
         """Classify vehicle tracks and write the class into ``cls``.
 
@@ -783,6 +789,10 @@ class VehReClass:
             Where to write the result, headerless, in the input's column layout.
         verbose : bool
             Show a progress bar while detecting.
+        video_index : int, optional
+            Index of this video in a batch, used only for progress display.
+        video_tot : int, optional
+            Total number of videos in the batch, used only for progress display.
 
         Returns
         -------
@@ -825,23 +835,31 @@ class VehReClass:
                 "size": size,
                 "n": 0,
                 "support": math.nan,
+                "redetect_cls": None,
                 "vlm_answer": None,
                 "vlm_conf": math.nan,
             }
             samples[t] = _spaced_sample(g, self.num_frames, self.min_gap)
 
         frames = {f for s in samples.values() for f, _ in s}
+        desc = "Re-classifying vehicles"
+        if video_index is not None and video_tot is not None:
+            desc += f" {video_index} of {video_tot}"
         with FrameReader(str(input_video)) as reader:
             by_frame, unread = _detect_frames(
-                self.detector, reader, frames, verbose=verbose, desc="Re-classifying vehicles"
+                self.detector, reader, frames, verbose=verbose, desc=desc
             )
         for t in ids:
             r = rows[t]
             allowed = (BUS, TRUCK) if r["heavy"] else (CAR, BUS, TRUCK)
             boxes = {f: b for f, b in samples[t] if f not in unread}
             v = _vote(boxes, by_frame, allowed, self.iou_threshold)
-            r["n"], r["support"] = v.n, v.support
-            if v.cls is not None and v.support >= self.min_support:
+            r["n"], r["support"], r["redetect_cls"] = v.n, v.support, v.cls
+            # COCO's "truck" (and "bus") also covers vans and pickups, which count as car here,
+            # so a bus or truck vote decides only when size has flagged the track heavy;
+            # otherwise the track goes on to the VLM (or falls back to car)
+            confirmed = v.cls == CAR or r["heavy"]
+            if v.cls is not None and v.support >= self.min_support and confirmed:
                 r["cls"], r["layer"] = v.cls, "redetect"
 
         pending = {
@@ -876,5 +894,7 @@ class VehReClass:
         out.loc[hit, "cls"] = out.loc[hit, "track"].map(cls_map).astype(int)
         if out_file:
             write_track(out, out_file)
-        self.decisions = pd.DataFrame(list(rows.values()), columns=_DECISION_COLUMNS)
+        decisions = pd.DataFrame(list(rows.values()), columns=_DECISION_COLUMNS)
+        decisions["redetect_cls"] = decisions["redetect_cls"].astype("Int64")  # <NA>: no votes
+        self.decisions = decisions
         return out

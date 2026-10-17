@@ -381,7 +381,8 @@ def test_redetect_writes_cls_on_every_row(monkeypatch, video):
         vehicle_rows(2, range(0, 50), (900, 500, 60, 40)),
     ], ignore_index=True)
     tracks.loc[tracks.index[:3], "r3"] = 1  # filled rows still get the class
-    vr, _ = _vr(monkeypatch, _script(range(50), BUS))
+    # hv_size=150 flags track 1 (size 200) heavy, so its bus vote may decide; track 2 is small
+    vr, _ = _vr(monkeypatch, _script(range(50), BUS), hv_size=150)
     out = vr.re_classify(tracks, video, verbose=False)
     assert out[out.track == 1].cls.unique().tolist() == [BUS]
     assert out[out.track == 2].cls.unique().tolist() == [CAR]  # nothing matched: fallback
@@ -389,8 +390,11 @@ def test_redetect_writes_cls_on_every_row(monkeypatch, video):
     pd.testing.assert_frame_equal(out.drop(columns="cls"), tracks.drop(columns="cls"))
     d = vr.decisions.set_index("track")
     assert d.loc[1, "layer"] == "redetect" and d.loc[2, "layer"] == "fallback"
+    assert d.loc[1, "redetect_cls"] == BUS and pd.isna(d.loc[2, "redetect_cls"])
+    assert str(vr.decisions["redetect_cls"].dtype) == "Int64"
     assert list(vr.decisions.columns) == [
-        "track", "cls", "layer", "heavy", "size", "n", "support", "vlm_answer", "vlm_conf"]
+        "track", "cls", "layer", "heavy", "size", "n", "support", "redetect_cls",
+        "vlm_answer", "vlm_conf"]
 
 
 def test_one_stray_detection_does_not_decide(monkeypatch, video):
@@ -406,7 +410,7 @@ def _boundary_script():
 
 
 def test_support_exactly_at_min_support_decides(monkeypatch, video):
-    vr, _ = _vr(monkeypatch, _boundary_script())
+    vr, _ = _vr(monkeypatch, _boundary_script(), hv_size=150)  # heavy: a truck vote may decide
     out = vr.re_classify(vehicle_rows(1, range(0, 50, 5), (100, 100, 200, 100)), video,
                          verbose=False)
     d = vr.decisions.iloc[0]
@@ -415,11 +419,12 @@ def test_support_exactly_at_min_support_decides(monkeypatch, video):
 
 
 def test_support_just_below_min_support_goes_on(monkeypatch, video):
-    vr, _ = _vr(monkeypatch, _boundary_script(), min_support=0.31)
+    vr, _ = _vr(monkeypatch, _boundary_script(), min_support=0.31, hv_size=150)
     out = vr.re_classify(vehicle_rows(1, range(0, 50, 5), (100, 100, 200, 100)), video,
                          verbose=False)
-    assert out.cls.unique().tolist() == [CAR]
+    assert out.cls.unique().tolist() == [TRUCK]  # heavy fallback, not the vote
     assert vr.decisions.layer.iloc[0] == "fallback"
+    assert vr.decisions.redetect_cls.iloc[0] == TRUCK  # recorded although it did not decide
 
 
 def test_heavy_fallback_is_truck_and_car_not_allowed(monkeypatch, video):
@@ -483,7 +488,7 @@ def test_unread_frame_leaves_only_tracks_that_sampled_it(monkeypatch, video):
 
 def test_float_frame_column_matches_int(monkeypatch, video):
     tracks = vehicle_rows(1, range(30), (100, 100, 200, 100))
-    vr, _ = _vr(monkeypatch, _script(range(30), BUS))
+    vr, _ = _vr(monkeypatch, _script(range(30), BUS), hv_size=150)
     a = vr.re_classify(tracks, video, verbose=False)
     b = vr.re_classify(tracks.astype({"frame": float}), video, verbose=False)
     assert a.cls.tolist() == b.cls.tolist() == [BUS] * 30
@@ -492,7 +497,7 @@ def test_float_frame_column_matches_int(monkeypatch, video):
 def test_track_ids_subset_and_unknown(monkeypatch, video, caplog):
     tracks = pd.concat([vehicle_rows(1, range(10), (100, 100, 200, 100)),
                         vehicle_rows(2, range(10), (100, 100, 200, 100))], ignore_index=True)
-    vr, _ = _vr(monkeypatch, _script(range(10), BUS))
+    vr, _ = _vr(monkeypatch, _script(range(10), BUS), hv_size=150)
     out = vr.re_classify(tracks, video, track_ids=[2, 99], verbose=False)
     assert out[out.track == 1].cls.unique().tolist() == [-1]
     assert out[out.track == 2].cls.unique().tolist() == [BUS]
@@ -501,7 +506,7 @@ def test_track_ids_subset_and_unknown(monkeypatch, video, caplog):
 
 def test_track_ids_numpy_array(monkeypatch, video, caplog):
     tracks = vehicle_rows(1, range(10), (100, 100, 200, 100))
-    vr, _ = _vr(monkeypatch, _script(range(10), BUS))
+    vr, _ = _vr(monkeypatch, _script(range(10), BUS), hv_size=150)
     out = vr.re_classify(tracks, video, track_ids=np.array([1, 7]), verbose=False)
     assert out.cls.unique().tolist() == [BUS] and "1 track ID" in caplog.text
 
@@ -520,7 +525,7 @@ def test_empty_inputs(monkeypatch, video, tmp_path):
 
 def test_out_file_round_trip(monkeypatch, video, tmp_path):
     tracks = vehicle_rows(1, range(10), (100, 100, 200, 100))
-    vr, _ = _vr(monkeypatch, _script(range(10), BUS))
+    vr, _ = _vr(monkeypatch, _script(range(10), BUS), hv_size=150)
     out = vr.re_classify(tracks, video, out_file=str(tmp_path / "o.txt"), verbose=False)
     back = read_track(tmp_path / "o.txt")
     assert back[7].tolist() == out.cls.tolist()
@@ -571,6 +576,85 @@ def test_vlm_unclear_and_error_fall_back(monkeypatch, video, tmp_path, caplog):
 def test_no_vlm_runner_when_nothing_pending(monkeypatch, video, tmp_path):
     built = []
     vr, _ = _vr(monkeypatch, _script(range(10), BUS), vlm=_vlm(tmp_path),
-                vlm_backend_factory=lambda c: built.append(1))
+                vlm_backend_factory=lambda c: built.append(1), hv_size=150)
     vr.re_classify(vehicle_rows(1, range(10), (100, 100, 200, 100)), video, verbose=False)
     assert built == []
+
+
+# ---- light vs heavy: re-detection alone never promotes an unflagged track ----
+
+VAN = (100, 100, 200, 100)
+
+
+def test_unflagged_truck_vote_goes_to_vlm_with_all_options(monkeypatch, video, tmp_path):
+    # a large van: RT-DETR calls it truck in most frames, but nothing flags it heavy
+    backend = FakeBackend({"vehclass:20": _answer("car", 0.9)})
+    vr, _ = _vr(monkeypatch, _script(range(0, 50, 5), TRUCK, conf=0.9, box=VAN),
+                vlm=_vlm(tmp_path), vlm_backend_factory=lambda c: backend)
+    out = vr.re_classify(vehicle_rows(20, range(50), VAN), video, verbose=False)
+    d = vr.decisions.iloc[0]
+    assert out.cls.unique().tolist() == [CAR]
+    assert d.layer == "vlm" and d.redetect_cls == TRUCK and d.support == 1.0
+    assert [c["options"] for c in backend.calls] == [["car", "bus", "truck", "unclear"]]
+
+
+def test_unflagged_truck_vote_without_vlm_falls_back_to_car(monkeypatch, video):
+    vr, _ = _vr(monkeypatch, _script(range(0, 50, 5), TRUCK, conf=0.9, box=VAN))
+    out = vr.re_classify(vehicle_rows(37, range(50), VAN), video, verbose=False)
+    d = vr.decisions.iloc[0]
+    assert out.cls.unique().tolist() == [CAR]
+    assert d.layer == "fallback" and d.redetect_cls == TRUCK and not d.heavy
+
+
+def test_heavy_truck_vote_decides_without_vlm(monkeypatch, video, tmp_path):
+    built = []
+    vr, _ = _vr(monkeypatch, _script(range(0, 50, 5), TRUCK, conf=0.9, box=VAN), hv_size=150,
+                vlm=_vlm(tmp_path), vlm_backend_factory=lambda c: built.append(1))
+    out = vr.re_classify(vehicle_rows(1, range(50), VAN), video, verbose=False)
+    d = vr.decisions.iloc[0]
+    assert out.cls.unique().tolist() == [TRUCK]
+    assert d.layer == "redetect" and d.redetect_cls == TRUCK and built == []
+
+
+def test_unflagged_bus_vote_goes_to_vlm(monkeypatch, video, tmp_path):
+    backend = FakeBackend({"vehclass:1": _answer("bus", 0.8)})
+    vr, _ = _vr(monkeypatch, _script(range(0, 50, 5), BUS, conf=0.9, box=VAN),
+                vlm=_vlm(tmp_path), vlm_backend_factory=lambda c: backend)
+    out = vr.re_classify(vehicle_rows(1, range(50), VAN), video, verbose=False)
+    d = vr.decisions.iloc[0]
+    assert out.cls.unique().tolist() == [BUS]
+    assert d.layer == "vlm" and d.redetect_cls == BUS and len(backend.calls) == 1
+
+
+def test_unflagged_car_vote_still_decides(monkeypatch, video, tmp_path):
+    built = []
+    vr, _ = _vr(monkeypatch, _script(range(0, 50, 5), CAR, conf=0.9, box=VAN),
+                vlm=_vlm(tmp_path), vlm_backend_factory=lambda c: built.append(1))
+    out = vr.re_classify(vehicle_rows(1, range(50), VAN), video, verbose=False)
+    d = vr.decisions.iloc[0]
+    assert out.cls.unique().tolist() == [CAR]
+    assert d.layer == "redetect" and d.redetect_cls == CAR and built == []
+
+
+@pytest.mark.parametrize(("kw", "desc"), [
+    ({}, "Re-classifying vehicles"),
+    ({"video_index": 2, "video_tot": 5}, "Re-classifying vehicles 2 of 5"),
+    ({"video_index": 2}, "Re-classifying vehicles"),  # both are needed, as in Detector/Tracker
+])
+def test_progress_bar_shows_video_index_of_tot(monkeypatch, video, kw, desc):
+    seen = []
+
+    class Bar:
+        def __init__(self, *a, **k):
+            seen.append(k.get("desc"))
+
+        def update(self, *a):
+            pass
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(re_class, "tqdm", Bar)
+    vr, _ = _vr(monkeypatch, _script(range(10), CAR))
+    vr.re_classify(vehicle_rows(1, range(10), (100, 100, 200, 100)), video, verbose=True, **kw)
+    assert seen == [desc]
