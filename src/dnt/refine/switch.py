@@ -11,7 +11,7 @@ from .apply import lineage_of_rows
 from .config import RefineConfig, to_frames
 from .events import Event, EventKind
 from .features import Appearance, dense_track_embeddings, track_embeddings
-from .primitives import iou_matrix, kalman_nis, ramp
+from .primitives import iou_matrix, kalman_nis, mean_velocity, ramp
 from .reporter import advance, extend
 
 STAGE = "switch"
@@ -92,11 +92,7 @@ def _heading_reversal(
     change = np.full(n, np.nan)
 
     def velocity(lo: int, hi: int) -> np.ndarray:
-        f = frames[lo:hi].astype(float)
-        f -= f.mean()
-        return np.array(
-            [f @ (cx[lo:hi] - cx[lo:hi].mean()), f @ (cy[lo:hi] - cy[lo:hi].mean())]
-        ) / float(f @ f)
+        return mean_velocity(frames[lo:hi], cx[lo:hi], cy[lo:hi])
 
     for i in range(1, n):
         t = frames[i]

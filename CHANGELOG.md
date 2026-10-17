@@ -105,6 +105,18 @@
   same vehicle. With the signal the split scores 0.97 and is accepted. On the 20-minute
   afternoon vehicle clip it changed one score and added one pending proposal, and on its
   pedestrians it changed nothing. The two new ledger signals are `heading` and `heading_cos`.
+- Stage 3 refuses a normal-gate link across a reversed heading (new `link.normal_heading_check`,
+  on for the vehicle target and off for the person target; the ledger records `heading`). The
+  angle is between the mean velocity over the last `link.heading_seconds` (new, default 2.0) of
+  one track and the first of the next, because a box clipped by the edge of the frame slows down
+  just before it leaves. Position alone cannot tell an object leaving an edge from another
+  entering there: on the afternoon clip a box truck and a van that the tracker had joined at
+  the edge were split at frame 323 and then re-linked across a one-frame gap, so the split
+  changed nothing. With the check the two stay apart. On that clip it removed 6 link events (1
+  applied, the wrong one; 5 pending proposals with a reversed heading), added none, and left
+  the other applied links as they were. New `link.keep_splits` (off by default) also refuses to
+  link the two halves of a track that stage 1 split. It is off because stage 3 had been healing
+  two false auto-accepted splits on that clip.
 - With a VLM backend and a video, the edits that stay capped below auto-accept without one
   (motion-only ID-switch splits, links across occlusions or with an ambiguous margin, static
   and mixed false-track drops, and rider reclasses without a subtype) are decided by the VLM

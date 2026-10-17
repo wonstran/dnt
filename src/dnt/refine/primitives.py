@@ -100,6 +100,17 @@ def speeds_hps(frames, boxes, fps: float, window: int = 15) -> np.ndarray:
     return out
 
 
+def mean_velocity(frames, cx, cy) -> np.ndarray:
+    """Return the least-squares velocity ``(vx, vy)`` in pixels per frame of a centre track.
+
+    ``frames`` must hold at least two distinct frame numbers; gaps are handled by the numbers.
+    """
+    f = np.asarray(frames, dtype=float)
+    f = f - f.mean()
+    cx, cy = np.asarray(cx, dtype=float), np.asarray(cy, dtype=float)
+    return np.array([f @ (cx - cx.mean()), f @ (cy - cy.mean())]) / float(f @ f)
+
+
 def span_speed(frames, boxes, fps: float, seconds: float, *, at: str) -> float:
     """Return the net speed (h/s) over the first or last ``seconds`` of rows; 0.0 if undefined."""
     fr = np.asarray(frames, dtype=int)

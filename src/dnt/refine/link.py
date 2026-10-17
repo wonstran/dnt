@@ -20,6 +20,7 @@ from .primitives import (
     box_centers,
     iou_matrix,
     majority_class,
+    mean_velocity,
     ramp,
     span_speed,
 )
@@ -757,6 +758,57 @@ def _overlap_gate(di: TrackDesc, dj: TrackDesc, lc):
     return "overlap", float(1.0 - vals.mean()), {"overlap_iou": float(vals.mean())}
 
 
+def _heading_change(di: TrackDesc, dj: TrackDesc, lc, fps: float) -> float | None:
+    """Angle in degrees between ``di``'s mean velocity before the join and ``dj``'s after it.
+
+    Each velocity is the least-squares slope of the box centre over the last (first)
+    ``link.heading_seconds`` of ``di`` (``dj``), not over the last few rows: a box that is
+    clipped by the edge of the frame slows down just before it leaves, and its last rows alone
+    say little about where it was heading. ``None`` when a side has fewer than two rows or moves
+    slower than ``link.heading_min_speed`` box heights per second: the heading of a box that
+    barely moves is noise.
+    """
+    w = to_frames(lc.heading_seconds, fps)
+    before, after = di.frames >= di.t_e - w, dj.frames <= dj.t_s + w
+    if before.sum() < 2 or after.sum() < 2:
+        return None
+    ci, cj = box_centers(di.boxes[before]), box_centers(dj.boxes[after])
+    vi = mean_velocity(di.frames[before], ci[:, 0], ci[:, 1])
+    vj = mean_velocity(dj.frames[after], cj[:, 0], cj[:, 1])
+    ni, nj = float(np.linalg.norm(vi)), float(np.linalg.norm(vj))
+    if ni * fps / di.h_end < lc.heading_min_speed or nj * fps / dj.h_start < lc.heading_min_speed:
+        return None
+    return float(np.degrees(np.arccos(np.clip(float(vi @ vj) / (ni * nj), -1.0, 1.0))))
+
+
+def _split_spans(descs: dict[int, TrackDesc]) -> dict[int, list[tuple[int, int, int]]]:
+    """Return, per raw ID, the ``(first, last, track)`` spans that tracks hold of it."""
+    spans: dict[int, list[tuple[int, int, int]]] = {}
+    for d in descs.values():
+        for raw, first, last in d.lineage:
+            spans.setdefault(int(raw), []).append((int(first), int(last), d.track))
+    return spans
+
+
+def _resplit(di: TrackDesc, dj: TrackDesc, spans) -> bool:
+    """Whether linking ``di`` to ``dj`` would undo a split of one raw track at their boundary.
+
+    True when ``di`` ends and ``dj`` starts with the same raw ID and no other track holds a
+    span of that raw ID between them, so the two are neighbouring halves. A third track in
+    between (an intruder that was cut out) means ``di`` and ``dj`` are not neighbours, and
+    linking them skips the intruder: a real link.
+    """
+    if not di.lineage or not dj.lineage:
+        return False
+    raw, _, last = di.lineage[-1]
+    raw2, first, _ = dj.lineage[0]
+    if raw != raw2:
+        return False
+    return not any(
+        s > last and e < first and t not in (di.track, dj.track) for s, e, t in spans.get(raw, ())
+    )
+
+
 def _gate(di: TrackDesc, dj: TrackDesc, g: int, cfg: RefineConfig, fps: float, gaps):
     lc = cfg.link
     mg, mgs, mgo = gaps
@@ -782,6 +834,12 @@ def _gate(di: TrackDesc, dj: TrackDesc, g: int, cfg: RefineConfig, fps: float, g
         if res is None:
             return None
         cost, terms = res
+        if lc.normal_heading_check:
+            # a track cannot turn around across the gap: a link there would join two objects
+            heading = _heading_change(di, dj, lc, fps)
+            if heading is not None and heading > lc.max_heading_change:
+                return None
+            terms = {**terms, "heading": heading}
         return "normal", float(ramp(cost, 0.0, lc.legacy_cost_hi)), {"legacy_cost": cost, **terms}
     if di.speed_static < lc.static_speed and g <= mgs:
         if not _size_ok(di.end_box, dj.start_box, lc.size_ratio_max):
@@ -868,6 +926,7 @@ def score_candidates(
     reach = max(gaps)  # each gate applies its own limit; the window only bounds the search
     order = sorted(descs.values(), key=lambda d: (d.t_s, d.track))
     starts = np.array([d.t_s for d in order])
+    spans = _split_spans(descs) if lc.keep_splits else {}
     cache: dict = {}
     cands: list[Candidate] = []
     for di in sorted(descs.values(), key=lambda d: d.track):
@@ -877,6 +936,8 @@ def score_candidates(
         for dj in order[lo:hi]:
             if dj.track == di.track or not _class_ok(di.cls_major, dj.cls_major, lc.class_groups):
                 continue
+            if lc.keep_splits and _resplit(di, dj, spans):
+                continue  # stage 1 split these halves apart; stage 3 does not undo it
             g = dj.t_s - di.t_e
             res = _gate(di, dj, g, cfg, fps, gaps)
             if res is None:

@@ -275,6 +275,9 @@ class LinkConfig:
     border_margin: float = 0.5
     speed_seconds: float = 1.0
     heading_min_speed: float = 0.2
+    normal_heading_check: bool = False
+    heading_seconds: float = 2.0
+    keep_splits: bool = False
     n_alternatives: int = 2
     min_crop_px: int = 0
 
@@ -487,6 +490,7 @@ class RefineConfig:
             cfg.class_ids = [2, 5, 7]
             cfg.link.class_groups = [[2, 7]]
             cfg.switch.heading_reversal = True  # a vehicle cannot turn around between two frames
+            cfg.link.normal_heading_check = True
         return cfg
 
     @classmethod
@@ -592,6 +596,7 @@ class RefineConfig:
             "link.max_gap_occluded": lc.max_gap_occluded,
             "link.static_seconds": lc.static_seconds,
             "link.speed_seconds": lc.speed_seconds,
+            "link.heading_seconds": lc.heading_seconds,
         }
         if self.fill.max_gap is not None:
             durations["fill.max_gap"] = self.fill.max_gap
