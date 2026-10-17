@@ -249,21 +249,20 @@ def test_prepare_vlm_missing_openai_key_names_local_server(monkeypatch, tmp_path
     assert "MY_KEY" in str(e.value) and "vlm.base_url" in str(e.value)
 
 
-def _requests(*tracks, heavy=False):
+def _requests(*tracks):
     box = (100.0, 100.0, 300.0, 150.0)
-    return {t: ([(10 * t + i * 5, box) for i in range(3)], heavy) for t in tracks}
+    return {t: [(10 * t + i * 5, box) for i in range(3)] for t in tracks}
 
 
 def test_ask_vlm_answers_and_options(monkeypatch, tmp_path):
     monkeypatch.setattr(re_class, "FrameReader", FakeReader)
-    backend = FakeBackend({"vehclass:1": _answer("bus"), "vehclass:2": _answer("truck")})
-    got = re_class._ask_vlm(_vlm(tmp_path), lambda cfg: backend, "v.mp4",
-                            _requests(1) | _requests(2, heavy=True))
+    backend = FakeBackend({"vehclass:1": _answer("bus"), "vehclass:2": _answer("car")})
+    got = re_class._ask_vlm(_vlm(tmp_path), lambda cfg: backend, "v.mp4", _requests(1, 2))
     assert got[1] == re_class._VLMResult("bus", 0.9, None)
-    assert got[2].answer == "truck"
+    assert got[2].answer == "car"
     opts = {c["tag"]: c["options"] for c in backend.calls}
-    assert opts == {"vehclass:1": ["car", "bus", "truck", "unclear"],
-                    "vehclass:2": ["bus", "truck", "unclear"]}
+    four = ["car", "bus", "truck", "unclear"]  # every track may be a car: a big SUV is a car too
+    assert opts == {"vehclass:1": four, "vehclass:2": four}
     assert backend.closed == 1
 
 
@@ -427,11 +426,54 @@ def test_support_just_below_min_support_goes_on(monkeypatch, video):
     assert vr.decisions.redetect_cls.iloc[0] == TRUCK  # recorded although it did not decide
 
 
-def test_heavy_fallback_is_truck_and_car_not_allowed(monkeypatch, video):
+def test_a_heavy_track_with_a_car_vote_is_not_forced_to_truck(monkeypatch, video):
+    # a big SUV close to the camera: the detector says car in every frame, the box is large
     vr, _ = _vr(monkeypatch, _script(range(100), CAR, box=(100, 100, 600, 300)), hv_size=500)
     out = vr.re_classify(vehicle_rows(1, range(100), (100, 100, 600, 300)), video, verbose=False)
-    assert out.cls.unique().tolist() == [TRUCK]
-    assert bool(vr.decisions.heavy.iloc[0])
+    d = vr.decisions.iloc[0]
+    assert out.cls.unique().tolist() == [CAR]  # no VLM: it stays what the detector says
+    assert bool(d.heavy) and d.layer == "fallback" and d.redetect_cls == CAR and d.support == 1.0
+
+
+def test_a_heavy_track_with_a_car_vote_goes_to_the_vlm_with_all_options(monkeypatch, video, tmp_path):
+    backend = FakeBackend({"vehclass:1": _answer("truck", 0.9)})
+    vr, _ = _vr(monkeypatch, _script(range(100), CAR, box=(100, 100, 600, 300)), hv_size=500,
+                vlm=_vlm(tmp_path), vlm_backend_factory=lambda c: backend)
+    out = vr.re_classify(vehicle_rows(1, range(100), (100, 100, 600, 300)), video, verbose=False)
+    assert [c["options"] for c in backend.calls] == [["car", "bus", "truck", "unclear"]]
+    assert out.cls.unique().tolist() == [TRUCK]  # the VLM may overrule the detector
+    assert vr.decisions.layer.iloc[0] == "vlm"
+    backend = FakeBackend({"vehclass:1": _answer("car", 0.9)})
+    vr, _ = _vr(monkeypatch, _script(range(100), CAR, box=(100, 100, 600, 300)), hv_size=500,
+                vlm=_vlm(tmp_path, cache_dir=str(tmp_path / "cache2")),  # not the first answer
+                vlm_backend_factory=lambda c: backend)
+    out = vr.re_classify(vehicle_rows(1, range(100), (100, 100, 600, 300)), video, verbose=False)
+    assert out.cls.unique().tolist() == [CAR] and vr.decisions.layer.iloc[0] == "vlm"
+
+
+@pytest.mark.parametrize("reply", [_answer("unclear"), _answer("truck", 0.3), RuntimeError("boom")])
+def test_a_heavy_car_track_the_vlm_cannot_settle_stays_car(monkeypatch, video, tmp_path, reply):
+    backend = FakeBackend({"vehclass:1": reply})
+    vr, _ = _vr(monkeypatch, _script(range(100), CAR, box=(100, 100, 600, 300)), hv_size=500,
+                vlm=_vlm(tmp_path), vlm_backend_factory=lambda c: backend)
+    out = vr.re_classify(vehicle_rows(1, range(100), (100, 100, 600, 300)), video, verbose=False)
+    assert out.cls.unique().tolist() == [CAR] and vr.decisions.layer.iloc[0] == "fallback"
+
+
+def test_a_weak_car_vote_on_a_heavy_track_does_not_override_the_size(monkeypatch, video):
+    # 2 car votes in 10 frames: support 0.2 is below min_support, so size is the only evidence
+    vr, _ = _vr(monkeypatch, _script((0, 5), CAR, box=(100, 100, 600, 300)), hv_size=500)
+    out = vr.re_classify(vehicle_rows(1, range(0, 50, 5), (100, 100, 600, 300)), video,
+                         verbose=False)
+    d = vr.decisions.iloc[0]
+    assert out.cls.unique().tolist() == [TRUCK] and d.layer == "fallback"
+    assert d.redetect_cls == CAR and d.support == pytest.approx(0.2)
+
+
+def test_a_heavy_track_nothing_matched_falls_back_to_truck(monkeypatch, video):
+    vr, _ = _vr(monkeypatch, {}, hv_size=500)
+    out = vr.re_classify(vehicle_rows(1, range(100), (100, 100, 600, 300)), video, verbose=False)
+    assert out.cls.unique().tolist() == [TRUCK] and vr.decisions.layer.iloc[0] == "fallback"
 
 
 def test_size_just_below_hv_size_is_not_heavy(monkeypatch, video):

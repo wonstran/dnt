@@ -277,15 +277,16 @@ class _VLMResult(NamedTuple):
 def _ask_vlm(cfg, backend_factory, input_video: str, requests) -> dict:
     """Ask one question per track about a tile of its crops.
 
-    ``requests`` maps a track ID to ``(samples, heavy)``. A track with no usable crop is left
-    out. The runner is built only when there is a question, and it is always closed.
+    ``requests`` maps a track ID to its crop samples ``[(frame, box), ...]``. Every question has
+    the options car, bus, truck and unclear. A track with no usable crop is left out. The runner
+    is built only when there is a question, and it is always closed.
     """
     from ..refine.vlm.cache import AnswerCache
-    from ..refine.vlm.prompts import HEAVY_CLASS, VEHICLE_CLASS, vehicle_class_prompt
+    from ..refine.vlm.prompts import VEHICLE_CLASS, vehicle_class_prompt
     from ..refine.vlm.runner import Question, VLMRunner
 
     want: dict[int, list[tuple[object, tuple]]] = {}
-    for t, (samples, _) in requests.items():
+    for t, samples in requests.items():
         for f, box in samples:
             want.setdefault(int(f), []).append((t, box))
     crops: dict[object, list[tuple[int, np.ndarray]]] = {t: [] for t in requests}
@@ -308,12 +309,12 @@ def _ask_vlm(cfg, backend_factory, input_video: str, requests) -> dict:
             input_video,
         )
     questions, asked = [], []
-    for t, (_, heavy) in requests.items():
+    for t in requests:
         image = _tile([c for _, c in sorted(crops[t], key=lambda fc: fc[0])])
         if image is None:
             log.debug("track %s has no usable crop for the VLM", t)
             continue
-        options = list(HEAVY_CLASS if heavy else VEHICLE_CLASS)
+        options = list(VEHICLE_CLASS)
         questions.append(
             Question(
                 tag=f"vehclass:{_tag_id(t)}",
@@ -649,19 +650,26 @@ class VehReClass:
     Each track goes through the layers in order and stops at the first that decides:
 
     1. size: at least ``hv_min_count`` real rows with ``max(w, h) >= hv_size`` flag the track
-       heavy, which allows only bus and truck from then on;
+       heavy, which makes a bus or truck vote from re-detection trustworthy (a big box is
+       evidence of a big vehicle) and a car vote suspect (a big box near the camera is also
+       what an SUV or pickup looks like);
     2. re-detection: spaced, large frames are detected once, and each frame votes for the
-       most confident allowed class overlapping the track box; a car vote decides, but a bus
-       or truck vote decides only for a heavy track, because COCO's truck (and bus) also covers
-       vans and pickups, which count as car here;
-    3. VLM: a tile of crops is shown to the configured model, whose glossary defines car as
-       any light vehicle (vans and pickups included) and truck as a heavy goods vehicle;
-    4. fallback: truck for a heavy track, car otherwise.
+       most confident class (car, bus or truck) overlapping the track box. On a track that is
+       not heavy, a car vote decides and a bus or truck vote does not, because COCO's truck
+       (and bus) also covers vans and pickups, which count as car here. On a heavy track it
+       is the other way round;
+    3. VLM: a tile of crops is shown to the configured model with the options car, bus, truck
+       and unclear, whose glossary defines car as any light vehicle (vans and pickups
+       included) and truck as a heavy goods vehicle;
+    4. fallback: car for a track whose re-detection leans car, otherwise truck for a heavy
+       track and car for the rest.
 
     Parameters
     ----------
     hv_size : float or None
-        Heavy-vehicle size in pixels; None turns layer 1 off. Default None.
+        Heavy-vehicle size in pixels; None turns layer 1 off. Default None. Set it above the
+        largest SUV or pickup the camera sees (see ``tools/hv_size_crops.py``): a vehicle
+        close to the camera is large in pixels whatever it is.
     hv_min_count : int
         Real rows that must reach ``hv_size``. Default 3.
     num_frames : int
@@ -851,19 +859,21 @@ class VehReClass:
             )
         for t in ids:
             r = rows[t]
-            allowed = (BUS, TRUCK) if r["heavy"] else (CAR, BUS, TRUCK)
             boxes = {f: b for f, b in samples[t] if f not in unread}
-            v = _vote(boxes, by_frame, allowed, self.iou_threshold)
+            v = _vote(boxes, by_frame, (CAR, BUS, TRUCK), self.iou_threshold)
             r["n"], r["support"], r["redetect_cls"] = v.n, v.support, v.cls
-            # COCO's "truck" (and "bus") also covers vans and pickups, which count as car here,
-            # so a bus or truck vote decides only when size has flagged the track heavy;
-            # otherwise the track goes on to the VLM (or falls back to car)
-            confirmed = v.cls == CAR or r["heavy"]
-            if v.cls is not None and v.support >= self.min_support and confirmed:
+            strong = v.cls is not None and v.support >= self.min_support
+            # Size and the vote must agree. COCO's "truck" (and "bus") also covers vans and
+            # pickups, which count as car here, so a bus or truck vote decides only on a heavy
+            # track; and a big box close to the camera is also what an SUV or pickup looks
+            # like, so a car vote decides only on a track that is not heavy. A disagreement goes
+            # on to the VLM, which sees the vehicle.
+            if strong and (v.cls == CAR) != r["heavy"]:
                 r["cls"], r["layer"] = v.cls, "redetect"
+            r["leans_car"] = strong and v.cls == CAR
 
         pending = {
-            t: (_spaced_sample(groups[t], self.vlm_crops, self.min_gap), rows[t]["heavy"])
+            t: _spaced_sample(groups[t], self.vlm_crops, self.min_gap)
             for t in ids
             if rows[t]["layer"] is None and t in groups
         }
@@ -886,7 +896,10 @@ class VehReClass:
 
         for r in rows.values():
             if r["layer"] is None:
-                r["cls"], r["layer"] = (TRUCK if r["heavy"] else CAR), "fallback"
+                # a heavy track the detector calls car stays car: size alone does not overrule
+                # it; a heavy track with no usable vote is a truck, the likelier heavy class
+                heavy_truck = r["heavy"] and not r["leans_car"]
+                r["cls"], r["layer"] = (TRUCK if heavy_truck else CAR), "fallback"
 
         out = table.copy()
         cls_map = {t: r["cls"] for t, r in rows.items()}

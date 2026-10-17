@@ -20,9 +20,9 @@ VEHICLE_SCREEN = [
     "unsure",
 ]
 SAME = ["same_individual", "different", "unsure"]
-#: Vehicle class answers (``dnt.track.VehReClass``); heavy tracks are asked without ``car``.
+#: Vehicle class answers (``dnt.track.VehReClass``). Every track may be a car: a big SUV or
+#: pickup close to the camera has a box as large as a small bus.
 VEHICLE_CLASS = ["car", "bus", "truck", "unclear"]
-HEAVY_CLASS = ["bus", "truck", "unclear"]
 #: Rider answers and the ``RefineConfig.reclass_map`` key each one selects.
 RIDER_OPTIONS = {"cyclist": "cyclist", "motorcycle_rider": "motorcycle", "scooter_rider": "scooter"}
 

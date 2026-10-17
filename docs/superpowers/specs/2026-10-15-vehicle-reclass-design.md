@@ -1,6 +1,6 @@
 # dnt.track: Classifying Vehicle Tracks as Car, Bus or Truck (`VehReClass`)
 
-- **Status:** implemented (rev. 3, 2026-10-16: car means any light vehicle, so re-detection may promote to bus or truck only for a heavy-flagged track, see §5.2; rev. 2: addresses [review 2026-10-15 22:04](../../review_2026-10-15-22-04-16.md) / [response](../../response_2026-10-15_22-40-00.md))
+- **Status:** implemented (rev. 4, 2026-10-17: the size flag no longer excludes car, and a car vote on a heavy track goes to the VLM, see §5.1 and §5.2; rev. 3, 2026-10-16: car means any light vehicle, so re-detection may promote to bus or truck only for a heavy-flagged track, see §5.2; rev. 2: addresses [review 2026-10-15 22:04](../../review_2026-10-15-22-04-16.md) / [response](../../response_2026-10-15_22-40-00.md))
 - **Date:** 2026-10-15
 - **Related:** `dnt.track.re_class.ReClass` (the rider re-classifier for person tracks). The review of that
   module on 2026-10-15 found the issues cited below as "review issue N".
@@ -19,7 +19,7 @@ whole track (review issue 1).
 
 **Goal.** Give every vehicle track one class for the whole track, using the cheapest evidence that settles it:
 
-1. the track's size (a big track is a heavy vehicle, so bus or truck);
+1. the track's size (a big box makes a bus or truck vote trustworthy and a car vote suspect);
 2. re-detection with a strong detector on spaced, large frames;
 3. a vision-language model (VLM) on crops, for tracks that re-detection cannot settle;
 4. a fixed fallback.
@@ -137,15 +137,22 @@ Each track goes through the layers in order and stops at the first one that deci
 
 - `size` = the `hv_min_count`-th largest value of `max(w, h)` over the track's real rows (the 3rd largest by
   default). It is NaN when the track has fewer real rows than `hv_min_count`.
-- `size >= hv_size` flags the track **heavy**: at least `hv_min_count` real rows reached the threshold. From then
-  on only bus and truck are allowed classes.
+- `size >= hv_size` flags the track **heavy**: at least `hv_min_count` real rows reached the threshold. The flag
+  decides which re-detection votes are trusted (§5.2) and what the fallback is (§5.4). It does **not** remove
+  any class: car, bus and truck stay possible on a heavy track (rev. 4).
+- **Why size cannot exclude car (rev. 4).** A vehicle close to the camera is large in pixels whatever it is: on
+  the three 640x480 Collins Ave clips, SUVs and pickups reached 243 to 310 px, as large as the smallest buses
+  and box trucks (245 to 325 px). With `hv_size = 240`, 55 of 1243 tracks were flagged heavy; 13 of them were
+  SUVs, pickups or a sedan, all forced to truck, and the detector's own winner was car for 11 of the 55. Setting
+  `hv_size` above the largest SUV or pickup (340 cleared all 13) removes the flag from them, and `hv_size_crops.py`
+  helps to find that value, but a threshold set too low must not be able to turn a car into a truck by itself.
 - **Robustness.** Up to `hv_min_count - 1` glitched or merged boxes cannot flag a track, whatever their size and
   however short the track. A percentile would not give this: with nine boxes of 100 px and one of 1,000 px,
-  NumPy's default 95th percentile is 595 px. The guarantee matters because the flag is hard: it removes car
-  from both later layers and turns the fallback into truck.
-- **Short tracks.** A track with fewer than `hv_min_count` real rows is never flagged. It still allows car, bus
-  and truck, so layers 2 and 3 decide it. Missing a flag only loses the narrowing, while a false flag forces a
-  wrong class, so erring toward "not flagged" is the safer side.
+  NumPy's default 95th percentile is 595 px. The guarantee matters because the flag decides which
+  votes are trusted and turns the fallback into truck.
+- **Short tracks.** A track with fewer than `hv_min_count` real rows is never flagged, so layers 2 and 3 decide
+  it. Missing a flag only means that a bus or truck vote goes to the VLM instead of deciding, while a false flag
+  makes the fallback truck, so erring toward "not flagged" is the safer side.
 - An unflagged track allows car, bus and truck, because a truck far from the camera can look small.
 - Layer 1 never decides a class on its own. With `hv_size=None` no track is flagged.
 
@@ -185,16 +192,18 @@ box conversion, factored out), so `detect_frames` and both re-classifiers share 
 
 **Voting.** With *n* the number of sampled frames that were read:
 
-1. In each frame, the candidate detections are those whose class is allowed for the track (§5.1) and whose
-   IoU with the track box is at least `iou_threshold`.
+1. In each frame, the candidate detections are those whose class is car, bus or truck (on every track, heavy
+   or not) and whose IoU with the track box is at least `iou_threshold`.
 2. If there are candidates, the one with the **highest detector confidence** casts that frame's single vote,
    weighted by its confidence. Confidence, not IoU, picks it, because the detector often puts both a bus and a
    truck box on one vehicle and its confidence says which it believes. A frame with no candidate casts no vote
    but still counts in *n*.
-3. For each allowed class: `score = sum of its vote weights / n` and `support = its vote count / n`.
+3. For each of the three classes: `score = sum of its vote weights / n` and `support = its vote count / n`.
 4. The class with the highest `score` wins (ties go to the class with more votes, then the lower class ID). It
-   **decides** the track if its `support >= min_support` **and** it is car or the track is heavy-flagged.
-   Otherwise, or when *n* is 0, the track goes to layer 3.
+   **decides** the track if its `support >= min_support` **and** size agrees with it: a car winner on a track
+   that is not heavy, or a bus or truck winner on a heavy track. A disagreement (a car winner on a heavy track,
+   a bus or truck winner on a track that is not heavy), a weak winner, no winner, or *n* = 0 sends the track to
+   layer 3.
 
 **Why a bus or truck vote needs the size flag (rev. 3).** In this project car means any light vehicle,
 including pickups and passenger or cargo vans (Ford Transit, Mercedes Sprinter), and truck means a heavy goods
@@ -203,6 +212,11 @@ with high confidence (found on the afternoon Collins Ave clip, tracks 20 and 37:
 support 0.8). So a bus or truck winner on a track that size has not flagged heavy does not decide: the track
 goes to the VLM, which sees all four options, or falls back to car. The winner is still recorded in
 `decisions.redetect_cls`.
+
+**Why a car vote is not enough on a heavy track (rev. 4).** The same argument runs the other way: a big box
+close to the camera is also what an SUV or a pickup looks like, so size alone does not make a track a bus or a
+truck. Where the detector says car on a heavy track, the two pieces of evidence disagree and the VLM, which sees
+the vehicle, settles it with all four options. Without a VLM the track stays car (§5.4).
 
 Dividing by *n* rather than by the number of matched frames keeps one stray detection from deciding a track
 (the flaw of review issue 1).
@@ -220,7 +234,7 @@ Runs only when `vlm` is set and the track is still undecided.
   each with `refine.crops.crop_box` and tile the crops side by side into one JPEG, each scaled to a common
   height. Frames are read in the same sorted way as layer 2. A track with no usable crop goes to the fallback.
 - **Question.** One `vlm.runner.Question` per track: the crops show the same vehicle, and the model picks one
-  option. The options are `car, bus, truck, unclear`, or `bus, truck, unclear` for a heavy-flagged track. The
+  option. The options are always `car, bus, truck, unclear`: a heavy-flagged track may be a car (rev. 4). The
   prompt text lives next to the other prompts in `refine/vlm/prompts.py`. Its glossary (rev. 3) defines car
   as a light vehicle (passenger car, SUV, minivan, pickup truck such as a Ford F-150 or Chevy Silverado, or
   van) and tells the model that pickup trucks must be answered as car and never as truck, bus as a bus or coach
@@ -243,8 +257,9 @@ seen at poor angles. With `vlm=None` the cascade stops after layer 2 and costs n
 
 ### 5.4 Fallback
 
-A heavy-flagged track becomes **truck** (7), the likelier heavy class on most roads. Any other track becomes
-**car** (2).
+A track whose re-detection leans car (car won with `support >= min_support`, which on a heavy track did not
+decide) becomes **car** (2): size alone does not overrule the detector. Any other heavy-flagged track becomes
+**truck** (7), the likelier heavy class on most roads, and every remaining track becomes **car** (2).
 
 ## 6. `decisions`
 
@@ -318,21 +333,21 @@ the existing `ReClass` tests do) and `refine.vlm.fake.FakeBackend`, with small s
   track, and `hv_min_count` rows at the threshold do flag it when the track has that many rows.
 - **Sampling:** largest first, `min_gap` respected, ties to the earlier frame, short tracks, `min_gap=0` equals
   top-N.
-- **Voting:** the IoU gate, highest confidence wins within a frame, classes outside the allowed set are
-  ignored for heavy tracks, `support` at and just below `min_support`, one stray detection in 10 frames does
-  not decide.
+- **Voting:** the IoU gate, highest confidence wins within a frame, all three classes vote on every track,
+  a car winner on a heavy track and a bus or truck winner on a track that is not heavy do not decide,
+  `support` at and just below `min_support`, one stray detection in 10 frames does not decide.
 - **Tolerant reading:** with two tracks sampling overlapping frames, a reader that fails on a **middle**
   requested frame still reads the frames after it. Only the tracks that sampled the failed frame lose it from
   *n*. A failed VLM crop frame leaves a tile of the remaining crops.
 - **Single detection pass:** frames shared by two tracks are detected once, in increasing order.
 - **VLM:** a confident answer decides, `unclear` and low confidence fall back, an error and a `budget` verdict
-  fall back with a warning, heavy tracks get the two-class options, `vlm=None` skips the layer. The runner is
+  fall back with a warning, every track gets the four options (a heavy track with a car vote included), `vlm=None` skips the layer. The runner is
   closed after the call, also when `ask_many` raises, and a second `re_classify` gets a fresh budget.
 - **VLM config, no network:** a config whose `use` selects a named `openai_compat` endpoint (top-level backend
   `none`) is accepted and the preflight checks that endpoint. An unknown `use`, invalid VLM settings (for example
   `votes=0`), and a config resolving to backend `none` each raise `ValueError` in the constructor. The caller's
   config object is unchanged. `RefineConfig.validate` gives the same messages as before the move.
-- **Fallback:** heavy becomes truck, other becomes car, no real rows becomes car.
+- **Fallback:** a heavy track leaning car stays car, other heavy becomes truck, other becomes car, no real rows becomes car.
 - **Output:** `cls` on every row of a classified track, other columns and row order unchanged, `track_ids`
   leaves other tracks alone, the headerless `out_file` reads back with `read_track`.
 - **Empty input:** an empty DataFrame and a zero-byte file, each with `out_file` set, return an empty table,
