@@ -11,7 +11,7 @@ from .apply import lineage_of_rows
 from .config import RefineConfig, to_frames
 from .events import Event, EventKind
 from .features import Appearance, dense_track_embeddings, track_embeddings
-from .primitives import iou_matrix, kalman_nis, ramp
+from .primitives import iou_matrix, kalman_nis, mean_velocity, ramp
 from .reporter import advance, extend
 
 STAGE = "switch"
@@ -66,6 +66,47 @@ def _appearance_change(frames, ef, emb, w) -> np.ndarray:
         if m is not None:
             out[i] = 1.0 - float(m[0] @ m[1])
     return out
+
+
+def _heading_reversal(
+    frames: np.ndarray, boxes: np.ndarray, w: int, fps: float, min_speed: float
+) -> tuple[np.ndarray, np.ndarray]:
+    """Return, per row, ``-cos`` of the angle between the mean velocities before and after it.
+
+    The second array is the size of the velocity change in pixels per frame, which is largest at
+    the turn itself (``-cos`` saturates on every row whose two sides point in opposite
+    directions); it breaks ties between equally scored rows.
+
+    The velocity before row ``i`` is the least-squares slope of the box centre over the rows with
+    frames in ``[t - w, t)``, and after it over ``[t, t + w)`` (``t`` is the row's frame, ``w`` a
+    window in frames), so gaps are handled by the frame numbers. Each side needs two rows and a
+    speed of at least ``min_speed`` pixels per second; otherwise the value is NaN, because the
+    heading of a box that barely moves is noise. 1 is a full reversal, 0 a right-angle turn and
+    -1 straight on.
+    """
+    n = len(frames)
+    cx = boxes[:, 0] + boxes[:, 2] / 2.0
+    cy = boxes[:, 1] + boxes[:, 3] / 2.0
+    floor = min_speed / fps  # pixels per frame
+    out = np.full(n, np.nan)
+    change = np.full(n, np.nan)
+
+    def velocity(lo: int, hi: int) -> np.ndarray:
+        return mean_velocity(frames[lo:hi], cx[lo:hi], cy[lo:hi])
+
+    for i in range(1, n):
+        t = frames[i]
+        lo = int(np.searchsorted(frames, t - w, side="left"))
+        hi = int(np.searchsorted(frames, t + w, side="left"))
+        if i - lo < 2 or hi - i < 2:
+            continue
+        before, after = velocity(lo, i), velocity(i, hi)
+        s_before, s_after = float(np.hypot(*before)), float(np.hypot(*after))
+        if s_before < floor or s_after < floor:
+            continue
+        out[i] = -float(before @ after) / (s_before * s_after)
+        change[i] = float(np.hypot(*(after - before)))
+    return out, change
 
 
 def _two_means(emb: np.ndarray, iters: int = 20) -> np.ndarray:
@@ -171,8 +212,19 @@ def _score_track(g, contact, cfg: RefineConfig, fps, appearance, lin, delta, w):
     jump = np.zeros(n)
     ratio = np.maximum(boxes[1:, 2:4], 1e-6) / np.maximum(boxes[:-1, 2:4], 1e-6)
     jump[1:] = np.abs(np.log(ratio)).max(axis=1)
-    mot = np.maximum(
-        np.nan_to_num(ramp(nis, sc.nis_hi / 2.0, sc.nis_hi)), ramp(jump, *sc.ramps["jump"])
+    # a vehicle cannot turn around between two frames: a reversed heading is a motion break
+    # even when the Kalman filter, which only sees a few pixels of surprise, is not alarmed
+    if sc.heading_reversal:
+        reversal, turn = _heading_reversal(frames, boxes, w, fps, sc.heading_min_speed)
+    else:
+        reversal = turn = np.full(n, np.nan)
+    heading = np.nan_to_num(ramp(reversal, *sc.ramps["heading"]))
+    mot = np.maximum.reduce(
+        [
+            np.nan_to_num(ramp(nis, sc.nis_hi / 2.0, sc.nis_hi)),
+            ramp(jump, *sc.ramps["jump"]),
+            heading,
+        ]
     )
     gap = np.zeros(n, dtype=bool)
     gap[1:] = np.diff(frames) > 1
@@ -226,6 +278,9 @@ def _score_track(g, contact, cfg: RefineConfig, fps, appearance, lin, delta, w):
         "mot": mot,
         "nis": nis,
         "jump": jump,
+        "heading": heading,
+        "reversal": reversal,
+        "turn": turn,
         "fired": fired,
         "samples": samples,
         "motion_only": motion_only,
@@ -243,7 +298,11 @@ def _candidates(info, fps, cfg: RefineConfig, nms: int) -> list[int]:
     left = np.concatenate([[-np.inf], s[:-1]])
     right = np.concatenate([s[1:], [-np.inf]])
     peaks = [i for i in range(1, n) if s[i] > 0 and s[i] >= left[i] and s[i] >= right[i]]
-    peaks.sort(key=lambda i: (-s[i], -info["A"][i], -info["mot"][i], frames[i]))
+    # equal scores (a saturated motion break, or the motion-only cap) go to the row where the
+    # velocity changes most, which is the turn itself; only where the heading signal is active,
+    # so a position jump keeps the earliest row
+    turn = np.where(info["heading"] > 0, np.nan_to_num(info["turn"], nan=0.0), 0.0)
+    peaks.sort(key=lambda i: (-s[i], -info["A"][i], -info["mot"][i], -turn[i], frames[i]))
     kept: list[int] = []
     for i in peaks:
         if all(abs(int(frames[i]) - int(frames[j])) >= nms for j in kept):
@@ -522,6 +581,10 @@ def propose_splits(
                     "mot": float(info["mot"][i]),
                     "nis": float(info["nis"][i]),
                     "jump": float(info["jump"][i]),
+                    "heading": float(info["heading"][i]),
+                    "heading_cos": (
+                        -float(info["reversal"][i]) if np.isfinite(info["reversal"][i]) else None
+                    ),
                     "gate": [k for k, v in info["fired"].items() if v[i]],
                     "motion_only": info["motion_only"],
                     **extra,

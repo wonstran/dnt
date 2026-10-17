@@ -40,7 +40,7 @@ The pipeline passes data between stages as **headerless CSV text files**. Each s
 3. **Post-processing** (`track/post_process.py`):
    - `interpolate_tracks_rts` fills gaps with a Kalman RTS smoother. An `interp == 1` flag marks filled frames, and legacy files use `-1` for real frames.
    - `link_tracklets` stitches broken IDs. It applies gating, builds a cost matrix, runs a Hungarian assignment, then merges IDs with union-find.
-   - `track/re_class.py` (`ReClass`) does class re-assignment. It is optional: `track/__init__.py` sets it to `None` if `cython_bbox` is missing.
+   - `track/re_class.py` has two re-classifiers. `ReClass` marks person tracks that ride a bicycle or skateboard (summary CSV `track, cls, avg_score`, used by `refine` as hints). `VehReClass` gives each vehicle track car (2), bus (5) or truck (7) through a size → re-detection → VLM → fallback cascade and writes the class into the track file's `cls`; its VLM layer reuses `dnt.refine.vlm`.
 4. **Filtering**: `dnt.filter.Filter` filters detections or tracks by zones and lines (shapely/geopandas).
 5. **Labeling**: `dnt.label.Labeler` (`label/labeler.py`) renders dets, tracks, and shapes onto video, cuts clips, and exports frames.
 

@@ -1,9 +1,10 @@
+import copy
 import re
 
 import pytest
 import yaml
 
-from dnt.refine.config import RefineConfig, to_frames
+from dnt.refine.config import RefineConfig, VLMConfig, to_frames, vlm_problems
 
 
 def test_to_frames():
@@ -310,3 +311,44 @@ def test_dedup_overlay_and_unknown_key():
 def test_dedup_validation(patch, message):
     with pytest.raises(ValueError, match=message):
         RefineConfig.from_dict({"dedup": patch})
+
+
+def test_vlm_problems_resolves_named_endpoint_without_mutating():
+    vlm = VLMConfig(
+        backend="none",
+        endpoints={
+            "local": {"backend": "openai_compat", "model": "qwen", "base_url": "http://localhost:8000/v1"}
+        },
+        use="local",
+    )
+    before = copy.deepcopy(vlm)
+    problems, resolved = vlm_problems(vlm)
+    assert problems == []
+    assert (resolved.backend, resolved.model, resolved.use, resolved.endpoints) == (
+        "openai_compat",
+        "qwen",
+        None,
+        {},
+    )
+    assert vlm == before
+
+
+def test_vlm_problems_unknown_endpoint():
+    problems, _ = vlm_problems(VLMConfig(use="nope"))
+    assert problems == ["vlm.use 'nope' is not in vlm.endpoints"]
+
+
+def test_vlm_problems_bad_votes_and_blank_strings():
+    problems, resolved = vlm_problems(VLMConfig(votes=0, api_key_env="  "))
+    assert "vlm.votes must be an integer >= 1" in problems
+    assert resolved.api_key_env is None
+
+
+def test_refine_validate_still_reports_vlm_rules():
+    cfg = RefineConfig.defaults("person")
+    cfg.vlm.votes = 0
+    cfg.vlm.backend = "openai_compat"
+    with pytest.raises(ValueError) as exc:
+        cfg.validate()
+    assert "vlm.votes must be an integer >= 1" in str(exc.value)
+    assert "vlm.model is required for this backend" in str(exc.value)

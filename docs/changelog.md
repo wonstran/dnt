@@ -87,8 +87,39 @@
   In-vehicle drops need a context file with the vehicles' boxes (`context_file=`, or
   `--context`); without one the in-vehicle cue is skipped. Applying review decisions follows in
   a later release.
+- `dnt.track.VehReClass` classifies vehicle tracks as car, bus or truck and writes the class into
+  `cls` on every row. Each track goes through up to three layers: a size check (`hv_size`, at
+  least `hv_min_count` real rows) that limits a big vehicle to bus or truck; re-detection on 10
+  large frames spaced at least 5 frames apart, where the winning class needs 30% of the frames;
+  and, when `vlm=` is set, one VLM question per undecided track using `dnt.refine`'s backends and
+  cache. Undecided tracks become truck if flagged heavy, car otherwise. Car means any light
+  vehicle, vans and pickups included, and truck a heavy goods vehicle: since COCO's truck also
+  covers vans and pickups, a bus or truck vote from re-detection decides only for a size-flagged
+  track, and otherwise the VLM is asked (or the track becomes car). `vr.decisions` shows which
+  layer decided each track and, in `redetect_cls`, what re-detection voted.
 
 ### Changed
+- Stage 1 treats a reversal of heading as a motion break (new `switch.heading_reversal`, on for
+  the vehicle target and off for the person target; `switch.heading_min_speed`, default 10
+  pixels per second, and `switch.ramps.heading`, default `[0.3, 0.8]`). A vehicle cannot turn
+  around between two frames, but a few pixels per frame is below the Kalman filter's noise, so
+  two vehicles joined at the edge of the frame (a box truck leaving, a van entering) scored
+  0.62 from appearance alone and were sent to the VLM, which judged the blurry edge crops the
+  same vehicle. With the signal the split scores 0.97 and is accepted. On the 20-minute
+  afternoon vehicle clip it changed one score and added one pending proposal, and on its
+  pedestrians it changed nothing. The two new ledger signals are `heading` and `heading_cos`.
+- Stage 3 refuses a normal-gate link across a reversed heading (new `link.normal_heading_check`,
+  on for the vehicle target and off for the person target; the ledger records `heading`). The
+  angle is between the mean velocity over the last `link.heading_seconds` (new, default 2.0) of
+  one track and the first of the next, because a box clipped by the edge of the frame slows down
+  just before it leaves. Position alone cannot tell an object leaving an edge from another
+  entering there: on the afternoon clip a box truck and a van that the tracker had joined at
+  the edge were split at frame 323 and then re-linked across a one-frame gap, so the split
+  changed nothing. With the check the two stay apart. On that clip it removed 6 link events (1
+  applied, the wrong one; 5 pending proposals with a reversed heading), added none, and left
+  the other applied links as they were. New `link.keep_splits` (off by default) also refuses to
+  link the two halves of a track that stage 1 split. It is off because stage 3 had been healing
+  two false auto-accepted splits on that clip.
 - With a VLM backend and a video, the edits that stay capped below auto-accept without one
   (motion-only ID-switch splits, links across occlusions or with an ambiguous margin, static
   and mixed false-track drops, and rider reclasses without a subtype) are decided by the VLM
@@ -110,10 +141,14 @@
   exits with code 2 and names the extra when the package is missing. `TrackRefiner` accepts
   `encoder_factory=` to supply your own encoder.
 - A context box now counts as a row's own detection, and is left out of the occlusion mask and
-  of the link stage's occluders, when the frame's rows and context boxes, matched one to one,
-  pair it with that row at IoU 0.5 or more. Before, it needed IoU 0.9 with any row, so a
+  of the link stage's occluders, when it overlaps a row of its frame at IoU 0.5 or more. Every
+  such box counts, not only the best one per row, so a multi-class detection file of the same
+  run (car, bus and truck proposals over one vehicle) no longer makes the vehicle look occluded
+  by its own proposals. The cost: a real second object that overlaps a row at IoU 0.5 or more
+  can no longer be told from a duplicate proposal, so it neither flags the row as occluded nor
+  witnesses a gap. Before, it needed IoU 0.9 with any row, so a
   detection file of the same run as context flagged about a fifth of the rows as occluded.
-  Stage 3 drops the rows' own detections from `context` with the same one-to-one matching
+  Stage 3 drops the rows' own detections from `context` with the same rule
   (`refine` does it before the stage; `score_candidates` called directly now expects `context`
   without them), so a detection file of the same run is supported as context: on three real
   pedestrian clips the share of rows flagged as occluded fell from about 20% to 7-11%.
@@ -143,6 +178,11 @@
   prior, `0.8 + 0.2 * b` with `b` 0 for a pair near the image border, so links near the border
   can now be applied too: 2 of the 8 applied links on the audited clips (beginning 98->134,
   middle 221->222) were border links, and both were among the audited, correct ones.
+- `ReClass` reads every sampled frame once, in order, instead of reopening the video per track,
+  and skips a frame the video cannot decode. With `verbose=True` its progress bar counts frames,
+  not tracks. A video OpenCV cannot open now raises `ValueError`; before, every track silently got
+  `default_class`. A summary warning is logged when sampled frames cannot be read.
+- `dnt.track.ReClass` is always importable; the fallback that set it to `None` is removed.
 
 ## 0.3.4 — 2026-10-01
 

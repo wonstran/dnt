@@ -6,12 +6,15 @@ from dnt.refine.events import Event, EventKind
 from dnt.refine.vlm import VLMAnswer
 from dnt.refine.vlm.cache import AnswerCache
 from dnt.refine.vlm.prompts import (
+    HEAVY_CLASS,
     PERSON_SCREEN,
     RIDER_OPTIONS,
     SAME,
+    VEHICLE_CLASS,
     VEHICLE_SCREEN,
     build_prompt,
     options_for,
+    vehicle_class_prompt,
 )
 
 
@@ -147,3 +150,24 @@ def test_prompts_name_the_options_and_the_reply_format(ev, target, needle):
         assert o in p
     assert '"answer"' in p and '"confidence"' in p and '"reason"' in p
     assert p == build_prompt(ev, target, options, fps=10.0)  # deterministic
+
+
+def test_vehicle_class_prompt_lists_options_and_reply_format():
+    text = vehicle_class_prompt(VEHICLE_CLASS)
+    assert "- car:" in text and "- bus:" in text and "- truck:" in text and "- unclear:" in text
+    assert text.endswith('"reason": "<one short sentence>"}')
+    assert "- car:" not in vehicle_class_prompt(HEAVY_CLASS)
+
+
+def test_vehicle_glossary_is_light_vs_heavy():
+    text = vehicle_class_prompt(VEHICLE_CLASS)
+    lines = text.splitlines()
+    assert (
+        "- car: a light vehicle: passenger car, SUV, minivan, pickup truck (e.g. Ford F-150, "
+        "Chevy Silverado), or van. Note: Pickup trucks MUST be answered as car, NEVER as truck."
+    ) in lines
+    assert "- bus: a bus or coach that carries many passengers (not a passenger van)" in lines
+    assert (
+        "- truck: a heavy commercial goods vehicle: box truck, dump truck, tanker, semi-trailer "
+        "(NOT a pickup truck or van)."
+    ) in lines

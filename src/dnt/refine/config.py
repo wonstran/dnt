@@ -160,12 +160,15 @@ class SwitchConfig:
     bimodal_silhouette_min: float = 0.25
     swap_boost: float = 0.2
     min_crop_px: int = 40
+    heading_reversal: bool = False
+    heading_min_speed: float = 10.0
     ramps: dict[str, list[float]] = field(
         default_factory=lambda: {
             "z_app": [2.0, 5.0],
             "silhouette": [0.25, 0.5],
             "jump": [0.15, 0.4],
             "cross": [0.0, 0.4],
+            "heading": [0.3, 0.8],
         }
     )
 
@@ -272,6 +275,9 @@ class LinkConfig:
     border_margin: float = 0.5
     speed_seconds: float = 1.0
     heading_min_speed: float = 0.2
+    normal_heading_check: bool = False
+    heading_seconds: float = 2.0
+    keep_splits: bool = False
     n_alternatives: int = 2
     min_crop_px: int = 0
 
@@ -359,6 +365,87 @@ class VLMConfig:
         return out
 
 
+def vlm_problems(vlm: VLMConfig) -> tuple[list[str], VLMConfig]:
+    """Check VLM settings and resolve the endpoint selected by ``use``.
+
+    Parameters
+    ----------
+    vlm : VLMConfig
+        The settings to check. They are not changed.
+
+    Returns
+    -------
+    tuple of (list of str, VLMConfig)
+        The broken rules (empty when the settings are valid), and a deep copy with blank
+        ``api_key_env``, ``api_key_file`` and ``base_url`` set to None and, when the endpoints
+        are valid, the chosen endpoint applied (see ``VLMConfig.resolve``).
+
+    """
+    out = copy.deepcopy(vlm)
+    for name in ("api_key_env", "api_key_file", "base_url"):
+        v = getattr(out, name)
+        if isinstance(v, str) and not v.strip():
+            setattr(out, name, None)  # "" from YAML: the default (variable, endpoint)
+    p: list[str] = []
+    endpoints_ok = True
+    for ename, ep in out.endpoints.items():
+        bad = set(ep) - _ENDPOINT_KEYS
+        if bad:
+            p.append(f"vlm.endpoints.{ename}: unknown keys {sorted(bad)}")
+            endpoints_ok = False
+    if out.use is not None and out.use not in out.endpoints:
+        p.append(f"vlm.use '{out.use}' is not in vlm.endpoints")
+        endpoints_ok = False
+    vl = out.resolve() if endpoints_ok else out
+    if vl.backend not in BACKENDS:
+        p.append(f"vlm.backend must be one of {BACKENDS}")
+    if vl.backend not in ("none", "anthropic") and not vl.model:
+        p.append("vlm.model is required for this backend")
+
+    def _num(x):
+        return isinstance(x, int | float) and not isinstance(x, bool) and math.isfinite(x)
+
+    if not (isinstance(vl.votes, int) and not isinstance(vl.votes, bool) and vl.votes >= 1):
+        p.append("vlm.votes must be an integer >= 1")
+    if not (_num(vl.min_conf) and 0.0 <= vl.min_conf <= 1.0):
+        p.append("vlm.min_conf must be a number in [0, 1]")
+    if not (
+        isinstance(vl.max_calls, int) and not isinstance(vl.max_calls, bool) and vl.max_calls >= 0
+    ):
+        p.append("vlm.max_calls must be an integer >= 0")
+    if not (
+        isinstance(vl.max_concurrency, int)
+        and not isinstance(vl.max_concurrency, bool)
+        and vl.max_concurrency >= 1
+    ):
+        p.append("vlm.max_concurrency must be an integer >= 1")
+    if not isinstance(vl.extra_body, dict) or not _json_ok(vl.extra_body):
+        p.append("vlm.extra_body must be a mapping of plain JSON values")
+    mt = vl.max_tokens
+    if mt is not None and not (isinstance(mt, int) and not isinstance(mt, bool) and mt >= 1):
+        p.append("vlm.max_tokens must be a whole number >= 1 (or unset)")
+    if not (_num(vl.timeout_s) and vl.timeout_s > 0):
+        p.append("vlm.timeout_s must be a number > 0")
+    if not (_num(vl.vote_temperature) and vl.vote_temperature >= 0):
+        p.append("vlm.vote_temperature must be a number >= 0")
+    if not (isinstance(vl.cache_dir, str) and vl.cache_dir.strip()):
+        p.append("vlm.cache_dir must be a non-empty string")
+    if vl.api_key_env is not None and not (
+        isinstance(vl.api_key_env, str) and _ENV_NAME.fullmatch(vl.api_key_env)
+    ):
+        # never echo the value: a key pasted here would land in the message and the ledger
+        p.append(
+            "vlm.api_key_env must be the name of an environment variable (letters, digits "
+            "and underscores, not starting with a digit), not the key itself"
+        )
+    p.extend(_url_problems(vl.base_url))
+    if vl.api_key_file is not None and not isinstance(vl.api_key_file, str):
+        p.append("vlm.api_key_file must be the path of a file that holds the key")
+    elif isinstance(vl.api_key_file, str) and vl.api_key_file.strip().startswith("sk-"):
+        p.append("vlm.api_key_file must be the path of a file that holds the key, not the key")
+    return p, vl
+
+
 @dataclass(kw_only=True)
 class RefineConfig:
     """All refinement settings for one target (person or vehicle).
@@ -402,6 +489,8 @@ class RefineConfig:
         if target == "vehicle":
             cfg.class_ids = [2, 5, 7]
             cfg.link.class_groups = [[2, 7]]
+            cfg.switch.heading_reversal = True  # a vehicle cannot turn around between two frames
+            cfg.link.normal_heading_check = True
         return cfg
 
     @classmethod
@@ -446,20 +535,8 @@ class RefineConfig:
             p.append(f"target must be one of {TARGETS}")
         if self.encoder.kind not in ENCODERS:
             p.append(f"encoder.kind must be one of {ENCODERS}")
-        vlm = self.vlm
-        endpoints_ok = True
-        for ename, ep in vlm.endpoints.items():
-            bad = set(ep) - _ENDPOINT_KEYS
-            if bad:
-                p.append(f"vlm.endpoints.{ename}: unknown keys {sorted(bad)}")
-                endpoints_ok = False
-        if vlm.use is not None and vlm.use not in vlm.endpoints:
-            p.append(f"vlm.use '{vlm.use}' is not in vlm.endpoints")
-            endpoints_ok = False
-        if endpoints_ok:
-            vlm = vlm.resolve()
-        if vlm.backend not in BACKENDS:
-            p.append(f"vlm.backend must be one of {BACKENDS}")
+        vlm_p, _ = vlm_problems(self.vlm)
+        p.extend(vlm_p)
         for name in ("switch", "link"):
             mcp = getattr(self, name).min_crop_px
             if isinstance(mcp, bool) or not isinstance(mcp, int) or mcp < 0:
@@ -498,53 +575,6 @@ class RefineConfig:
             seen |= set(group)
         if self.encoder.kind == "reid" and self.target == "vehicle" and not self.encoder.weights:
             p.append("encoder.weights is required for reid with the vehicle target")
-        if vlm.backend not in ("none", "anthropic") and not vlm.model:
-            p.append("vlm.model is required for this backend")
-        vl = vlm
-
-        def _num(x):
-            return isinstance(x, int | float) and not isinstance(x, bool) and math.isfinite(x)
-
-        if not (isinstance(vl.votes, int) and not isinstance(vl.votes, bool) and vl.votes >= 1):
-            p.append("vlm.votes must be an integer >= 1")
-        if not (_num(vl.min_conf) and 0.0 <= vl.min_conf <= 1.0):
-            p.append("vlm.min_conf must be a number in [0, 1]")
-        if not (
-            isinstance(vl.max_calls, int)
-            and not isinstance(vl.max_calls, bool)
-            and vl.max_calls >= 0
-        ):
-            p.append("vlm.max_calls must be an integer >= 0")
-        if not (
-            isinstance(vl.max_concurrency, int)
-            and not isinstance(vl.max_concurrency, bool)
-            and vl.max_concurrency >= 1
-        ):
-            p.append("vlm.max_concurrency must be an integer >= 1")
-        if not isinstance(vl.extra_body, dict) or not _json_ok(vl.extra_body):
-            p.append("vlm.extra_body must be a mapping of plain JSON values")
-        mt = vl.max_tokens
-        if mt is not None and not (isinstance(mt, int) and not isinstance(mt, bool) and mt >= 1):
-            p.append("vlm.max_tokens must be a whole number >= 1 (or unset)")
-        if not (_num(vl.timeout_s) and vl.timeout_s > 0):
-            p.append("vlm.timeout_s must be a number > 0")
-        if not (_num(vl.vote_temperature) and vl.vote_temperature >= 0):
-            p.append("vlm.vote_temperature must be a number >= 0")
-        if not (isinstance(vl.cache_dir, str) and vl.cache_dir.strip()):
-            p.append("vlm.cache_dir must be a non-empty string")
-        if vl.api_key_env is not None and not (
-            isinstance(vl.api_key_env, str) and _ENV_NAME.fullmatch(vl.api_key_env)
-        ):
-            # never echo the value: a key pasted here would land in the message and the ledger
-            p.append(
-                "vlm.api_key_env must be the name of an environment variable (letters, digits "
-                "and underscores, not starting with a digit), not the key itself"
-            )
-        p.extend(_url_problems(vl.base_url))
-        if vl.api_key_file is not None and not isinstance(vl.api_key_file, str):
-            p.append("vlm.api_key_file must be the path of a file that holds the key")
-        elif isinstance(vl.api_key_file, str) and vl.api_key_file.strip().startswith("sk-"):
-            p.append("vlm.api_key_file must be the path of a file that holds the key, not the key")
         ramps = {f"switch.ramps.{k}": v for k, v in self.switch.ramps.items()}
         ramps |= {f"screen.ramps.{k}": v for k, v in sc.ramps.items()}
         ramps |= {"orphan.ramp": self.orphan.ramp, "hints.reclass_ramp": self.hints.reclass_ramp}
@@ -566,12 +596,23 @@ class RefineConfig:
             "link.max_gap_occluded": lc.max_gap_occluded,
             "link.static_seconds": lc.static_seconds,
             "link.speed_seconds": lc.speed_seconds,
+            "link.heading_seconds": lc.heading_seconds,
         }
         if self.fill.max_gap is not None:
             durations["fill.max_gap"] = self.fill.max_gap
         for name, v in durations.items():
             if isinstance(v, int | float) and not v > 0:
                 p.append(f"{name} must be a positive number of seconds, not {v}")
+        hs = self.switch.heading_min_speed
+        if not (
+            isinstance(hs, int | float)
+            and not isinstance(hs, bool)
+            and math.isfinite(hs)
+            and hs >= 0
+        ):
+            p.append(
+                f"switch.heading_min_speed must be a number of pixels per second >= 0, not {hs}"
+            )
         if isinstance(lc.max_passes, int) and lc.max_passes < 1:
             p.append(f"link.max_passes must be at least 1, not {lc.max_passes}")
         if self.fps is not None and self.fps <= 0:

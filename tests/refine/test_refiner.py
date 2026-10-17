@@ -1242,18 +1242,25 @@ def test_own_detections_in_the_context_do_not_witness_an_occlusion(tmp_path):
     assert Ledger.read(res.ledger_path).header["inputs"]["context"]["format"] == "dets"
     assert _by(res, "link") == []
     assert res.tracks["track"].nunique() == 3
-    # 12 px closer: IoU 0.62, still track 3's own detection (one-to-one match at IoU >= 0.5,
+    # 12 px closer: IoU 0.62, still track 3's own detection (a box over a row at IoU >= 0.5,
     # ruling R6; the old 0.9 cutoff took it for an occluder)
     assert _by(_beside_the_path(tmp_path, -12.0), "link") == []
     # 20 px closer: IoU 0.44, a different box (a genuine occluder) -> the gap is witnessed
     _witnessed(_beside_the_path(tmp_path, -20.0))
 
 
-def test_a_second_box_over_a_row_with_its_own_detection_still_witnesses(tmp_path):
-    # track 3's own detection is exact; another box 12 px closer to the path (IoU 0.62 with
-    # track 3, 73% over each hidden box) is not track 3's: it witnesses the gap. Stage 3 must
-    # not match it again against the edited rows once the own detection is gone.
-    _witnessed(_beside_the_path(tmp_path, 0.0, extra=-12.0))
+def test_a_second_box_below_the_match_iou_over_a_row_with_its_own_detection_witnesses(tmp_path):
+    # track 3's own detection is exact; another box 20 px closer to the path (IoU 0.43 with
+    # track 3) is not track 3's: it witnesses the gap. Stage 3 must not match it again against
+    # the edited rows once the own detection is gone.
+    _witnessed(_beside_the_path(tmp_path, 0.0, extra=-20.0))
+
+
+def test_a_second_box_at_the_match_iou_over_a_row_is_a_duplicate_and_witnesses_nothing(tmp_path):
+    # the same, 12 px closer: IoU 0.62 with track 3, so it is a duplicate proposal over the
+    # row (for example another class from a multi-class detector), whatever it covers of the
+    # gap. A real second pedestrian that close cannot be told apart by IoU: the accepted cost
+    assert _by(_beside_the_path(tmp_path, 0.0, extra=-12.0), "link") == []
 
 
 def test_screening_cues_still_see_context_boxes_that_duplicate_a_row(tmp_path):

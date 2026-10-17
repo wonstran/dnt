@@ -93,6 +93,30 @@ def _read_numeric_csv(
     return num
 
 
+def filled_mask(df: pd.DataFrame) -> np.ndarray:
+    """Return a boolean array that is True where a row is a filled (interpolated) row.
+
+    The flag is column 8: ``r3`` in the tracker layout and ``interp`` in interpolated output.
+    A row is filled when either column holds 1; a missing or non-numeric value counts as real.
+
+    Parameters
+    ----------
+    df : pandas.DataFrame
+        A track table with named columns.
+
+    Returns
+    -------
+    numpy.ndarray
+        One ``bool`` per row.
+
+    """
+    filled = np.zeros(len(df), dtype=bool)
+    for flag in ("r3", "interp"):
+        if flag in df.columns:
+            filled |= (pd.to_numeric(df[flag], errors="coerce").fillna(-1) == 1).to_numpy()
+    return filled
+
+
 def to_work(df: pd.DataFrame, *, source: str = "tracks") -> TrackInput:
     """Build a work table from a raw 6-10 column track table (positional or named).
 
@@ -107,10 +131,7 @@ def to_work(df: pd.DataFrame, *, source: str = "tracks") -> TrackInput:
     for c, default in (("score", -1.0), ("cls", -1), ("r4", -1)):
         if c not in df.columns:
             df[c] = default
-    filled = np.zeros(len(df), dtype=bool)
-    for flag in ("r3", "interp"):
-        if flag in df.columns:
-            filled |= (pd.to_numeric(df[flag], errors="coerce").fillna(-1) == 1).to_numpy()
+    filled = filled_mask(df)
     n_filled = int(filled.sum())
     df = df.loc[~filled]
     dup = df.duplicated(["track", "frame"], keep="first")

@@ -897,6 +897,62 @@ class Detector:
             return_df=return_df,
         )
 
+    def _predict_rows(self, image: np.ndarray, frame: int) -> list[dict]:
+        """Predict one BGR image; return per-box dicts for `_results_to_df()`."""
+        preds = self.model.predict(
+            image,
+            verbose=False,
+            conf=self.conf,
+            iou=self.nms,
+            max_det=self.max_det,
+            device=self.device,
+            imgsz=self.imgsz,
+            classes=self.classes,
+            rect=self.rect,
+            agnostic_nms=self.agnostic_nms,
+            **self._precision_kwargs,
+            embed=self.embed,
+        )
+        rows: list[dict] = []
+        boxes = preds[0].boxes
+        if boxes is not None and len(boxes) > 0:
+            xyxy = boxes.xyxy.cpu().numpy()  # (N,4)
+            confs = boxes.conf.cpu().numpy()  # (N,)
+            clss = boxes.cls.cpu().numpy().astype(int)  # (N,)
+
+            for (x1, y1, x2, y2), cf, c in zip(xyxy, confs, clss, strict=True):
+                rows.append({
+                    "frame": frame,
+                    "res": -1,
+                    "x": float(x1),
+                    "y": float(y1),
+                    "x2": float(x2),
+                    "y2": float(y2),
+                    "conf": float(cf),
+                    "class": int(c),
+                })
+        return rows
+
+    def detect_image(self, image: np.ndarray, frame: int = 0) -> pd.DataFrame:
+        """Run object detection on one already-decoded image.
+
+        Parameters
+        ----------
+        image : numpy.ndarray
+            BGR image, as read by OpenCV.
+        frame : int, optional
+            Value written to the ``frame`` column. Default is 0.
+
+        Returns
+        -------
+        pandas.DataFrame
+            DataFrame with columns
+            `frame, res, x, y, w, h, conf, class`, rounded as in `detect_frames`.
+            Empty, with those columns, when nothing is detected.
+
+        """
+        return self._results_to_df(self._predict_rows(image, frame))
+
     def detect_frames(
         self,
         input_video: str,
@@ -951,38 +1007,7 @@ class Detector:
                 # e.g. frame index out of range
                 continue
 
-            preds = self.model.predict(
-                frame,
-                verbose=False,
-                conf=self.conf,
-                iou=self.nms,
-                max_det=self.max_det,
-                device=self.device,
-                imgsz=self.imgsz,
-                classes=self.classes,
-                rect=self.rect,
-                agnostic_nms=self.agnostic_nms,
-                **self._precision_kwargs,
-                embed=self.embed,
-            )
-            det = preds[0]
-            boxes = det.boxes
-            if boxes is not None and len(boxes) > 0:
-                xyxy = boxes.xyxy.cpu().numpy()  # (N,4)
-                confs = boxes.conf.cpu().numpy()  # (N,)
-                clss = boxes.cls.cpu().numpy().astype(int)  # (N,)
-
-                for (x1, y1, x2, y2), cf, c in zip(xyxy, confs, clss, strict=True):
-                    results.append({
-                        "frame": pos_frame,
-                        "res": -1,
-                        "x": float(x1),
-                        "y": float(y1),
-                        "x2": float(x2),
-                        "y2": float(y2),
-                        "conf": float(cf),
-                        "class": int(c),
-                    })
+            results.extend(self._predict_rows(frame, pos_frame))
 
             if pbar is not None:
                 pbar.update()
