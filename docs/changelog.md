@@ -3,6 +3,15 @@
 ## Unreleased
 
 ### New
+- `ReClass` classifies riders. It now matches bicycle, motorcycle and skateboard/scooter
+  detections (`match_class` defaults to `[1, 3, 36]`; it was `[1, 36]`) and can ask a VLM about
+  tracks the overlap does not settle. A class that is the only one to overlap on at least
+  `min_support` (default 0.5) of the sampled frames is accepted; a weak overlap, or several
+  classes at once, goes to the model, which answers pedestrian, cyclist, motorcycle rider,
+  scooter rider or unclear. A track with no overlap stays a pedestrian and is never sent. New
+  arguments `vlm`, `vlm_crops`, `vlm_api_key`, `vlm_backend_factory` and `min_support`, and a
+  `decisions` table. Without `vlm`, the best overlap still wins, so the output is unchanged
+  apart from the added motorcycle class.
 - `dnt.refine` merges interleaved duplicate tracks. A tracker sometimes alternates IDs on one
   person from frame to frame; the fill stage then interpolated each ID into the other's frames,
   so the output showed overlapping boxes on one person. The new `dedup` stage runs between

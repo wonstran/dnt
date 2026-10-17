@@ -1,7 +1,8 @@
 """Provide ReClass and VehReClass, which re-classify object tracks from video frames.
 
-``ReClass`` matches a track's boxes against detections of chosen classes (for example
-bicycles and scooters) and assigns the best-matching class. ``VehReClass`` classifies vehicle
+``ReClass`` matches a person track's boxes against detections of bicycles, motorcycles and
+skateboards or scooters, optionally asks a vision-language model about ambiguous tracks, and
+assigns the rider class. ``VehReClass`` classifies vehicle
 tracks as car, bus or truck with a cascade of a size rule, re-detection voting, an optional
 vision-language model, and a fallback.
 """
@@ -220,7 +221,7 @@ def _tile(crops: list[np.ndarray]) -> bytes | None:
     return buf.tobytes() if ok else None
 
 
-def _prepare_vlm(vlm, api_key: str | None, *, check: bool):
+def _prepare_vlm(vlm, api_key: str | None, *, check: bool, owner: str = "VehReClass"):
     """Validate and resolve a copy of ``vlm``; with ``check``, preflight it.
 
     Raises ``ValueError`` for invalid settings, a config resolving to backend ``none``, or a
@@ -237,33 +238,33 @@ def _prepare_vlm(vlm, api_key: str | None, *, check: bool):
         from ..refine import vlm as vlm_mod
 
         vlm_mod.check_vlm_dependencies(cfg)
-        _check_vlm_key(cfg, api_key)
+        _check_vlm_key(cfg, api_key, owner)
     return cfg
 
 
-def _missing_key_message(backend: str, env: str) -> str:
-    """Return the error for a backend with no API key; it names the ways VehReClass takes one."""
+def _missing_key_message(backend: str, env: str, owner: str = "VehReClass") -> str:
+    """Return the error for a backend with no API key; it names the ways ``owner`` takes one."""
     return (
-        f"VehReClass: vlm.backend {backend} needs an API key and none was found. Pass it as "
-        f"VehReClass(..., vlm_api_key=...), set vlm.api_key_file to a file that holds it, "
+        f"{owner}: vlm.backend {backend} needs an API key and none was found. Pass it as "
+        f"{owner}(..., vlm_api_key=...), set vlm.api_key_file to a file that holds it, "
         f"or set the {env} environment variable (vlm.api_key_env names another variable)"
     )
 
 
-def _check_vlm_key(cfg, api_key: str | None) -> None:
+def _check_vlm_key(cfg, api_key: str | None, owner: str = "VehReClass") -> None:
     """Raise ``ValueError`` when the backend needs a key and none is found (no network)."""
     from ..refine.vlm import resolve_api_key
 
     if cfg.backend == "anthropic":
         if resolve_api_key(cfg, "ANTHROPIC_API_KEY", api_key) is None:
             raise ValueError(
-                _missing_key_message("anthropic", cfg.api_key_env or "ANTHROPIC_API_KEY")
+                _missing_key_message("anthropic", cfg.api_key_env or "ANTHROPIC_API_KEY", owner)
             )
     elif cfg.backend == "openai_compat":
         key = resolve_api_key(cfg, "OPENAI_API_KEY", api_key)
         if key is None and not (cfg.base_url or os.environ.get("OPENAI_BASE_URL")):
             raise ValueError(
-                _missing_key_message("openai_compat", cfg.api_key_env or "OPENAI_API_KEY")
+                _missing_key_message("openai_compat", cfg.api_key_env or "OPENAI_API_KEY", owner)
                 + "; a local server needs vlm.base_url instead"
             )
 
@@ -274,16 +275,29 @@ class _VLMResult(NamedTuple):
     error: str | None
 
 
-def _ask_vlm(cfg, backend_factory, input_video: str, requests) -> dict:
+def _ask_vlm(
+    cfg, backend_factory, input_video: str, requests, *, kind: str = "vehclass", options=None
+) -> dict:
     """Ask one question per track about a tile of its crops.
 
-    ``requests`` maps a track ID to its crop samples ``[(frame, box), ...]``. Every question has
-    the options car, bus, truck and unclear. A track with no usable crop is left out. The runner
-    is built only when there is a question, and it is always closed.
+    ``requests`` maps a track ID to its crop samples ``[(frame, box), ...]``. By default every
+    question is the vehicle question with the options car, bus, truck and unclear; with
+    ``kind="riderclass"`` it is the rider question, whose ``options`` the caller gives. A track
+    with no usable crop is left out. The runner is built only when there is a question, and it
+    is always closed.
     """
     from ..refine.vlm.cache import AnswerCache
-    from ..refine.vlm.prompts import VEHICLE_CLASS, vehicle_class_prompt
+    from ..refine.vlm.prompts import (
+        RIDER_CLASS,
+        VEHICLE_CLASS,
+        rider_class_prompt,
+        vehicle_class_prompt,
+    )
     from ..refine.vlm.runner import Question, VLMRunner
+
+    rider = kind == "riderclass"
+    ask_options = list(options or (RIDER_CLASS if rider else VEHICLE_CLASS))
+    prompt = (rider_class_prompt if rider else vehicle_class_prompt)(ask_options)
 
     want: dict[int, list[tuple[object, tuple]]] = {}
     for t, samples in requests.items():
@@ -314,13 +328,12 @@ def _ask_vlm(cfg, backend_factory, input_video: str, requests) -> dict:
         if image is None:
             log.debug("track %s has no usable crop for the VLM", t)
             continue
-        options = list(VEHICLE_CLASS)
         questions.append(
             Question(
-                tag=f"vehclass:{_tag_id(t)}",
+                tag=f"{kind}:{_tag_id(t)}",
                 image=image,
-                prompt=vehicle_class_prompt(options),
-                options=options,
+                prompt=prompt,
+                options=list(ask_options),
             )
         )
         asked.append(t)  # the original ID, kept as is; the tag is only diagnostic text
@@ -340,6 +353,10 @@ def _ask_vlm(cfg, backend_factory, input_video: str, requests) -> dict:
     return out
 
 
+#: Rider answers and the COCO class each stands for (scooter shares skateboard's class).
+_RIDER_ANSWER = {"cyclist": 1, "motorcycle_rider": 3, "scooter_rider": 36}
+
+
 def _tag_id(t) -> str:
     """Display a track ID for a question tag: an integral float such as ``1.0`` shows as ``1``."""
     if isinstance(t, numbers.Real) and not isinstance(t, bool) and float(t).is_integer():
@@ -348,7 +365,15 @@ def _tag_id(t) -> str:
 
 
 class ReClass:
-    """ReClass re-classifies object tracks in video frames using detection results.
+    """ReClass re-classifies person tracks as riders using detection results and a VLM.
+
+    A track's largest boxes are matched against detections of ``match_class`` (bicycle,
+    motorcycle, skateboard/scooter) by overlap. A class that overlaps on at least
+    ``min_support`` of the sampled frames, and is the only one to overlap, is accepted. With a
+    ``vlm``, any other overlap (weak, or several classes at once) is put to the model, which
+    answers pedestrian, cyclist, motorcycle_rider, scooter_rider or unclear; a track with no
+    overlap at all stays ``default_class`` and is never sent to it. Without a ``vlm``, the
+    class with the best overlap wins whatever its support.
 
     Attributes
     ----------
@@ -362,6 +387,13 @@ class ReClass:
         Default class to assign if no match is found.
     match_class : list
         List of classes to match during re-classification.
+    min_support : float
+        Share of the sampled frames a class must overlap on to be accepted without the VLM.
+    vlm : dnt.refine.config.VLMConfig or None
+        VLM settings, resolved; None turns the VLM off. Its ``min_conf`` is the answer threshold.
+    decisions : pd.DataFrame
+        Per-track reasons of the last ``re_classify`` call: ``track, cls, layer, support,
+        vlm_answer, vlm_conf`` with ``layer`` one of ``overlap``, ``vlm`` and ``default``.
 
     Methods
     -------
@@ -387,6 +419,12 @@ class ReClass:
         device: str = "auto",
         default_class: int = 0,
         match_class: list | None = None,
+        *,
+        min_support: float = 0.5,
+        vlm: "VLMConfig | None" = None,
+        vlm_crops: int = 3,
+        vlm_api_key: str | None = None,
+        vlm_backend_factory: Callable | None = None,
     ) -> None:
         """Re-classify tracks based on detection results.
 
@@ -405,14 +443,61 @@ class ReClass:
         default_class : int
             Default class to assign if no match found, default 0 (pedestrian)
         match_class : list
-            List of classes to match, default [1, 36] (bicycle, skateboard/scooter)
+            List of classes to match, default [1, 3, 36] (bicycle, motorcycle,
+            skateboard/scooter)
+        min_support : float
+            Share of the sampled frames a class must overlap on to be accepted without the
+            VLM, in (0, 1], default 0.5. It only matters when ``vlm`` is given.
+        vlm : dnt.refine.config.VLMConfig or None
+            Settings of the model that decides ambiguous tracks; None (default) turns it off.
+        vlm_crops : int
+            Crops tiled into the one image per track, default 3
+        vlm_api_key : str or None
+            API key; takes precedence over ``vlm.api_key_file`` and the environment. Not allowed
+            together with ``vlm_backend_factory``.
+        vlm_backend_factory : callable or None
+            Builds the backend from the resolved ``VLMConfig`` (tests); skips the preflight.
+
+        Raises
+        ------
+        ValueError
+            For an invalid ``min_support`` or ``vlm_crops``, an invalid VLM config, one
+            resolving to backend ``none``, a missing API key, or ``vlm_api_key`` given together
+            with ``vlm_backend_factory``.
+        ImportError
+            When the VLM backend's package is not installed.
 
         """
-        self.detector = Detector(model=model, weights=weights, device=device)
+        if vlm_api_key is not None and vlm_backend_factory is not None:
+            raise ValueError(
+                "vlm_api_key is ignored when vlm_backend_factory builds the backend; pass one"
+            )
+        if not (isinstance(min_support, numbers.Real) and 0 < min_support <= 1):
+            raise ValueError(f"min_support must be in (0, 1], not {min_support!r}")
+        if not (isinstance(vlm_crops, numbers.Integral) and vlm_crops >= 1):
+            raise ValueError(f"vlm_crops must be an integer >= 1, not {vlm_crops!r}")
         self.num_frames = num_frames
         self.threshold = threshold
         self.default_class = default_class
-        self.match_class = match_class if match_class is not None else [1, 36]
+        self.match_class = match_class if match_class is not None else [1, 3, 36]
+        self.min_support = min_support
+        self.vlm_crops = vlm_crops
+        self._vlm_api_key = vlm_api_key
+        self._vlm_backend_factory = vlm_backend_factory
+        self.vlm = (
+            None
+            if vlm is None
+            else _prepare_vlm(vlm, vlm_api_key, check=vlm_backend_factory is None, owner="ReClass")
+        )
+        self.detector = Detector(model=model, weights=weights, device=device)
+        self.decisions = pd.DataFrame(columns=_RIDER_DECISION_COLUMNS)
+
+    def _backend_factory(self):
+        if self._vlm_backend_factory is not None:
+            return self._vlm_backend_factory
+        from ..refine.vlm import make_backend
+
+        return lambda cfg: make_backend(cfg, api_key=self._vlm_api_key)
 
     def match_mmv(self, track: pd.DataFrame, dets: pd.DataFrame) -> tuple[bool, float]:
         """Match track bboxes to detection bboxes and compute average overlap score.
@@ -439,8 +524,13 @@ class ReClass:
         The matching uses IoB metric from the engine.iob module.
 
         """
+        _, avg_score = self._overlap(track, dets)
+        return avg_score >= self.threshold, avg_score
+
+    def _overlap(self, track: pd.DataFrame, dets: pd.DataFrame) -> tuple[int, float]:
+        """Return the frames whose best IoB reaches the threshold, and their mean IoB."""
         if track.empty or dets.empty:
-            return False, 0.0
+            return 0, 0.0
 
         score = 0.0
         cnt = 0
@@ -456,10 +546,33 @@ class ReClass:
                         score += max_overlap
                         cnt += 1
 
-        avg_score = score / cnt if cnt > 0 else 0.0
-        hit = avg_score >= self.threshold
+        return cnt, (score / cnt if cnt > 0 else 0.0)
 
-        return hit, avg_score
+    def _ask(self, rows: dict, pending: list, tracks: pd.DataFrame, input_video: str) -> None:
+        """Put the ambiguous tracks to the VLM and apply the answers it is sure of."""
+        by_answer = {a: c for a, c in _RIDER_ANSWER.items() if c in self.match_class}
+        options = ["pedestrian", *by_answer, "unclear"]
+        requests = {
+            t: _spaced_sample(tracks[tracks["track"] == t], self.vlm_crops, 0) for t in pending
+        }
+        answers = _ask_vlm(
+            self.vlm, self._backend_factory(), input_video, requests,
+            kind="riderclass", options=options,
+        )
+        for t, a in answers.items():
+            r = rows[t]
+            if a.error:  # no answer was given; the warning already names the error
+                continue
+            r["vlm_answer"], r["vlm_conf"] = a.answer, a.confidence
+            if not (math.isfinite(a.confidence) and a.confidence >= self.vlm.min_conf):
+                continue
+            if a.answer == "pedestrian":
+                r.update(cls=self.default_class, avg_score=0.0, layer="vlm")
+            elif a.answer in by_answer:
+                cls = by_answer[a.answer]
+                r.update(
+                    cls=cls, layer="vlm", avg_score=max(r["overlap"].get(cls, 0.0), a.confidence)
+                )
 
     def re_classify(
         self,
@@ -554,25 +667,40 @@ class ReClass:
                 self.detector, reader, frames, verbose=verbose, desc="Re-classifying tracks"
             )
 
-        results = []
+        rows: dict = {}
+        pending: list = []
         for track_id in track_ids:
             top_frames = samples[track_id]
             dets = _dets_for(by_frame, top_frames["frame"])
 
             matched = []
             for cls in self.match_class:
-                match_dets = dets[dets["class"] == cls]
-                hit, avg_score = self.match_mmv(top_frames, match_dets)
-                if hit:
-                    matched.append((cls, avg_score))
+                count, avg_score = self._overlap(top_frames, dets[dets["class"] == cls])
+                if count and avg_score >= self.threshold:
+                    matched.append((cls, avg_score, count / len(top_frames)))
 
-            if len(matched) > 0:
-                cls, avg_score = max(matched, key=lambda x: x[1])
-            else:
-                cls = self.default_class
-                avg_score = 0
+            r = {
+                "track": track_id,
+                "cls": self.default_class,
+                "avg_score": 0.0,
+                "layer": "default",
+                "support": 0.0,
+                "vlm_answer": None,
+                "vlm_conf": math.nan,
+            }
+            if matched:
+                cls, avg_score, support = max(matched, key=lambda x: x[1])
+                r.update(cls=cls, avg_score=avg_score, layer="overlap", support=support)
+                if self.vlm is not None and (len(matched) > 1 or support < self.min_support):
+                    pending.append(track_id)
+            r["overlap"] = {cls: avg for cls, avg, _ in matched}
+            rows[track_id] = r
 
-            results.append([track_id, cls, round(avg_score, 2)])
+        if pending:
+            self._ask(rows, pending, tracks, str(input_video))
+
+        results = [[r["track"], r["cls"], round(r["avg_score"], 2)] for r in rows.values()]
+        self.decisions = pd.DataFrame(list(rows.values()), columns=_RIDER_DECISION_COLUMNS)
 
         df = pd.DataFrame(results, columns=["track", "cls", "avg_score"])
         if out_file:
@@ -581,6 +709,7 @@ class ReClass:
         return df
 
 
+_RIDER_DECISION_COLUMNS = ["track", "cls", "layer", "support", "vlm_answer", "vlm_conf"]
 _DECISION_COLUMNS = [
     "track",
     "cls",

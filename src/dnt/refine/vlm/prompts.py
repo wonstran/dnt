@@ -23,6 +23,8 @@ SAME = ["same_individual", "different", "unsure"]
 #: Vehicle class answers (``dnt.track.VehReClass``). Every track may be a car: a big SUV or
 #: pickup close to the camera has a box as large as a small bus.
 VEHICLE_CLASS = ["car", "bus", "truck", "unclear"]
+#: Rider answers for a person track (``dnt.track.ReClass``): on foot, or riding something.
+RIDER_CLASS = ["pedestrian", "cyclist", "motorcycle_rider", "scooter_rider", "unclear"]
 #: Rider answers and the ``RefineConfig.reclass_map`` key each one selects.
 RIDER_OPTIONS = {"cyclist": "cyclist", "motorcycle_rider": "motorcycle", "scooter_rider": "scooter"}
 
@@ -113,5 +115,15 @@ def vehicle_class_prompt(options: list[str]) -> str:
     body = (
         "The crops show one road vehicle at different moments of one track, left to right. "
         "Which kind of vehicle is it?"
+    )
+    return "\n".join([body, *_answer_lines(options)])
+
+
+def rider_class_prompt(options: list[str]) -> str:
+    """Return the rider question for ``options`` (deterministic text)."""
+    body = (
+        "The crops show one person at different moments of one track, left to right. "
+        "Is the person on foot, or riding something? A person riding a skateboard or a "
+        "kick scooter counts as scooter_rider."
     )
     return "\n".join([body, *_answer_lines(options)])
