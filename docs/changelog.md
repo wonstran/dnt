@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+### Changed
+- The person re-classifier is now `PedReClass`, with the arguments `ReClass` had. `ReClass` is
+  a router: `ReClass(kind="ped" | "veh" | "twowheel", **kwargs)` builds `PedReClass`,
+  `VehReClass` or `TwoWheelReClass` with `kwargs` and forwards `re_classify` and attribute
+  reads to it. `ReClass(num_frames=...)` with keyword arguments still builds a `PedReClass`;
+  positional arguments no longer do, because the first one is `kind`.
+
 ### New
 - `TwoWheelReClass` decides whether two-wheeler tracks are bicycles (1) or motorcycles (3). It
   re-detects nothing: it matches each track against motorcycle and bicycle detections you

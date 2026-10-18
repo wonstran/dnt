@@ -1,10 +1,11 @@
-"""Provide ReClass and VehReClass, which re-classify object tracks from video frames.
+"""Provide ReClass, which re-classifies object tracks from video frames, and what it routes to.
 
-``ReClass`` matches a person track's boxes against detections of bicycles, motorcycles and
-skateboards or scooters, optionally asks a vision-language model about ambiguous tracks, and
-assigns the rider class. ``VehReClass`` classifies vehicle
-tracks as car, bus or truck with a cascade of a size rule, re-detection voting, an optional
-vision-language model, and a fallback.
+``ReClass(kind=...)`` is the one entry point; it builds and forwards to one of three
+re-classifiers. ``PedReClass`` matches a person track's boxes against detections of bicycles,
+motorcycles and skateboards or scooters, optionally asks a vision-language model about
+ambiguous tracks, and assigns the rider class. ``VehReClass`` classifies vehicle tracks as car,
+bus or truck with a cascade of a size rule, re-detection voting, an optional vision-language
+model, and a fallback. ``TwoWheelReClass`` sorts two-wheeler tracks into bicycle and motorcycle.
 """
 
 import copy
@@ -14,7 +15,7 @@ import numbers
 import os
 from collections.abc import Callable, Iterable, Iterator
 from pathlib import Path
-from typing import TYPE_CHECKING, NamedTuple
+from typing import TYPE_CHECKING, ClassVar, NamedTuple
 
 import numpy as np
 import pandas as pd
@@ -364,8 +365,8 @@ def _tag_id(t) -> str:
     return str(t)
 
 
-class ReClass:
-    """ReClass re-classifies person tracks as riders using detection results and a VLM.
+class PedReClass:
+    """PedReClass re-classifies person tracks as riders using detection results and a VLM.
 
     A track's largest boxes are matched against detections of ``match_class`` (bicycle,
     motorcycle, skateboard/scooter) by overlap. A class that overlaps on at least
@@ -501,7 +502,9 @@ class ReClass:
         self.vlm = (
             None
             if vlm is None
-            else _prepare_vlm(vlm, vlm_api_key, check=vlm_backend_factory is None, owner="ReClass")
+            else _prepare_vlm(
+                vlm, vlm_api_key, check=vlm_backend_factory is None, owner="PedReClass"
+            )
         )
         self.detector = Detector(model=model, weights=weights, device=device)
         self.decisions = pd.DataFrame(columns=_RIDER_DECISION_COLUMNS)
@@ -650,7 +653,7 @@ class ReClass:
         Examples
         --------
         >>> import pandas as pd
-        >>> from dnt.track import ReClass
+        >>> from dnt.track import PedReClass
         >>> tracks = pd.DataFrame({
         ...     'frame': [0, 1, 2],
         ...     'track': [1, 1, 1],
@@ -659,7 +662,7 @@ class ReClass:
         ...     'w': [50, 50, 50],
         ...     'h': [100, 100, 100],
         ... })
-        >>> rc = ReClass(num_frames=2, threshold=0.75, match_class=[1, 36])
+        >>> rc = PedReClass(num_frames=2, threshold=0.75, match_class=[1, 36])
         >>> result = rc.re_classify(tracks, 'video.mp4')  # doctest: +SKIP
         >>> print(result)  # DataFrame with [track, cls, avg_score]
 
@@ -1424,3 +1427,76 @@ class TwoWheelReClass:
         decisions["cls"] = decisions["cls"].astype("Int64")  # <NA>: dropped
         self.decisions = decisions
         return out
+
+
+class ReClass:
+    """Re-classify tracks with the re-classifier that fits their kind.
+
+    ``ReClass`` is the single entry point: ``kind`` picks ``PedReClass`` (person tracks, the
+    default, so ``ReClass(num_frames=10)`` still works as before), ``VehReClass`` (cars, buses
+    and trucks) or ``TwoWheelReClass`` (bicycles and motorcycles). Every other argument goes to
+    that class unchanged, ``re_classify`` forwards to it, and its other attributes
+    (``decisions``, ``detector``, ...) read through.
+
+    Parameters
+    ----------
+    kind : {"ped", "veh", "twowheel"}
+        Which re-classifier to build. The aliases ``person``, ``pedestrian``, ``vehicle``,
+        ``two_wheel``, ``two-wheel`` and ``mc`` are accepted. Default ``"ped"``.
+    **kwargs
+        The constructor arguments of the chosen class.
+
+    Attributes
+    ----------
+    kind : str
+        The canonical kind: ``"ped"``, ``"veh"`` or ``"twowheel"``.
+    impl : PedReClass or VehReClass or TwoWheelReClass
+        The re-classifier calls go to.
+
+    Raises
+    ------
+    ValueError
+        For an unknown ``kind``, or whatever the chosen class raises for its arguments.
+
+    Examples
+    --------
+    >>> from dnt.track import ReClass
+    >>> rc = ReClass("veh", hv_size=240)  # doctest: +SKIP
+    >>> out = rc.re_classify("veh.txt", "clip.mp4")  # doctest: +SKIP
+
+    """
+
+    KINDS: ClassVar[dict[str, type]] = {
+        "ped": PedReClass,
+        "veh": VehReClass,
+        "twowheel": TwoWheelReClass,
+    }
+    _ALIASES: ClassVar[dict[str, str]] = {
+        "person": "ped",
+        "pedestrian": "ped",
+        "vehicle": "veh",
+        "two_wheel": "twowheel",
+        "two-wheel": "twowheel",
+        "mc": "twowheel",
+    }
+
+    def __init__(self, kind: str = "ped", **kwargs) -> None:
+        """Build the re-classifier for ``kind`` with ``kwargs``."""
+        key = str(kind).lower() if isinstance(kind, str) else kind
+        key = self._ALIASES.get(key, key)
+        if key not in self.KINDS:
+            raise ValueError(
+                f"kind must be one of {sorted(self.KINDS)} (or an alias), not {kind!r}"
+            )
+        self.kind = key
+        self.impl = self.KINDS[key](**kwargs)
+
+    def re_classify(self, *args, **kwargs):
+        """Re-classify tracks; see the ``re_classify`` of the class ``kind`` selects."""
+        return self.impl.re_classify(*args, **kwargs)
+
+    def __getattr__(self, name: str):
+        """Read any other attribute from the chosen re-classifier."""
+        if name == "impl":  # not built yet (failed constructor, copy): do not recurse
+            raise AttributeError(name)
+        return getattr(self.impl, name)

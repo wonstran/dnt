@@ -1,4 +1,4 @@
-"""ReClass results are pinned, and the shared reading helpers tolerate bad frames."""
+"""PedReClass results are pinned, and the shared reading helpers tolerate bad frames."""
 
 import pandas as pd
 from reclass_fakes import FakeDetector, FakeReader
@@ -27,7 +27,7 @@ def test_reclass_results_are_pinned(monkeypatch, tmp_path):
     })
     monkeypatch.setattr(re_class, "Detector", lambda **kw: det)
     monkeypatch.setattr(re_class, "FrameReader", FakeReader, raising=False)
-    rc = re_class.ReClass(num_frames=1, threshold=0.75)
+    rc = re_class.PedReClass(num_frames=1, threshold=0.75)
     out = rc.re_classify(_tracks(), str(video), verbose=False)
     assert out.values.tolist() == [[1, 1, 1.0], [2, 0, 0.0], [3, 36, 1.0]]
 
@@ -96,7 +96,7 @@ def _rc(monkeypatch, script, **kw):
     det = FakeDetector(script)
     monkeypatch.setattr(re_class, "Detector", lambda **k: det)
     monkeypatch.setattr(re_class, "FrameReader", FakeReader)
-    return re_class.ReClass(num_frames=3, **kw)
+    return re_class.PedReClass(num_frames=3, **kw)
 
 
 def test_a_motorcycle_overlap_makes_a_motorcycle_rider(monkeypatch, video):
@@ -188,8 +188,8 @@ def test_a_missing_vlm_key_fails_before_the_detector(monkeypatch, tmp_path):
     monkeypatch.setattr(re_class, "Detector", lambda **k: built.append(1))
     monkeypatch.setattr(vlm_mod, "check_vlm_dependencies", lambda cfg: None)
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
-    with pytest.raises(ValueError, match=r"ReClass: vlm\.backend"):
-        re_class.ReClass(vlm=VLMConfig(backend="anthropic", cache_dir=str(tmp_path)))
+    with pytest.raises(ValueError, match=r"PedReClass: vlm\.backend"):
+        re_class.PedReClass(vlm=VLMConfig(backend="anthropic", cache_dir=str(tmp_path)))
     assert built == []
 
 
@@ -204,4 +204,52 @@ def test_rider_map_can_send_cyclist_answers_back_to_pedestrian(monkeypatch, vide
 
 def test_rider_map_rejects_unknown_answers():
     with pytest.raises(ValueError, match="rider_map"):
-        re_class.ReClass(rider_map={"jogger": 0})
+        re_class.PedReClass(rider_map={"jogger": 0})
+
+
+# ---- ReClass routes to PedReClass, VehReClass and TwoWheelReClass ----
+
+
+def test_reclass_defaults_to_the_pedestrian_reclassifier(monkeypatch, video):
+    det = FakeDetector({f: [_inside(MOTO)] for f in range(3)})
+    monkeypatch.setattr(re_class, "Detector", lambda **k: det)
+    monkeypatch.setattr(re_class, "FrameReader", FakeReader)
+    rc = re_class.ReClass(num_frames=3)
+    assert rc.kind == "ped" and isinstance(rc.impl, re_class.PedReClass)
+    assert rc.re_classify(_walker(), video, verbose=False).values.tolist() == [[1, MOTO, 1.0]]
+    assert rc.decisions["layer"].tolist() == ["overlap"]
+
+
+@pytest.mark.parametrize(
+    ("kind", "cls"),
+    [
+        ("veh", "VehReClass"),
+        ("Vehicle", "VehReClass"),
+        ("twowheel", "TwoWheelReClass"),
+        ("two-wheel", "TwoWheelReClass"),
+        ("mc", "TwoWheelReClass"),
+    ],
+)
+def test_reclass_builds_the_class_for_its_kind(monkeypatch, kind, cls):
+    monkeypatch.setattr(re_class, "Detector", lambda **k: FakeDetector())
+    rc = re_class.ReClass(kind)
+    assert type(rc.impl) is getattr(re_class, cls)
+    assert rc.kind == {"VehReClass": "veh", "TwoWheelReClass": "twowheel"}[cls]
+
+
+def test_reclass_forwards_arguments_and_calls_for_two_wheelers(monkeypatch, video):
+    monkeypatch.setattr(re_class, "FrameReader", FakeReader)
+    rc = re_class.ReClass("twowheel", scooter="keep")
+    assert rc.impl.scooter == "keep"
+    tracks = _walker().assign(score=-1.0, cls=BIKE, r3=-1, r4=-1)
+    out = rc.re_classify(tracks, video, verbose=False)
+    assert set(out["cls"]) == {BIKE} and rc.decisions["layer"].tolist() == ["prior"]
+
+
+def test_reclass_rejects_an_unknown_kind_and_bad_arguments():
+    with pytest.raises(ValueError, match="kind must be one of"):
+        re_class.ReClass("boat")
+    with pytest.raises(ValueError, match="invalid TwoWheelReClass settings"):
+        re_class.ReClass("twowheel", scooter="x")
+    with pytest.raises(TypeError):
+        re_class.ReClass("twowheel", num_frames=3)

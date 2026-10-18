@@ -126,21 +126,21 @@ def test_reclass_default_constructs(monkeypatch):
             seen.update(kwargs)
 
     monkeypatch.setattr(re_class, "Detector", Recorder)
-    re_class.ReClass()
+    re_class.PedReClass()
     assert seen == {"model": DetectorModel.RTDETRx, "weights": None, "device": "auto"}
 
 
 def test_reclass_with_real_detector_class(fake):
-    from dnt.track.re_class import ReClass
+    from dnt.track.re_class import PedReClass
 
-    ReClass(device="cpu")
+    PedReClass(device="cpu")
 
 
 def test_reclass_positional_order_unchanged():
-    """Ensure ReClass parameter order is unchanged for backward compatibility."""
-    from dnt.track.re_class import ReClass
+    """Ensure PedReClass parameter order is unchanged for backward compatibility."""
+    from dnt.track.re_class import PedReClass
 
-    params = list(inspect.signature(ReClass.__init__).parameters)[1:5]
+    params = list(inspect.signature(PedReClass.__init__).parameters)[1:5]
     assert params == ["num_frames", "threshold", "model", "weights"]
 
 

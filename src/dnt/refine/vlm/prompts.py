@@ -23,7 +23,7 @@ SAME = ["same_individual", "different", "unsure"]
 #: Vehicle class answers (``dnt.track.VehReClass``). Every track may be a car: a big SUV or
 #: pickup close to the camera has a box as large as a small bus.
 VEHICLE_CLASS = ["car", "bus", "truck", "unclear"]
-#: Rider answers for a person track (``dnt.track.ReClass``): on foot, or riding something.
+#: Rider answers for a person track (``dnt.track.PedReClass``): on foot, or riding something.
 RIDER_CLASS = ["pedestrian", "cyclist", "motorcycle_rider", "scooter_rider", "unclear"]
 #: Rider answers and the ``RefineConfig.reclass_map`` key each one selects.
 RIDER_OPTIONS = {"cyclist": "cyclist", "motorcycle_rider": "motorcycle", "scooter_rider": "scooter"}
