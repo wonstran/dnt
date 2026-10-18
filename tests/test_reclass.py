@@ -191,3 +191,17 @@ def test_a_missing_vlm_key_fails_before_the_detector(monkeypatch, tmp_path):
     with pytest.raises(ValueError, match=r"ReClass: vlm\.backend"):
         re_class.ReClass(vlm=VLMConfig(backend="anthropic", cache_dir=str(tmp_path)))
     assert built == []
+
+
+def test_rider_map_can_send_cyclist_answers_back_to_pedestrian(monkeypatch, video, tmp_path):
+    backend = FakeBackend({"*": _answer("cyclist", 0.9)})
+    rc = _rc(monkeypatch, {0: [_inside(BIKE)]}, rider_map={"cyclist": 0, "scooter_rider": BOARD},
+             vlm=_vlm(tmp_path), vlm_backend_factory=lambda c: backend)
+    out = rc.re_classify(_walker(), video, verbose=False)
+    assert out.values.tolist() == [[1, 0, 0.0]]
+    assert backend.calls[0]["options"] == ["pedestrian", "cyclist", "scooter_rider", "unclear"]
+
+
+def test_rider_map_rejects_unknown_answers():
+    with pytest.raises(ValueError, match="rider_map"):
+        re_class.ReClass(rider_map={"jogger": 0})

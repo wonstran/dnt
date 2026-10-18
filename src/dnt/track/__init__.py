@@ -6,6 +6,7 @@ This module provides tracking utilities and classes for object detection.
 from .post_process import interpolate_tracks_rts as interpolate_tracks_rts
 from .post_process import link_tracklets as link_tracklets
 from .re_class import ReClass as ReClass
+from .re_class import TwoWheelReClass as TwoWheelReClass
 from .re_class import VehReClass as VehReClass
 from .tracker import (
     BoostTrackConfig as BoostTrackConfig,
@@ -62,6 +63,7 @@ __all__ = [
     "SFSORTConfig",
     "StrongSORTConfig",
     "Tracker",
+    "TwoWheelReClass",
     "VehReClass",
     "interpolate_tracks_rts",
     "link_tracklets",

@@ -3,6 +3,16 @@
 ## Unreleased
 
 ### New
+- `TwoWheelReClass` decides whether two-wheeler tracks are bicycles (1) or motorcycles (3). It
+  re-detects nothing: it matches each track against motorcycle and bicycle detections you
+  already have (tables or headerless files) and the class the track carries. A clear majority
+  decides; mixed evidence goes to an optional VLM; a larger overlap then the larger class vote
+  decides otherwise. Each kept track gets one class on every row. Stand-up scooters and
+  skateboards, and tracks the VLM calls pedestrian or scooter rider, are dropped, or with
+  `scooter="keep"` kept as class 36. Per-track reasons are in `decisions`.
+- `ReClass(rider_map=...)` sets the class each VLM rider answer stands for. Mapping an answer
+  to `default_class` leaves the track a pedestrian, for pipelines where another stage owns
+  bicycles and motorcycles.
 - `ReClass` classifies riders. It now matches bicycle, motorcycle and skateboard/scooter
   detections (`match_class` defaults to `[1, 3, 36]`; it was `[1, 36]`) and can ask a VLM about
   tracks the overlap does not settle. A class that is the only one to overlap on at least

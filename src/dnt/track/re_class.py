@@ -425,6 +425,7 @@ class ReClass:
         vlm_crops: int = 3,
         vlm_api_key: str | None = None,
         vlm_backend_factory: Callable | None = None,
+        rider_map: dict[str, int] | None = None,
     ) -> None:
         """Re-classify tracks based on detection results.
 
@@ -457,13 +458,21 @@ class ReClass:
             together with ``vlm_backend_factory``.
         vlm_backend_factory : callable or None
             Builds the backend from the resolved ``VLMConfig`` (tests); skips the preflight.
+        rider_map : dict or None
+            The class each VLM rider answer (``cyclist``, ``motorcycle_rider``,
+            ``scooter_rider``) stands for; default ``{"cyclist": 1, "motorcycle_rider": 3,
+            "scooter_rider": 36}``. An answer left out is not offered to the model. An answer
+            mapped to ``default_class`` leaves the track a pedestrian, which suits a pipeline
+            where another stage owns bicycles and motorcycles, e.g.
+            ``{"cyclist": 0, "motorcycle_rider": 0, "scooter_rider": 36}``. An answer mapped to
+            another class outside ``match_class`` is not offered.
 
         Raises
         ------
         ValueError
-            For an invalid ``min_support`` or ``vlm_crops``, an invalid VLM config, one
-            resolving to backend ``none``, a missing API key, or ``vlm_api_key`` given together
-            with ``vlm_backend_factory``.
+            For an invalid ``min_support``, ``vlm_crops`` or ``rider_map``, an invalid VLM
+            config, one resolving to backend ``none``, a missing API key, or ``vlm_api_key``
+            given together with ``vlm_backend_factory``.
         ImportError
             When the VLM backend's package is not installed.
 
@@ -481,6 +490,11 @@ class ReClass:
         self.default_class = default_class
         self.match_class = match_class if match_class is not None else [1, 3, 36]
         self.min_support = min_support
+        rider_map = dict(_RIDER_ANSWER if rider_map is None else rider_map)
+        bad = [a for a in rider_map if a not in _RIDER_ANSWER]
+        if bad:
+            raise ValueError(f"rider_map keys must be among {list(_RIDER_ANSWER)}, not {bad}")
+        self.rider_map = rider_map
         self.vlm_crops = vlm_crops
         self._vlm_api_key = vlm_api_key
         self._vlm_backend_factory = vlm_backend_factory
@@ -550,7 +564,11 @@ class ReClass:
 
     def _ask(self, rows: dict, pending: list, tracks: pd.DataFrame, input_video: str) -> None:
         """Put the ambiguous tracks to the VLM and apply the answers it is sure of."""
-        by_answer = {a: c for a, c in _RIDER_ANSWER.items() if c in self.match_class}
+        by_answer = {
+            a: c
+            for a, c in self.rider_map.items()
+            if c in self.match_class or c == self.default_class
+        }
         options = ["pedestrian", *by_answer, "unclear"]
         requests = {
             t: _spaced_sample(tracks[tracks["track"] == t], self.vlm_crops, 0) for t in pending
@@ -566,7 +584,7 @@ class ReClass:
             r["vlm_answer"], r["vlm_conf"] = a.answer, a.confidence
             if not (math.isfinite(a.confidence) and a.confidence >= self.vlm.min_conf):
                 continue
-            if a.answer == "pedestrian":
+            if a.answer == "pedestrian" or by_answer.get(a.answer) == self.default_class:
                 r.update(cls=self.default_class, avg_score=0.0, layer="vlm")
             elif a.answer in by_answer:
                 cls = by_answer[a.answer]
@@ -1038,5 +1056,371 @@ class VehReClass:
             write_track(out, out_file)
         decisions = pd.DataFrame(list(rows.values()), columns=_DECISION_COLUMNS)
         decisions["redetect_cls"] = decisions["redetect_cls"].astype("Int64")  # <NA>: no votes
+        self.decisions = decisions
+        return out
+
+
+_TWOWHEEL_COLUMNS = [
+    "track",
+    "cls",
+    "layer",
+    "n",
+    "mc_ratio",
+    "bike_ratio",
+    "vlm_answer",
+    "vlm_conf",
+]
+#: COCO class IDs a two-wheeler track can take (the skateboard class stands for a scooter).
+BICYCLE, MOTORCYCLE, SKATEBOARD = 1, 3, 36
+
+
+def _read_dets(dets) -> pd.DataFrame:
+    """Return detections as a table with ``frame, x, y, w, h``; None or an empty file is empty."""
+    cols = ["frame", "x", "y", "w", "h"]
+    if dets is None:
+        return pd.DataFrame(columns=cols)
+    if not isinstance(dets, pd.DataFrame):
+        try:
+            dets = pd.read_csv(dets, header=None, names=_DET_FIELDS)
+        except pd.errors.EmptyDataError:
+            return pd.DataFrame(columns=cols)
+    missing = [c for c in cols if c not in dets.columns]
+    if missing:
+        raise ValueError(f"detections lack columns {missing}")
+    return dets[cols]
+
+
+def _iob_frames(rows: pd.DataFrame, dets: pd.DataFrame, threshold: float) -> int:
+    """Count the track rows whose box has an IoB with some detection of its frame >= threshold.
+
+    The IoB is the intersection over the *track* box, so a detection inside the track box
+    counts as fully overlapping.
+    """
+    if rows.empty or dets.empty:
+        return 0
+    by_frame = {int(f): g[["x", "y", "w", "h"]].to_numpy(float) for f, g in dets.groupby("frame")}
+    hits = 0
+    for f, x, y, w, h in rows[["frame", "x", "y", "w", "h"]].itertuples(index=False):
+        b = by_frame.get(int(f))
+        if b is None or w <= 0 or h <= 0:
+            continue
+        iw = np.clip(np.minimum(x + w, b[:, 0] + b[:, 2]) - np.maximum(x, b[:, 0]), 0, None)
+        ih = np.clip(np.minimum(y + h, b[:, 1] + b[:, 3]) - np.maximum(y, b[:, 1]), 0, None)
+        if float((iw * ih).max()) / (w * h) >= threshold:
+            hits += 1
+    return hits
+
+
+def _even_sample(rows: pd.DataFrame, n: int) -> list[tuple[int, tuple[float, float, float, float]]]:
+    """Pick up to ``n`` rows spread evenly over the track, as ``(frame, box)``."""
+    if rows.empty:
+        return []
+    rows = rows.sort_values("frame")
+    idx = np.unique(np.linspace(0, len(rows) - 1, min(n, len(rows))).round().astype(int))
+    picked = rows.iloc[idx]
+    return [
+        (int(f), (float(x), float(y), float(w), float(h)))
+        for f, x, y, w, h in picked[["frame", "x", "y", "w", "h"]].itertuples(index=False)
+    ]
+
+
+class TwoWheelReClass:
+    """Classify two-wheeler tracks as bicycle (1) or motorcycle (3), optionally dropping scooters.
+
+    The input tracks are already known to be two-wheelers (for example a refined bicycle and
+    motorcycle track file); this decides which kind each is. It re-detects nothing: it matches
+    each track's boxes against detections of motorcycles and bicycles that are already
+    computed, and against the class the track already carries. A track stops at the first
+    layer that decides:
+
+    1. scooter: a track whose class is mostly skateboard/scooter (36) is a stand-up scooter,
+       not a bicycle or motorcycle; it is dropped, or with ``scooter="keep"`` kept as 36;
+    2. prior: a clear majority decides. A class wins when the track overlaps its detections
+       on at least ``min_ratio`` of the frames and ``dominance`` times as many as the other
+       class, or when it carries that class on at least ``vote_share`` of its rows and none
+       of the other;
+    3. VLM: a tile of crops is shown to the configured model, which answers pedestrian,
+       cyclist, motorcycle_rider, scooter_rider or unclear. Cyclist is a bicycle and
+       motorcycle_rider a motorcycle. Pedestrian and scooter_rider are not two-wheelers and
+       drop the track (scooter_rider becomes 36 with ``scooter="keep"``). An answer below
+       ``vlm.min_conf``, or unclear, decides nothing;
+    4. fallback: the class with the larger overlap, then the larger class vote, motorcycle on
+       a tie.
+
+    Every row of a kept track gets the one class, so a track never flickers. Filled rows
+    (``r3 == 1`` or ``interp == 1``) are not used as evidence.
+
+    Parameters
+    ----------
+    scooter : {"drop", "keep"}
+        What to do with stand-up scooters and skateboards. Default ``"drop"``.
+    iob_threshold : float
+        Share of the track box a detection must cover to count as overlapping, in (0, 1].
+        Default 0.2.
+    min_ratio : float
+        Share of frames a class must overlap on for layer 2, in (0, 1]. Default 0.7.
+    dominance : float
+        How many times the other class's overlap the winner needs, at least 1. Default 1.5.
+    vote_share : float
+        Share of rows carrying a class that decides layer 2 by votes, in (0, 1]. Default 0.85.
+    scooter_share : float
+        Share of rows carrying class 36 that flags a scooter in layer 1, in (0, 1]. Default
+        0.4. A track with at least as many 36 rows as 1 and 3 rows is flagged too.
+    vlm : dnt.refine.config.VLMConfig or None
+        Layer 3 settings; None turns layer 3 off. Its ``min_conf`` is the answer threshold.
+    vlm_crops : int
+        Crops tiled into the one image per track. Default 3.
+    vlm_api_key : str or None
+        API key; takes precedence over ``vlm.api_key_file`` and the environment. Not allowed
+        together with ``vlm_backend_factory``, which builds the backend itself.
+    vlm_backend_factory : callable or None
+        Builds the backend from the resolved ``VLMConfig`` (tests); skips the preflight.
+
+    Attributes
+    ----------
+    decisions : pandas.DataFrame
+        Per-track reasons of the last ``re_classify`` call: ``track, cls, layer, n,
+        mc_ratio, bike_ratio, vlm_answer, vlm_conf``, with ``cls`` missing for a dropped
+        track and ``layer`` one of ``scooter``, ``prior``, ``vlm`` and ``fallback``.
+
+    Raises
+    ------
+    ValueError
+        For a broken setting, an invalid VLM config, one resolving to backend ``none``, a
+        missing API key, or ``vlm_api_key`` given together with ``vlm_backend_factory``.
+    ImportError
+        When the VLM backend's package is not installed.
+
+    """
+
+    BICYCLE, MOTORCYCLE, SKATEBOARD = BICYCLE, MOTORCYCLE, SKATEBOARD
+
+    def __init__(
+        self,
+        scooter: str = "drop",
+        iob_threshold: float = 0.2,
+        min_ratio: float = 0.7,
+        dominance: float = 1.5,
+        vote_share: float = 0.85,
+        scooter_share: float = 0.4,
+        vlm: "VLMConfig | None" = None,
+        vlm_crops: int = 3,
+        *,
+        vlm_api_key: str | None = None,
+        vlm_backend_factory: Callable | None = None,
+    ) -> None:
+        """Validate the settings, then prepare the VLM."""
+        if vlm_api_key is not None and vlm_backend_factory is not None:
+            raise ValueError(
+                "vlm_api_key is ignored when vlm_backend_factory builds the backend; pass one"
+            )
+
+        def share(v):
+            return (
+                isinstance(v, numbers.Real)
+                and not isinstance(v, bool)
+                and math.isfinite(v)
+                and 0 < v <= 1
+            )
+
+        problems = []
+        if scooter not in ("drop", "keep"):
+            problems.append("scooter must be 'drop' or 'keep'")
+        for name, v in (
+            ("iob_threshold", iob_threshold),
+            ("min_ratio", min_ratio),
+            ("vote_share", vote_share),
+            ("scooter_share", scooter_share),
+        ):
+            if not share(v):
+                problems.append(f"{name} must be a number in (0, 1]")
+        if not (
+            isinstance(dominance, numbers.Real)
+            and not isinstance(dominance, bool)
+            and math.isfinite(dominance)
+            and dominance >= 1
+        ):
+            problems.append("dominance must be a number >= 1")
+        if not (
+            isinstance(vlm_crops, numbers.Integral)
+            and not isinstance(vlm_crops, bool)
+            and vlm_crops >= 1
+        ):
+            problems.append("vlm_crops must be an integer >= 1")
+        if problems:
+            raise ValueError("invalid TwoWheelReClass settings: " + "; ".join(problems))
+        self.scooter = scooter
+        self.iob_threshold = iob_threshold
+        self.min_ratio = min_ratio
+        self.dominance = dominance
+        self.vote_share = vote_share
+        self.scooter_share = scooter_share
+        self.vlm_crops = vlm_crops
+        self._vlm_api_key = vlm_api_key
+        self._vlm_backend_factory = vlm_backend_factory
+        self.vlm = (
+            None
+            if vlm is None
+            else _prepare_vlm(
+                vlm, vlm_api_key, check=vlm_backend_factory is None, owner="TwoWheelReClass"
+            )
+        )
+        self.decisions = pd.DataFrame(columns=_TWOWHEEL_COLUMNS)
+
+    def _backend_factory(self):
+        if self._vlm_backend_factory is not None:
+            return self._vlm_backend_factory
+        from ..refine.vlm import make_backend
+
+        return lambda cfg: make_backend(cfg, api_key=self._vlm_api_key)
+
+    def _answer_class(self, answer: str) -> int | None:
+        """Return the class a VLM answer stands for, or None when it is not a two-wheeler."""
+        if answer == "cyclist":
+            return BICYCLE
+        if answer == "motorcycle_rider":
+            return MOTORCYCLE
+        if answer == "scooter_rider" and self.scooter == "keep":
+            return SKATEBOARD
+        return None
+
+    def re_classify(
+        self,
+        tracks: pd.DataFrame | str,
+        input_video: str | None = None,
+        mc_dets: pd.DataFrame | str | None = None,
+        bike_dets: pd.DataFrame | str | None = None,
+        track_ids: list | None = None,
+        out_file: str | None = None,
+        verbose: bool = True,
+    ) -> pd.DataFrame:
+        """Classify two-wheeler tracks and write the class into ``cls``.
+
+        Parameters
+        ----------
+        tracks : pandas.DataFrame or str
+            A track table (at least ``frame, track, x, y, w, h, cls``) or a headerless track
+            file. Filled rows are never used as evidence.
+        input_video : str or None
+            The source video; read only to crop frames for the VLM, so it may be None without
+            a ``vlm``.
+        mc_dets : pandas.DataFrame or str or None
+            Motorcycle detections: a table with ``frame, x, y, w, h``, or a headerless
+            detection file (``Detector.DET_FIELDS`` layout). None means none.
+        bike_dets : pandas.DataFrame or str or None
+            Bicycle detections, in the same forms.
+        track_ids : list or None
+            Tracks to classify; None classifies all. Unknown IDs are ignored.
+        out_file : str or None
+            Where to write the result, headerless, in the input's column layout.
+        verbose : bool
+            Unused; kept for symmetry with the other re-classifiers.
+
+        Returns
+        -------
+        pandas.DataFrame
+            The input table with ``cls`` set on every row of each classified track, and the
+            rows of dropped tracks removed; the per-track reasons are in ``self.decisions``.
+
+        Raises
+        ------
+        FileNotFoundError
+            If a ``vlm`` is set, ``input_video`` is needed and does not exist.
+        ValueError
+            If the track or detection input is malformed.
+
+        """
+        table = _read_tracks(tracks)
+        self.decisions = pd.DataFrame(columns=_TWOWHEEL_COLUMNS)
+        if table.empty:
+            if out_file:
+                write_track(table, out_file)
+            return table
+
+        mc = _read_dets(mc_dets)
+        bike = _read_dets(bike_dets)
+        ids = VehReClass._select(table, track_ids)
+        real = table.loc[~filled_mask(table)]
+        groups = dict(tuple(real.groupby("track", sort=False)))
+        rows: dict = {}
+        pending: list = []
+        votes: dict = {}
+        for t in ids:
+            g = groups.get(t)
+            if g is None or g.empty:  # nothing but filled rows: use them rather than nothing
+                g = table[table["track"] == t]
+            n = len(g)
+            cls_votes = g["cls"].value_counts()
+            v1, v3, v36 = (int(cls_votes.get(c, 0)) for c in (BICYCLE, MOTORCYCLE, SKATEBOARD))
+            votes[t] = (v1, v3)
+            mc_ratio = _iob_frames(g, mc, self.iob_threshold) / n
+            bike_ratio = _iob_frames(g, bike, self.iob_threshold) / n
+            r = {
+                "track": t,
+                "cls": None,
+                "layer": None,
+                "n": n,
+                "mc_ratio": mc_ratio,
+                "bike_ratio": bike_ratio,
+                "vlm_answer": None,
+                "vlm_conf": math.nan,
+            }
+            rows[t] = r
+            if v36 / n >= self.scooter_share or (v36 > 0 and v36 >= max(v1, v3)):
+                r["cls"] = SKATEBOARD if self.scooter == "keep" else None
+                r["layer"] = "scooter"
+            elif (mc_ratio >= self.min_ratio and mc_ratio >= bike_ratio * self.dominance) or (
+                v3 / n >= self.vote_share and v1 == 0
+            ):
+                r["cls"], r["layer"] = MOTORCYCLE, "prior"
+            elif (bike_ratio >= self.min_ratio and bike_ratio >= mc_ratio * self.dominance) or (
+                v1 / n >= self.vote_share and v3 == 0
+            ):
+                r["cls"], r["layer"] = BICYCLE, "prior"
+            else:
+                pending.append(t)
+
+        if self.vlm is not None and pending:
+            if input_video is None or not Path(input_video).exists():
+                raise FileNotFoundError(f"Video file not found: {input_video}")
+            requests = {
+                t: _even_sample(groups.get(t, table.iloc[0:0]), self.vlm_crops) for t in pending
+            }
+            answers = _ask_vlm(
+                self.vlm, self._backend_factory(), str(input_video), requests, kind="riderclass"
+            )
+            for t, a in answers.items():
+                r = rows[t]
+                if a.error:  # no answer was given; the warning already names the error
+                    continue
+                r["vlm_answer"], r["vlm_conf"] = a.answer, a.confidence
+                if not (math.isfinite(a.confidence) and a.confidence >= self.vlm.min_conf):
+                    continue
+                if a.answer in ("pedestrian", "cyclist", "motorcycle_rider", "scooter_rider"):
+                    r["cls"], r["layer"] = self._answer_class(a.answer), "vlm"
+
+        for t in pending:
+            r = rows[t]
+            if r["layer"] is not None:
+                continue
+            v1, v3 = votes[t]
+            if r["mc_ratio"] != r["bike_ratio"]:
+                r["cls"] = MOTORCYCLE if r["mc_ratio"] > r["bike_ratio"] else BICYCLE
+            else:
+                r["cls"] = MOTORCYCLE if v3 >= v1 else BICYCLE
+            r["layer"] = "fallback"
+
+        dropped = [t for t, r in rows.items() if r["cls"] is None]
+        cls_map = {t: r["cls"] for t, r in rows.items() if r["cls"] is not None}
+        out = table.copy()
+        hit = out["track"].isin(list(cls_map))
+        out.loc[hit, "cls"] = out.loc[hit, "track"].map(cls_map).astype(int)
+        out = out[~out["track"].isin(dropped)].reset_index(drop=True)
+        if dropped:
+            log.info("dropped %d track(s) that are not bicycles or motorcycles", len(dropped))
+        if out_file:
+            write_track(out, out_file)
+        decisions = pd.DataFrame(list(rows.values()), columns=_TWOWHEEL_COLUMNS)
+        decisions["cls"] = decisions["cls"].astype("Int64")  # <NA>: dropped
         self.decisions = decisions
         return out
