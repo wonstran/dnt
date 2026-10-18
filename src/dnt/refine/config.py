@@ -221,6 +221,8 @@ class DedupConfig:
     comotion_hi: float = 0.50
     cooccur_lo: float = 0.10
     cooccur_hi: float = 0.50
+    nested_containment: float = 0.80
+    duplicate_iou: float = 0.90
     conflict_min_shared: int = 3
     appearance_floor: float = 0.60
     app_lo: float = 0.40
@@ -699,6 +701,10 @@ def _dedup_problems(dd: DedupConfig) -> list[str]:
         p.append("dedup.interleave_min_switches must be an integer >= 1")
     if not (num(dd.interleave_min_rate) and 0.0 < dd.interleave_min_rate <= 1.0):
         p.append("dedup.interleave_min_rate must be a number in (0, 1]")
+    if not (num(dd.nested_containment) and 0.0 < dd.nested_containment <= 1.0):
+        p.append("dedup.nested_containment must be a number in (0, 1]")
+    if not (num(dd.duplicate_iou) and 0.0 < dd.duplicate_iou <= 1.0):
+        p.append("dedup.duplicate_iou must be a number in (0, 1]")
     if not (num(dd.interleave_relax) and 0.0 <= dd.interleave_relax < dd.comotion_lo):
         p.append("dedup.interleave_relax must be a number in [0, dedup.comotion_lo)")
     if not (num(dd.appearance_floor) and 0.0 <= dd.appearance_floor <= 1.0):

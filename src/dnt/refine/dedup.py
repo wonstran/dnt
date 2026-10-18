@@ -108,6 +108,44 @@ def comotion(a: Track, b: Track, ov: Overlap) -> float:
     return float((ab + ba) / 2.0)
 
 
+def containment(a: Track, b: Track) -> tuple[int, float]:
+    """Return ``(shared, median)`` of the smaller box's share inside the larger on shared frames.
+
+    A box on the torso and a box on the whole body of one person nest (median near 1); two people
+    walking together barely overlap (median near 0). ``(0, 0.0)`` when no frame is shared.
+    """
+    fs, ia, ib = np.intersect1d(a.frames, b.frames, assume_unique=True, return_indices=True)
+    if fs.size == 0:
+        return 0, 0.0
+    ba, bb = a.boxes[ia], b.boxes[ib]
+    w = np.clip(
+        np.minimum(ba[:, 0] + ba[:, 2], bb[:, 0] + bb[:, 2]) - np.maximum(ba[:, 0], bb[:, 0]),
+        0,
+        None,
+    )
+    h = np.clip(
+        np.minimum(ba[:, 1] + ba[:, 3], bb[:, 1] + bb[:, 3]) - np.maximum(ba[:, 1], bb[:, 1]),
+        0,
+        None,
+    )
+    small = np.minimum(ba[:, 2] * ba[:, 3], bb[:, 2] * bb[:, 3])
+    return int(fs.size), float(
+        np.median(np.where(small > 0, w * h / np.maximum(small, 1e-12), 0.0))
+    )
+
+
+def median_iou(a: Track, b: Track) -> float:
+    """Return the median IoU of the two tracks' boxes on the frames both observe (0.0 if none)."""
+    fs, ia, ib = np.intersect1d(a.frames, b.frames, assume_unique=True, return_indices=True)
+    return float(np.median(_iou_rows(a.boxes[ia], b.boxes[ib]))) if fs.size else 0.0
+
+
+def is_nested(a: Track, b: Track, dc) -> bool:
+    """Return True when ``a`` and ``b`` are concurrent boxes nested on one object."""
+    shared, med = containment(a, b)
+    return shared >= dc.conflict_min_shared and med >= dc.nested_containment
+
+
 def interleave(a: Track, b: Track, ov: Overlap) -> tuple[int, float]:
     """Return ``(switches, rate)`` of the observing track along the overlap.
 
@@ -163,6 +201,12 @@ def propose_merges(
     ``app_hi``) is one person split in two, so its co-motion ramp is shifted down by
     ``interleave_relax``. Without appearance the ramp is never relaxed: a neighbour walking
     alongside alternates just as often.
+
+    A densely co-observed pair is still a candidate when its boxes nest (see ``containment``,
+    at least ``nested_containment``) and either appearance is available or the boxes are all but
+    identical (median IoU at least ``duplicate_iou``): one object boxed twice at once. Such a pair
+    is scored on appearance alone, so only a strong match is accepted without review; identical
+    boxes with no appearance score 1.
     """
     dc = cfg.dedup
     if not dc.enabled or work.empty:
@@ -182,10 +226,15 @@ def propose_merges(
                 continue
             if ov.n_a < dc.min_observed or ov.n_b < dc.min_observed:
                 continue
-            if ov.co_occupancy >= dc.cooccur_hi:
+            app = appearance_similarity(first, second, ov, appearance)
+            # Appearance cannot be measured on two boxes that cover each other (each occludes the
+            # other's crop), so boxes that are all but identical stand on their geometry alone.
+            nested = is_nested(first, second, dc) and (
+                app is not None or median_iou(first, second) >= dc.duplicate_iou
+            )
+            if ov.co_occupancy >= dc.cooccur_hi and not nested:
                 continue
             cm = comotion(first, second, ov)
-            app = appearance_similarity(first, second, ov, appearance)
             term = (
                 1.0
                 if app is None
@@ -201,11 +250,14 @@ def propose_merges(
                 and rate >= dc.interleave_min_rate
                 else 0.0
             )
-            score = (
-                float(ramp(cm, dc.comotion_lo - relax, dc.comotion_hi - relax))
-                * (1.0 - float(ramp(ov.co_occupancy, dc.cooccur_lo, dc.cooccur_hi)))
-                * term
-            )
+            if nested:
+                score = term
+            else:
+                score = (
+                    float(ramp(cm, dc.comotion_lo - relax, dc.comotion_hi - relax))
+                    * (1.0 - float(ramp(ov.co_occupancy, dc.cooccur_lo, dc.cooccur_hi)))
+                    * term
+                )
             lineage = [lineage_of_rows(first.rows), lineage_of_rows(second.rows)]
             events.append(
                 Event.propose(
@@ -226,6 +278,7 @@ def propose_merges(
                         "switches": switches,
                         "interleave_relax": relax,
                         "appearance": app,
+                        "nested": nested,
                     },
                 )
             )
@@ -266,8 +319,8 @@ def apply_merges(work: pd.DataFrame, events: list[Event], cfg: RefineConfig) -> 
     components holding a cannot-link pair is a ``conflict``; both stay accepted with
     ``applied=False`` and a ``skipped_reason``. A cannot-link pair is a pair decided
     ``VLM_REJECT`` or ``HUMAN_REJECT``, a pair of classes in different groups, or a pair that
-    is densely co-observed. Rows are dropped when an applied edge joins two components and are
-    attributed to that edge.
+    is densely co-observed unless a proposal marked it nested. Rows are dropped when an applied
+    edge joins two components and are attributed to that edge.
     """
     dc = cfg.dedup
     counts = {"applied": 0, "redundant": 0, "conflict": 0, "dropped_rows": 0}
@@ -275,6 +328,7 @@ def apply_merges(work: pd.DataFrame, events: list[Event], cfg: RefineConfig) -> 
         return MergeOutcome(work, set(), set(), {}, {}, counts)
     tracks = describe(work)
     groups = cfg.link.class_groups
+    nested = {frozenset(e.tracks) for e in events if e.signals.get("nested")}
     rejected = {
         frozenset(e.tracks): e.proposal_key
         for e in events
@@ -299,7 +353,7 @@ def apply_merges(work: pd.DataFrame, events: list[Event], cfg: RefineConfig) -> 
                 return x, y, "rejected", key
             if not class_ok(tracks[x].cls, tracks[y].cls, groups):
                 return x, y, "class", None
-            if _dense(tracks[x], tracks[y], dc):
+            if frozenset((x, y)) not in nested and _dense(tracks[x], tracks[y], dc):
                 return x, y, "dense", None
         return None
 

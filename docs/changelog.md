@@ -10,6 +10,11 @@
   positional arguments no longer do, because the first one is `kind`.
 
 ### New
+- `dedup` merges nested duplicate boxes: two tracks observed together that box one object (a
+  torso inside a full body, or a bicycle and a motorcycle box on one machine) are a candidate
+  even when densely co-observed (`dedup.nested_containment`, default 0.8). They need appearance,
+  except when the boxes are all but identical (`dedup.duplicate_iou`, default 0.9), because
+  boxes that cover each other occlude each other's crop.
 - `TwoWheelReClass` decides whether two-wheeler tracks are bicycles (1) or motorcycles (3). It
   re-detects nothing: it matches each track against motorcycle and bicycle detections you
   already have (tables or headerless files) and the class the track carries. A clear majority
