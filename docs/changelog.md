@@ -3,6 +3,8 @@
 ## Unreleased
 
 ### Changed
+- `dnt.refine` output for the vehicle target changes by default: tracks that reverse are split
+  by the new `reversal` stage. Set `reversal: {enabled: false}` for the previous output.
 - The person re-classifier is now `PedReClass`, with the arguments `ReClass` had. `ReClass` is
   a router: `ReClass(kind="ped" | "veh" | "twowheel", **kwargs)` builds `PedReClass`,
   `VehReClass` or `TwoWheelReClass` with `kwargs` and forwards `re_classify` and attribute
@@ -10,6 +12,10 @@
   positional arguments no longer do, because the first one is `kind`.
 
 ### New
+- Stage `reversal` in `dnt.refine` splits a vehicle track where its direction reverses (two
+  vehicles that share one tracker ID). Link and dedup never join the two parts again, also
+  through a third track or after a merge replaces one part's rows. See "Vehicle reversals" in
+  the refine docs.
 - `dedup` merges nested duplicate boxes: two tracks observed together that box one object (a
   torso inside a full body, or a bicycle and a motorcycle box on one machine) are a candidate
   even when densely co-observed (`dedup.nested_containment`, default 0.8). They need appearance,

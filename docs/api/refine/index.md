@@ -1,6 +1,6 @@
 # Track Refinement (`dnt.refine`)
 
-`dnt.refine` refines a track file after tracking: it splits ID switches, screens false tracks,
+`dnt.refine` refines a track file after tracking: it splits vehicle tracks that reverse, splits ID switches, screens false tracks,
 merges interleaved duplicate tracks, links fragments (including across static waits and
 witnessed occlusions), drops orphans, and fills gaps. Every edit is recorded in a JSONL ledger
 next to the output.
@@ -48,6 +48,37 @@ The score is multiplied by a border prior, `0.8 + 0.2 * b`, where `b` is 0 for a
 or starts near the image border. With `accept_above` 0.62, such border links can now be
 applied too: on the three audited clips, 2 of the 8 applied links (beginning 98->134, middle
 221->222) were border links, and both were among the audited, correct ones.
+
+## Vehicle reversals
+
+A tracker sometimes carries one vehicle's ID over to another that comes back along the same
+path, usually far down the road where boxes are small. Stage `reversal` (first, before switch)
+splits a vehicle track wherever its direction reverses: the velocities over `window` seconds
+before and after a row must both reach `min_speed` box heights per second and differ by at
+least `min_angle` degrees. The cut goes where the velocity changes most, and each part keeps at
+least `min_rows` rows. Every split is applied (`AUTO_ACCEPT`) and recorded as a `SPLIT` event
+with stage `reversal`. Link and dedup never join the two sides of a cut again, also through a
+third track:
+
+- a direct link between the two sides is excluded before link proposes anything, so it leaves
+  no LINK event in the ledger (in legacy mode too, where the pair is infeasible in the
+  assignment);
+- an accepted link that would chain the two sides through a third track is kept in the ledger
+  with `applied: false` and `skipped_reason: reversal`;
+- a merge refused for the same reason is kept with `skipped_reason: conflict` and
+  `conflicts_with.why: reversal`.
+
+```yaml
+reversal:
+  enabled: true      # default for the vehicle target; false for person
+  window: 2.0        # seconds before / after a row
+  min_speed: 0.5     # box heights per second, each side (0.2 splits queued cars)
+  min_angle: 135.0   # degrees between the two velocities
+  min_rows: 5        # rows each part must keep
+  min_side_rows: 3   # rows each side needs to measure a velocity
+```
+
+Turn it off with `reversal: {enabled: false}` to get the output of earlier versions.
 
 ## Interleaved duplicate tracks
 

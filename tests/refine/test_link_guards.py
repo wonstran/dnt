@@ -191,6 +191,7 @@ def _motion_only_config():
 
 def test_without_the_guards_link_undoes_the_accepted_split(tmp_path):
     cfg = _motion_only_config()
+    cfg.reversal.enabled = False  # this test is about switch splitting and link, not reversal splitting
     cfg.link.keep_splits = False
     cfg.link.normal_heading_check = False
     res = _refine(tmp_path, cfg)
@@ -201,7 +202,9 @@ def test_without_the_guards_link_undoes_the_accepted_split(tmp_path):
 
 
 def test_with_the_guards_the_accepted_split_stays_split(tmp_path):
-    res = _refine(tmp_path, _motion_only_config())
+    cfg = _motion_only_config()
+    cfg.reversal.enabled = False  # this test is about switch splitting and link, not reversal splitting
+    res = _refine(tmp_path, cfg)
     (split,) = [e for e in res.events if e.stage == "switch"]
     assert split.decision is Decision.AUTO_ACCEPT and split.applied
     assert not [e for e in res.events if e.kind is EventKind.LINK and e.applied]
