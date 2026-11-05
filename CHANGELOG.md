@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.3.4.2 — 2026-11-05
 
 ### New
 - `dnt.refine` merges interleaved duplicate tracks. A tracker sometimes alternates IDs on one

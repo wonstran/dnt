@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.3.4.2 — 2026-11-05
 
 ### Changed
 - `dnt.refine` output for the vehicle target changes by default: tracks that reverse are split

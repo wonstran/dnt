@@ -9,7 +9,7 @@ PROJECT = tomllib.loads((ROOT / "pyproject.toml").read_text())["project"]
 
 
 def test_version_consistent():
-    assert dnt.__version__ == PROJECT["version"] == "0.3.4.1"
+    assert dnt.__version__ == PROJECT["version"] == "0.3.4.2"
     assert importlib.metadata.version("dnt") == dnt.__version__
 
 
