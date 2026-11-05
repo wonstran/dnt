@@ -25,7 +25,7 @@ from .primitives import (
     span_speed,
 )
 from .reporter import advance
-from .reversal import ReversalSides, side_conflict
+from .reversal import ReversalSides, resolve_reversal_chains, side_conflict
 
 LEGACY_COL_NAMES = ["frame", "track", "x", "y", "w", "h", "score", "cls", "interp", "r4"]
 
@@ -1236,7 +1236,12 @@ def run_link_stage(
         acc = [e for e in evs if e.decision in ACCEPTED]
         for e in acc:
             e.applied = True
-        return LinkStageResult(evs, [(int(e.tracks[0]), int(e.tracks[1])) for e in acc], set(), [])
+        dropped: list[Event] = []
+        if reversal_sides is not None and reversal_sides.cuts:
+            dropped = resolve_reversal_chains(acc, reversal_sides.table_tags(work, excluded))
+        gone = {id(e) for e in dropped}
+        pairs = [(int(e.tracks[0]), int(e.tracks[1])) for e in acc if id(e) not in gone]
+        return LinkStageResult(evs, pairs, set(), dropped)
     cands, descs = score_candidates(
         work,
         cfg,
@@ -1269,5 +1274,13 @@ def run_link_stage(
     skipped_ids = {id(e) for e in skipped}
     for e in acc:
         e.applied = id(e) not in skipped_ids
+    if reversal_sides is not None and reversal_sides.cuts:
+        active = [e for e in acc if e.applied]
+        tags_of = {t: reversal_sides.tags(t, d.lineage) for t, d in descs.items()}
+        dropped = resolve_reversal_chains(active, tags_of)
+        if dropped:
+            gone = {id(e) for e in dropped}
+            pairs = [(int(e.tracks[0]), int(e.tracks[1])) for e in active if id(e) not in gone]
+            skipped = [*skipped, *dropped]
     pending = {t for e in events if e.decision is Decision.HUMAN_PENDING for t in e.tracks}
     return LinkStageResult(events, pairs, pending, skipped)
