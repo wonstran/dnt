@@ -102,8 +102,11 @@ def test_a_cyclic_group_is_attributed_once_whatever_the_proposal_order():
 
 def _dense_pair():
     # tracks 1 and 3 are densely co-observed (a person and a ghost of the same person); track 2
-    # interleaves with both, so A/B and B/C are both accepted and A/C has no event
-    return _work(_rows(1, range(0, 60, 2)), _rows(2, range(1, 60, 2)), _rows(3, range(0, 60, 2)))
+    # interleaves with both, so A/B and B/C are both accepted and A/C has no event; the ghost is
+    # 3 px off, because boxes that are all but identical (IoU >= duplicate_iou) merge as nested
+    return _work(
+        _rows(1, range(0, 60, 2)), _rows(2, range(1, 60, 2)), _rows(3, range(0, 60, 2), dx=3.0)
+    )
 
 
 def test_a_densely_co_observed_pair_blocks_the_bridge_whatever_the_order():

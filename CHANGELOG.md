@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.3.4.2 — 2026-11-05
 
 ### New
 - `dnt.refine` merges interleaved duplicate tracks. A tracker sometimes alternates IDs on one
@@ -89,16 +89,19 @@
   a later release.
 - `dnt.track.VehReClass` classifies vehicle tracks as car, bus or truck and writes the class into
   `cls` on every row. Each track goes through up to three layers: a size check (`hv_size`, at
-  least `hv_min_count` real rows) that limits a big vehicle to bus or truck; re-detection on 10
-  large frames spaced at least 5 frames apart, where the winning class needs 30% of the frames;
-  and, when `vlm=` is set, one VLM question per undecided track using `dnt.refine`'s backends and
-  cache. Undecided tracks become truck if flagged heavy, car otherwise. Car means any light
-  vehicle, vans and pickups included, and truck a heavy goods vehicle: since COCO's truck also
-  covers vans and pickups, a bus or truck vote from re-detection decides only for a size-flagged
-  track, and otherwise the VLM is asked (or the track becomes car). `vr.decisions` shows which
-  layer decided each track and, in `redetect_cls`, what re-detection voted.
-
-### Changed
+  least `hv_min_count` real rows) that decides which re-detection votes are trusted; re-detection
+  on 10 large frames spaced at least 5 frames apart, where the winning class needs 30% of the
+  frames; and, when `vlm=` is set, one VLM question per undecided track with the options car,
+  bus, truck and unclear, using `dnt.refine`'s backends and cache. Car means any light vehicle,
+  vans and pickups included, and truck a heavy goods vehicle. COCO's truck also covers vans and
+  pickups, so a bus or truck vote decides only on a size-flagged track; and a large box close
+  to the camera is also what an SUV or pickup looks like, so a car vote decides only on a track
+  that is not flagged. Where size and the vote disagree, the VLM is asked. A track still
+  undecided stays car if re-detection leaned car, becomes truck if it is flagged heavy, and
+  car otherwise. Set `hv_size` above the largest SUV or pickup the camera sees: with 240 on the
+  Collins Ave clips, 13 SUVs, pickups and a sedan were labelled truck, and 340 cleared them.
+  `vr.decisions` shows which layer decided each track and, in `redetect_cls`, what
+  re-detection voted.
 - Stage 1 treats a reversal of heading as a motion break (new `switch.heading_reversal`, on for
   the vehicle target and off for the person target; `switch.heading_min_speed`, default 10
   pixels per second, and `switch.ramps.heading`, default `[0.3, 0.8]`). A vehicle cannot turn

@@ -194,3 +194,66 @@ def test_interleave_counts_owner_switches_not_a_single_handover():
 
     assert sw(range(0, 20, 2), range(1, 21, 2)) == (17, 1.0)
     assert sw([0, 1, 2, 3, 10, 11, 12, 13], [4, 5, 6, 7, 14, 15])[0] == 1
+
+
+def _nested_work(inner_h=30.0, dx=0.0):
+    """Track 1 is a full-body box; track 2 a torso box inside it (or beside it, shifted by dx)."""
+    n = 40
+    full = _rows(1, range(n))
+    torso = [[f, 2, 100.0 + 3.0 * f + dx + 5.0, 105.0, 20.0, inner_h, 0.9, 0, -1, -1]
+             for f in range(n)]
+    return _work(full, torso)
+
+
+def _nested_appearance(sim):
+    fs = list(range(40))
+    other = [sim, float(np.sqrt(max(0.0, 1.0 - sim * sim)))]
+    return ArrayAppearance({1: (fs, np.tile([1.0, 0.0], (40, 1))),
+                            2: (fs, np.tile(other, (40, 1)))})
+
+
+def test_nested_concurrent_boxes_are_proposed_and_scored_on_appearance_alone():
+    cfg = RefineConfig.defaults()
+    assert propose_merges(_nested_work(), cfg, FPS) == []
+    (ev,) = propose_merges(_nested_work(), cfg, FPS, _nested_appearance(0.45))
+    assert ev.signals["nested"] is True and ev.signals["co_occupancy"] == 1.0
+    assert cfg.dedup.reject_below < ev.algo_score < cfg.dedup.accept_above
+    (strong,) = propose_merges(_nested_work(), cfg, FPS, _nested_appearance(0.95))
+    assert strong.algo_score > cfg.dedup.accept_above
+
+
+def test_side_by_side_people_are_not_nested():
+    cfg = RefineConfig.defaults()
+    work = _nested_work(dx=40.0)
+    assert propose_merges(work, cfg, FPS, _nested_appearance(0.95)) == []
+
+
+def test_a_nested_proposal_is_applied_despite_dense_co_observation():
+    from dnt.refine.dedup import apply_merges
+    from dnt.refine.events import Decision
+
+    cfg = RefineConfig.defaults()
+    work = _nested_work()
+    (ev,) = propose_merges(work, cfg, FPS, _nested_appearance(0.95))
+    ev.decision = Decision.AUTO_ACCEPT
+    out = apply_merges(work, [ev], cfg)
+    assert out.counts["applied"] == 1 and out.work["track"].nunique() == 1
+    ev.signals["nested"] = False
+    ev.applied = None
+    assert apply_merges(work, [ev], cfg).counts["conflict"] == 1
+
+
+def test_identical_concurrent_boxes_are_nested_without_appearance():
+    cfg = RefineConfig.defaults("vehicle")
+    cfg.link.class_groups = [[1, 3]]
+    twins = _work(_rows(1, range(40), cls=1), _rows(2, range(40), cls=3, score=0.7))
+    (ev,) = propose_merges(twins, cfg, FPS)
+    assert ev.signals["nested"] is True and ev.algo_score > cfg.dedup.accept_above
+
+
+def test_nearly_identical_boxes_need_the_duplicate_iou():
+    cfg = RefineConfig.defaults()
+    near = _work(_rows(1, range(40)), _rows(2, range(40), dx=6.0))  # IoU 0.67, contained 0.8
+    assert propose_merges(near, cfg, FPS) == []
+    cfg.dedup.duplicate_iou = 0.6
+    assert [e.signals["nested"] for e in propose_merges(near, cfg, FPS)] == [True]

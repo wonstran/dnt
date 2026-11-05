@@ -15,7 +15,7 @@ _REQUIRED = ("track", "cls", "avg_score")
 
 @dataclass(frozen=True)
 class ReclassHint:
-    """One ``ReClass.re_classify`` result for a raw track."""
+    """One ``PedReClass.re_classify`` result for a raw track."""
 
     raw_id: int
     cls: int

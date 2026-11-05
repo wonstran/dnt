@@ -43,6 +43,7 @@ nav:
           - Refiner: api/refine/refiner.md
           - Configuration: api/refine/config.md
           - Events and Ledger: api/refine/events.md
+          - Reversal splitting: api/refine/reversal.md
           - Interpolation: api/refine/interpolate.md
           - Linking: api/refine/link.md
           - Duplicate merging: api/refine/dedup.md

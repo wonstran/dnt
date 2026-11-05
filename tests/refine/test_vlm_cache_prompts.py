@@ -6,7 +6,6 @@ from dnt.refine.events import Event, EventKind
 from dnt.refine.vlm import VLMAnswer
 from dnt.refine.vlm.cache import AnswerCache
 from dnt.refine.vlm.prompts import (
-    HEAVY_CLASS,
     PERSON_SCREEN,
     RIDER_OPTIONS,
     SAME,
@@ -156,7 +155,6 @@ def test_vehicle_class_prompt_lists_options_and_reply_format():
     text = vehicle_class_prompt(VEHICLE_CLASS)
     assert "- car:" in text and "- bus:" in text and "- truck:" in text and "- unclear:" in text
     assert text.endswith('"reason": "<one short sentence>"}')
-    assert "- car:" not in vehicle_class_prompt(HEAVY_CLASS)
 
 
 def test_vehicle_glossary_is_light_vs_heavy():

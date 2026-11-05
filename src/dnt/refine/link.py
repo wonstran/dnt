@@ -1,4 +1,4 @@
-"""Stage 3: tracklet linking (spec 6.3), including the legacy ``link_tracklets``.
+"""Link stage: tracklet linking (spec 6.3), including the legacy ``link_tracklets``.
 
 ``link_tracklets`` moved here from ``dnt.track.post_process`` (which re-exports it) in dnt 0.4.
 """
@@ -25,6 +25,7 @@ from .primitives import (
     span_speed,
 )
 from .reporter import advance
+from .reversal import ReversalSides, resolve_reversal_chains, side_conflict
 
 LEGACY_COL_NAMES = ["frame", "track", "x", "y", "w", "h", "score", "cls", "interp", "r4"]
 
@@ -294,14 +295,21 @@ def _legacy_gate_cost(
     return cost
 
 
-def _legacy_matches(stitchable: list[dict], **gate_kw) -> list[tuple[int, int, float]]:
-    """Return ``link_tracklets``'s Hungarian matches as ``(end_track, start_track, cost)``."""
+def _legacy_matches(
+    stitchable: list[dict], *, forbid: Callable[[int, int], bool] | None = None, **gate_kw
+) -> list[tuple[int, int, float]]:
+    """Return ``link_tracklets``'s Hungarian matches as ``(end_track, start_track, cost)``.
+
+    ``forbid(end_track, start_track)`` marks a pair infeasible (reversal spec 3.5).
+    """
     ends = sorted(stitchable, key=lambda d: (d["t_end"], d["track"]))
     starts = sorted(stitchable, key=lambda d: (d["t_start"], d["track"]))
     inf = 1e9
     cost = np.full((len(ends), len(starts)), inf, dtype=float)
     for i, a in enumerate(ends):
         for j, b in enumerate(starts):
+            if forbid is not None and forbid(int(a["track"]), int(b["track"])):
+                continue
             c = _legacy_gate_cost(a, b, **gate_kw)
             if c is not None:
                 cost[i, j] = c
@@ -514,7 +522,7 @@ STAGE = "link"
 
 @dataclass
 class TrackDesc:
-    """What stage 3 needs to know about one track (spec 6.3)."""
+    """What the link stage needs to know about one track (spec 6.3)."""
 
     track: int
     frames: np.ndarray
@@ -896,13 +904,15 @@ def score_candidates(
     occluded,
     min_score: float | None = None,
     excluded=None,
+    reversal_sides: ReversalSides | None = None,
 ) -> tuple[list[Candidate], dict[int, TrackDesc]]:
     """Gate and score every end->start pair (spec 6.3).
 
     With ``min_score``, occlusion-witnessed pairs that cannot score ``min_score`` are left out
-    before their witness scan; every other candidate is the same as without it. Stage 3 passes
-    ``link.reject_below``, below which a candidate never enters assignment. ``context`` holds
+    before their witness scan; every other candidate is the same as without it. The link stage
+    passes ``link.reject_below``, below which a candidate never enters assignment. ``context`` holds
     the occluder boxes, without the rows' own detections (``primitives.drop_context_duplicates``).
+    ``reversal_sides``: no candidate joins two sides of a reversal cut (reversal spec 3.5).
     """
     lc = cfg.link
     motion_only = appearance is None
@@ -927,6 +937,11 @@ def score_candidates(
     order = sorted(descs.values(), key=lambda d: (d.t_s, d.track))
     starts = np.array([d.t_s for d in order])
     spans = _split_spans(descs) if lc.keep_splits else {}
+    tags = (
+        {t: reversal_sides.tags(t, d.lineage) for t, d in descs.items()}
+        if reversal_sides is not None and reversal_sides.cuts
+        else None
+    )
     cache: dict = {}
     cands: list[Candidate] = []
     for di in sorted(descs.values(), key=lambda d: d.track):
@@ -937,7 +952,9 @@ def score_candidates(
             if dj.track == di.track or not _class_ok(di.cls_major, dj.cls_major, lc.class_groups):
                 continue
             if lc.keep_splits and _resplit(di, dj, spans):
-                continue  # stage 1 split these halves apart; stage 3 does not undo it
+                continue  # the switch stage split these halves apart; link does not undo it
+            if tags is not None and side_conflict(tags[di.track] | tags[dj.track]) is not None:
+                continue  # the two sides of a reversal cut are two vehicles (reversal spec 3.5)
             g = dj.t_s - di.t_e
             res = _gate(di, dj, g, cfg, fps, gaps)
             if res is None:
@@ -987,7 +1004,14 @@ def score_candidates(
     return cands, descs
 
 
-def legacy_link_events(work, cfg: RefineConfig, fps: float, excluded=None) -> list[Event]:
+def legacy_link_events(
+    work,
+    cfg: RefineConfig,
+    fps: float,
+    excluded=None,
+    *,
+    reversal_sides: ReversalSides | None = None,
+) -> list[Event]:
     """Return ``link_tracklets``'s matches as LINK proposals (``link.mode: legacy``)."""
     lc = cfg.link
     if work.empty:
@@ -996,8 +1020,16 @@ def legacy_link_events(work, cfg: RefineConfig, fps: float, excluded=None) -> li
     stitchable = [d for d in _legacy_descriptors(df, lc.vel_frames).values() if d.get("stitchable")]
     if len(stitchable) <= 1:
         return []
+    forbid = None
+    if reversal_sides is not None and reversal_sides.cuts:
+        tags = reversal_sides.table_tags(work, excluded)
+
+        def forbid(a: int, b: int) -> bool:
+            return side_conflict(tags[a] | tags[b]) is not None
+
     matches = _legacy_matches(
         stitchable,
+        forbid=forbid,
         max_gap=to_frames(lc.max_gap, fps),
         size_ratio_max=lc.size_ratio_max,
         dist_mult=lc.dist_mult,
@@ -1031,7 +1063,7 @@ def legacy_link_events(work, cfg: RefineConfig, fps: float, excluded=None) -> li
 
 @dataclass
 class LinkStageResult:
-    """Stage 3 output."""
+    """Link stage output."""
 
     events: list[Event]
     accepted: list[tuple[int, int]]
@@ -1195,15 +1227,21 @@ def run_link_stage(
     occluded,
     route: Callable[[list[Event]], None],
     excluded=None,
+    reversal_sides: ReversalSides | None = None,
 ) -> LinkStageResult:
     """Propose, route, and resolve LINK events for the current work table."""
     if cfg.link.mode == "legacy":
-        evs = legacy_link_events(work, cfg, fps, excluded)
+        evs = legacy_link_events(work, cfg, fps, excluded, reversal_sides=reversal_sides)
         route(evs)
         acc = [e for e in evs if e.decision in ACCEPTED]
         for e in acc:
             e.applied = True
-        return LinkStageResult(evs, [(int(e.tracks[0]), int(e.tracks[1])) for e in acc], set(), [])
+        dropped: list[Event] = []
+        if reversal_sides is not None and reversal_sides.cuts:
+            dropped = resolve_reversal_chains(acc, reversal_sides.table_tags(work, excluded))
+        gone = {id(e) for e in dropped}
+        pairs = [(int(e.tracks[0]), int(e.tracks[1])) for e in acc if id(e) not in gone]
+        return LinkStageResult(evs, pairs, set(), dropped)
     cands, descs = score_candidates(
         work,
         cfg,
@@ -1214,6 +1252,7 @@ def run_link_stage(
         occluded=occluded,
         min_score=cfg.link.reject_below,
         excluded=excluded,
+        reversal_sides=reversal_sides,
     )
 
     def make_event(c: Candidate, routed: float, extra: dict) -> Event:
@@ -1235,5 +1274,13 @@ def run_link_stage(
     skipped_ids = {id(e) for e in skipped}
     for e in acc:
         e.applied = id(e) not in skipped_ids
+    if reversal_sides is not None and reversal_sides.cuts:
+        active = [e for e in acc if e.applied]
+        tags_of = {t: reversal_sides.tags(t, d.lineage) for t, d in descs.items()}
+        dropped = resolve_reversal_chains(active, tags_of)
+        if dropped:
+            gone = {id(e) for e in dropped}
+            pairs = [(int(e.tracks[0]), int(e.tracks[1])) for e in active if id(e) not in gone]
+            skipped = [*skipped, *dropped]
     pending = {t for e in events if e.decision is Decision.HUMAN_PENDING for t in e.tracks}
     return LinkStageResult(events, pairs, pending, skipped)

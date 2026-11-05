@@ -1,4 +1,4 @@
-"""Track refinement: switch splitting, false-track screening, linking, and gap filling.
+"""Track refinement: reversal and switch splitting, false-track screening, linking, gap filling.
 
 Design: docs/superpowers/specs/2026-09-27-track-refinement-design.md.
 """

@@ -31,10 +31,11 @@ class Appearance(Protocol):
 
 
 class DenseAppearance(Appearance, Protocol):
-    """An ``Appearance`` that can also give every clean frame around a stage 1 candidate.
+    """An ``Appearance`` that can also give every clean frame around a switch candidate.
 
-    ``clean_embeddings`` then returns the coarse samples only. Stage 1 finds candidates on them
-    and calls ``prefetch_dense`` once with every window it will need, then ``dense_embeddings``.
+    ``clean_embeddings`` then returns the coarse samples only. The switch stage finds candidates on
+    them and calls ``prefetch_dense`` once with every window it will need,
+    then ``dense_embeddings``.
     """
 
     def dense_embeddings(self, raw_id: int, f0: int, f1: int) -> tuple[np.ndarray, np.ndarray]:

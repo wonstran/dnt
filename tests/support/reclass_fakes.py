@@ -1,4 +1,4 @@
-"""Fakes for ReClass and VehReClass tests: a frame reader and a scripted detector."""
+"""Fakes for the re-classifier tests: a frame reader and a scripted detector."""
 
 from __future__ import annotations
 

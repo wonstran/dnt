@@ -16,7 +16,7 @@ def ramp(x, lo: float, hi: float):
 
 
 def cv_kalman(process_var: float = 10.0, meas_var_pos: float = 25.0, meas_var_size: float = 16.0):
-    """Return the constant-velocity Kalman filter shared by stage 1 and stage 4 (spec 5.2).
+    """Return the constant-velocity Kalman filter shared by the switch and fill stages (spec 5.2).
 
     State is ``[cx, vx, cy, vy, w, vw, h, vh]`` with one step per frame. The caller sets ``x``.
     """
@@ -197,8 +197,8 @@ def frame_runs(frames) -> list[tuple[int, int]]:
 #: another object. Every such box counts, not only the best one per row: a detector that proposes
 #: several boxes on one vehicle (one per class, say car, bus and truck) must not make the vehicle
 #: look occluded by its own proposals. Such boxes are left out of the occlusion mask and of
-#: stage 3's witness occluders (final-review rulings R22 and R6); the stage 2 context cues still
-#: see them.
+#: the link stage's witness occluders (final-review rulings R22 and R6); the screen stage's
+#: context cues still see them.
 CONTEXT_MATCH_IOU = 0.5
 
 

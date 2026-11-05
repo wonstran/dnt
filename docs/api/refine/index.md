@@ -1,9 +1,9 @@
 # Track Refinement (`dnt.refine`)
 
-`dnt.refine` refines a track file after tracking: it splits ID switches, screens false tracks,
-merges interleaved duplicate tracks, links fragments (including across static waits and
-witnessed occlusions), drops orphans, and fills gaps. Every edit is recorded in a JSONL ledger
-next to the output.
+`dnt.refine` refines a track file after tracking: it splits vehicle tracks that reverse, splits
+ID switches, screens false tracks, merges interleaved duplicate tracks, links fragments
+(including across static waits and witnessed occlusions), drops orphans, and fills gaps. Every
+edit is recorded in a JSONL ledger next to the output.
 
 Used like `Detector` and `Tracker`:
 
@@ -23,10 +23,10 @@ Command line: `dnt-refine run TRACKS --fps 10 --config refine.yaml --out clean.c
 !!! note "Current limitations"
     This release scores with motion only unless you give a video and an appearance encoder
     (see Appearance below), and cannot yet apply decisions made in review.
-    Edits it is sure of are applied: in-vehicle and duplicate false-track drops, rider
-    reclasses whose subtype a ReClass hint settles, links across short gaps and static waits
-    with a clear assignment margin, orphan drops, and gap filling. With an encoder, ID-switch
-    splits and links are also scored by appearance and applied when they score high enough.
+    Edits it is sure of are applied: reversal splits of vehicle tracks, in-vehicle and duplicate
+    false-track drops, rider reclasses whose subtype a ReClass hint settles, links across short
+    gaps and static waits with a clear assignment margin, orphan drops, and gap filling. With an
+    encoder, ID-switch splits and links are also scored by appearance and applied when they score high enough.
     Without a VLM backend (the default), other edits are proposed but never applied yet,
     because their scores are capped below auto-accept: ID-switch splits found from motion alone,
     links across occlusions, links with an ambiguous assignment margin, and false-track drops of
@@ -49,6 +49,37 @@ or starts near the image border. With `accept_above` 0.62, such border links can
 applied too: on the three audited clips, 2 of the 8 applied links (beginning 98->134, middle
 221->222) were border links, and both were among the audited, correct ones.
 
+## Vehicle reversals
+
+A tracker sometimes carries one vehicle's ID over to another that comes back along the same
+path, usually far down the road where boxes are small. Stage `reversal` (first, before switch)
+splits a vehicle track wherever its direction reverses: the velocities over `window` seconds
+before and after a row must both reach `min_speed` box heights per second and differ by at
+least `min_angle` degrees. The cut goes where the velocity changes most, and each part keeps at
+least `min_rows` rows. Every split is applied (`AUTO_ACCEPT`) and recorded as a `SPLIT` event
+with stage `reversal`. Link and dedup never join the two sides of a cut again, also through a
+third track:
+
+- a direct link between the two sides is excluded before link proposes anything, so it leaves
+  no LINK event in the ledger (in legacy mode too, where the pair is infeasible in the
+  assignment);
+- an accepted link that would chain the two sides through a third track is kept in the ledger
+  with `applied: false` and `skipped_reason: reversal`;
+- a merge refused for the same reason is kept with `skipped_reason: conflict` and
+  `conflicts_with.why: reversal`.
+
+```yaml
+reversal:
+  enabled: true      # default for the vehicle target; false for person
+  window: 2.0        # seconds before / after a row
+  min_speed: 0.5     # box heights per second, each side (0.2 splits queued cars)
+  min_angle: 135.0   # degrees between the two velocities
+  min_rows: 5        # rows each part must keep
+  min_side_rows: 3   # rows each side needs to measure a velocity
+```
+
+Turn it off with `reversal: {enabled: false}` to get the output of earlier versions.
+
 ## Interleaved duplicate tracks
 
 A tracker can alternate IDs on one person from frame to frame. Each ID then covers part of the
@@ -63,7 +94,9 @@ dedup:
   enabled: true
   accept_above: 0.75   # auto-merge at or above this score
   reject_below: 0.40   # auto-reject below it; in between the merge goes to review
-  cooccur_hi: 0.50     # observed together on this share of frames or more: never a candidate
+  cooccur_hi: 0.50     # observed together on this share of frames or more: never a candidate (unless nested)
+  nested_containment: 0.80  # median share of the smaller box inside the larger: one person boxed twice
+  duplicate_iou: 0.90       # nested boxes this alike (median IoU) merge without appearance: it cannot be measured on boxes that cover each other
   interleave_min_switches: 4  # owner switches in the overlap that mark an alternating pair
   interleave_min_rate: 0.30   # ... and the share of steps that switch
   interleave_relax: 0.15      # alternating look-alikes (appearance >= app_hi): co-motion ramp shifts down
@@ -77,7 +110,7 @@ sent to the VLM in this release.
 
 With a video, `refine` also compares what tracks look like. It crops each box, skips crops that
 another box overlaps, embeds the rest with a pretrained encoder, and uses the embeddings to
-find ID switches (stage 1) and to score links (stage 3). Install an encoder first:
+find ID switches (switch) and to score links (link). Install an encoder first:
 
 ```bash
 pip install 'dnt[refine-dino]'   # DINOv2 (the default, kind: dino)
@@ -89,7 +122,7 @@ encoder:
   kind: dino        # dino | reid | none
   model: facebook/dinov2-small
   device: auto      # cuda, xpu, mps, then cpu
-  sample_every: 5   # embed every 5th observed frame; stage 1 densifies around candidates
+  sample_every: 5   # embed every 5th observed frame; the switch stage densifies around candidates
 ```
 
 `encoder.kind: none`, or no video, scores with motion only and needs no extra. A video with the
@@ -100,15 +133,15 @@ The first `dino` run downloads the model from the Hugging Face Hub, so it needs 
 `pip install git+https://github.com/KaiyangZhou/deep-person-reid.git`.
 The embeddings are saved as `OUT.features.npz` next to the output and reused when the track
 file, video, context file, and encoder model, weights, and sampling settings are unchanged.
-Each stage has a minimum box size. Stage 1 ignores the appearance of boxes whose longer side
-is below `switch.min_crop_px` (40 px by default); stage 3 does the same with
+Each stage has a minimum box size. The switch stage ignores the appearance of boxes whose
+longer side is below `switch.min_crop_px` (40 px by default); the link stage does the same with
 `link.min_crop_px` (0 by default: every clean crop). A track whose boxes are all smaller gets
 no ID-switch proposal at all, and a link whose ends have no crop left is scored with
 appearance unknown. On three 640x480 pedestrian clips, where most boxes were smaller than
 40 px, the ID-switch splits found from small crops cut single pedestrians, while most links
-scored from small crops were correct. On three 640x480 pedestrian clips (beginning, evening, middle), stage 1 proposed 2, 20 and
-5 splits with the earlier default (no filter), 0, 3 and 1 with `switch.min_crop_px: 40`, and
-42, 209 and 85 in motion-only mode (`encoder.kind: none`); the filter removed 58-70% of the
+scored from small crops were correct. On three 640x480 pedestrian clips (beginning, evening, middle), the
+switch stage proposed 2, 20 and 5 splits with the earlier default (no filter), 0, 3 and 1 with
+`switch.min_crop_px: 40`, and 42, 209 and 85 in motion-only mode (`encoder.kind: none`); the filter removed 58-70% of the
 coarse samples. The filtered counts are approximate: dense frames missing from the cached
 embeddings were left out.
 Set a value to `0` to use every crop in that stage when your boxes are mostly larger than the
@@ -117,9 +150,9 @@ crops. `refine` logs how many samples each stage uses.
 
 ```yaml
 switch:
-  min_crop_px: 40   # stage 1 ignores the appearance of smaller boxes (longer side, px)
+  min_crop_px: 40   # switch ignores the appearance of smaller boxes (longer side, px)
 link:
-  min_crop_px: 0    # stage 3 compares every clean crop
+  min_crop_px: 0    # link compares every clean crop
 ```
 
 For vehicles, `reid` needs `encoder.weights`. The cache key includes a digest of the weights

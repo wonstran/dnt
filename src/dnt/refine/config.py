@@ -139,7 +139,7 @@ class EncoderConfig:
 
 @dataclass(kw_only=True)
 class SwitchConfig:
-    """Stage 1 settings (spec 6.1)."""
+    """Switch-stage settings (spec 6.1)."""
 
     enabled: bool = True
     accept_above: float = 0.90
@@ -174,8 +174,24 @@ class SwitchConfig:
 
 
 @dataclass(kw_only=True)
+class ReversalConfig:
+    """Stage ``reversal`` settings (reversal spec 5).
+
+    Speeds are in box heights per second, unlike ``switch.heading_min_speed`` (pixels per
+    second).
+    """
+
+    enabled: bool = False
+    window: float = 2.0
+    min_speed: float = 0.5
+    min_angle: float = 135.0
+    min_rows: int = 5
+    min_side_rows: int = 3
+
+
+@dataclass(kw_only=True)
 class ScreenConfig:
-    """Stage 2 settings (spec 6.2)."""
+    """Screen-stage settings (spec 6.2)."""
 
     enabled: bool = True
     accept_above: float = 0.85
@@ -221,6 +237,8 @@ class DedupConfig:
     comotion_hi: float = 0.50
     cooccur_lo: float = 0.10
     cooccur_hi: float = 0.50
+    nested_containment: float = 0.80
+    duplicate_iou: float = 0.90
     conflict_min_shared: int = 3
     appearance_floor: float = 0.60
     app_lo: float = 0.40
@@ -232,7 +250,7 @@ class DedupConfig:
 
 @dataclass(kw_only=True)
 class LinkConfig:
-    """Stage 3 settings (spec 6.3)."""
+    """Link-stage settings (spec 6.3)."""
 
     enabled: bool = True
     mode: str = "scored"
@@ -295,7 +313,7 @@ class OrphanConfig:
 
 @dataclass(kw_only=True)
 class FillConfig:
-    """Stage 4 settings (spec 6.4)."""
+    """Fill-stage settings (spec 6.4)."""
 
     enabled: bool = True
     max_gap: float | None = None
@@ -474,6 +492,7 @@ class RefineConfig:
     encoder: EncoderConfig = field(default_factory=EncoderConfig)
     screen: ScreenConfig = field(default_factory=ScreenConfig)
     dedup: DedupConfig = field(default_factory=DedupConfig)
+    reversal: ReversalConfig = field(default_factory=ReversalConfig)
     switch: SwitchConfig = field(default_factory=SwitchConfig)
     link: LinkConfig = field(default_factory=LinkConfig)
     orphan: OrphanConfig = field(default_factory=OrphanConfig)
@@ -491,6 +510,7 @@ class RefineConfig:
             cfg.link.class_groups = [[2, 7]]
             cfg.switch.heading_reversal = True  # a vehicle cannot turn around between two frames
             cfg.link.normal_heading_check = True
+            cfg.reversal.enabled = True  # two vehicles that share an ID: a reversal splits them
         return cfg
 
     @classmethod
@@ -550,6 +570,7 @@ class RefineConfig:
             if not 0.0 <= s.reject_below < s.accept_above <= 1.0:
                 p.append(f"{name}: need 0 <= reject_below < accept_above <= 1")
         p.extend(_dedup_problems(self.dedup))
+        p.extend(_reversal_problems(self.reversal))
         sc, lc = self.screen, self.link
         if not sc.static_score_cap < sc.accept_above:
             p.append("screen.static_score_cap must be below screen.accept_above")
@@ -699,10 +720,47 @@ def _dedup_problems(dd: DedupConfig) -> list[str]:
         p.append("dedup.interleave_min_switches must be an integer >= 1")
     if not (num(dd.interleave_min_rate) and 0.0 < dd.interleave_min_rate <= 1.0):
         p.append("dedup.interleave_min_rate must be a number in (0, 1]")
+    if not (num(dd.nested_containment) and 0.0 < dd.nested_containment <= 1.0):
+        p.append("dedup.nested_containment must be a number in (0, 1]")
+    if not (num(dd.duplicate_iou) and 0.0 < dd.duplicate_iou <= 1.0):
+        p.append("dedup.duplicate_iou must be a number in (0, 1]")
     if not (num(dd.interleave_relax) and 0.0 <= dd.interleave_relax < dd.comotion_lo):
         p.append("dedup.interleave_relax must be a number in [0, dedup.comotion_lo)")
     if not (num(dd.appearance_floor) and 0.0 <= dd.appearance_floor <= 1.0):
         p.append("dedup.appearance_floor must be a number in [0, 1]")
+    return p
+
+
+def _reversal_problems(rc: ReversalConfig) -> list[str]:
+    """Return the rules of the reversal block that its values break (reversal spec 5)."""
+
+    def num(x) -> bool:
+        return isinstance(x, int | float) and not isinstance(x, bool) and math.isfinite(x)
+
+    def whole(x) -> bool:
+        return isinstance(x, int) and not isinstance(x, bool)
+
+    p: list[str] = []
+    if not isinstance(rc.enabled, bool):
+        p.append(f"reversal.enabled must be true or false, not {rc.enabled!r}")
+    if not (num(rc.window) and rc.window > 0):
+        p.append(f"reversal.window must be a positive number of seconds, not {rc.window!r}")
+    if not (num(rc.min_speed) and rc.min_speed >= 0):
+        p.append(
+            "reversal.min_speed must be a number of box heights per second >= 0, "
+            f"not {rc.min_speed!r}"
+        )
+    if not (num(rc.min_angle) and 90 < rc.min_angle <= 180):
+        p.append(
+            "reversal.min_angle must be a number of degrees above 90 and at most 180, "
+            f"not {rc.min_angle!r}"
+        )
+    if not (whole(rc.min_rows) and rc.min_rows >= 1):
+        p.append(f"reversal.min_rows must be a whole number of rows >= 1, not {rc.min_rows!r}")
+    if not (whole(rc.min_side_rows) and rc.min_side_rows >= 2):
+        p.append(
+            f"reversal.min_side_rows must be a whole number of rows >= 2, not {rc.min_side_rows!r}"
+        )
     return p
 
 

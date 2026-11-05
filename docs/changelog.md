@@ -1,8 +1,45 @@
 # Changelog
 
-## Unreleased
+## 0.3.4.2 — 2026-11-05
+
+### Changed
+- `dnt.refine` output for the vehicle target changes by default: tracks that reverse are split
+  by the new `reversal` stage. Set `reversal: {enabled: false}` for the previous output.
+- The person re-classifier is now `PedReClass`, with the arguments `ReClass` had. `ReClass` is
+  a router: `ReClass(kind="ped" | "veh" | "twowheel", **kwargs)` builds `PedReClass`,
+  `VehReClass` or `TwoWheelReClass` with `kwargs` and forwards `re_classify` and attribute
+  reads to it. `ReClass(num_frames=...)` with keyword arguments still builds a `PedReClass`;
+  positional arguments no longer do, because the first one is `kind`.
 
 ### New
+- Stage `reversal` in `dnt.refine` splits a vehicle track where its direction reverses (two
+  vehicles that share one tracker ID). Link and dedup never join the two parts again, also
+  through a third track or after a merge replaces one part's rows. See "Vehicle reversals" in
+  the refine docs.
+- `dedup` merges nested duplicate boxes: two tracks observed together that box one object (a
+  torso inside a full body, or a bicycle and a motorcycle box on one machine) are a candidate
+  even when densely co-observed (`dedup.nested_containment`, default 0.8). They need appearance,
+  except when the boxes are all but identical (`dedup.duplicate_iou`, default 0.9), because
+  boxes that cover each other occlude each other's crop.
+- `TwoWheelReClass` decides whether two-wheeler tracks are bicycles (1) or motorcycles (3). It
+  re-detects nothing: it matches each track against motorcycle and bicycle detections you
+  already have (tables or headerless files) and the class the track carries. A clear majority
+  decides; mixed evidence goes to an optional VLM; a larger overlap then the larger class vote
+  decides otherwise. Each kept track gets one class on every row. Stand-up scooters and
+  skateboards, and tracks the VLM calls pedestrian or scooter rider, are dropped, or with
+  `scooter="keep"` kept as class 36. Per-track reasons are in `decisions`.
+- `ReClass(rider_map=...)` sets the class each VLM rider answer stands for. Mapping an answer
+  to `default_class` leaves the track a pedestrian, for pipelines where another stage owns
+  bicycles and motorcycles.
+- `ReClass` classifies riders. It now matches bicycle, motorcycle and skateboard/scooter
+  detections (`match_class` defaults to `[1, 3, 36]`; it was `[1, 36]`) and can ask a VLM about
+  tracks the overlap does not settle. A class that is the only one to overlap on at least
+  `min_support` (default 0.5) of the sampled frames is accepted; a weak overlap, or several
+  classes at once, goes to the model, which answers pedestrian, cyclist, motorcycle rider,
+  scooter rider or unclear. A track with no overlap stays a pedestrian and is never sent. New
+  arguments `vlm`, `vlm_crops`, `vlm_api_key`, `vlm_backend_factory` and `min_support`, and a
+  `decisions` table. Without `vlm`, the best overlap still wins, so the output is unchanged
+  apart from the added motorcycle class.
 - `dnt.refine` merges interleaved duplicate tracks. A tracker sometimes alternates IDs on one
   person from frame to frame; the fill stage then interpolated each ID into the other's frames,
   so the output showed overlapping boxes on one person. The new `dedup` stage runs between
@@ -89,16 +126,19 @@
   a later release.
 - `dnt.track.VehReClass` classifies vehicle tracks as car, bus or truck and writes the class into
   `cls` on every row. Each track goes through up to three layers: a size check (`hv_size`, at
-  least `hv_min_count` real rows) that limits a big vehicle to bus or truck; re-detection on 10
-  large frames spaced at least 5 frames apart, where the winning class needs 30% of the frames;
-  and, when `vlm=` is set, one VLM question per undecided track using `dnt.refine`'s backends and
-  cache. Undecided tracks become truck if flagged heavy, car otherwise. Car means any light
-  vehicle, vans and pickups included, and truck a heavy goods vehicle: since COCO's truck also
-  covers vans and pickups, a bus or truck vote from re-detection decides only for a size-flagged
-  track, and otherwise the VLM is asked (or the track becomes car). `vr.decisions` shows which
-  layer decided each track and, in `redetect_cls`, what re-detection voted.
-
-### Changed
+  least `hv_min_count` real rows) that decides which re-detection votes are trusted; re-detection
+  on 10 large frames spaced at least 5 frames apart, where the winning class needs 30% of the
+  frames; and, when `vlm=` is set, one VLM question per undecided track with the options car,
+  bus, truck and unclear, using `dnt.refine`'s backends and cache. Car means any light vehicle,
+  vans and pickups included, and truck a heavy goods vehicle. COCO's truck also covers vans and
+  pickups, so a bus or truck vote decides only on a size-flagged track; and a large box close
+  to the camera is also what an SUV or pickup looks like, so a car vote decides only on a track
+  that is not flagged. Where size and the vote disagree, the VLM is asked. A track still
+  undecided stays car if re-detection leaned car, becomes truck if it is flagged heavy, and
+  car otherwise. Set `hv_size` above the largest SUV or pickup the camera sees: with 240 on the
+  Collins Ave clips, 13 SUVs, pickups and a sedan were labelled truck, and 340 cleared them.
+  `vr.decisions` shows which layer decided each track and, in `redetect_cls`, what
+  re-detection voted.
 - Stage 1 treats a reversal of heading as a motion break (new `switch.heading_reversal`, on for
   the vehicle target and off for the person target; `switch.heading_min_speed`, default 10
   pixels per second, and `switch.ramps.heading`, default `[0.3, 0.8]`). A vehicle cannot turn

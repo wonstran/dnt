@@ -1,5 +1,5 @@
 # src/dnt/refine/screen.py
-"""Stage 2: false-track screening, and the orphan pass (spec 6.2)."""
+"""Screen stage: false-track screening, and the orphan pass (spec 6.2)."""
 
 from __future__ import annotations
 
