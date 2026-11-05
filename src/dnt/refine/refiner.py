@@ -569,6 +569,8 @@ class _Stages:
         if not cfg.link.enabled or work.empty:
             return work, {}, set(), set(), {}
         band = Band.of(cfg.link)
+        sides = self._sides()
+        tags_before = sides.table_tags(work, self.excluded) if sides is not None else None
         res = run_link_stage(
             work,
             cfg,
@@ -579,8 +581,11 @@ class _Stages:
             occluded=occluded,
             route=lambda evs: self._route(evs, band, "link"),
             excluded=self.excluded,
+            reversal_sides=sides,
         )
         work, rep_of = merge_chains(work, res.accepted)
+        if sides is not None:
+            sides.absorb(rep_of, tags_before)
         protected: dict[int, list[tuple[int, int]]] = {}
         for ev in res.events:
             if ev.applied and ev.params.get("gate") == "occluded":
