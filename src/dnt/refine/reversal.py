@@ -220,7 +220,11 @@ class ReversalSides:
     carried: dict[int, set[Tag]] = field(default_factory=dict)
 
     def own(self, lineage) -> set[Tag]:
-        """Return the tags of a lineage's spans of cut raw IDs."""
+        """Return the tags of a lineage's spans of cut raw IDs.
+
+        Each span of a raw ID is assumed to lie on one side of its cuts (the reversal stage split
+        there), so a span's first frame decides its side.
+        """
         out: set[Tag] = set()
         for raw, first, _last in lineage:
             cs = self.cuts.get(int(raw))

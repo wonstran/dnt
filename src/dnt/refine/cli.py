@@ -23,8 +23,8 @@ def build_parser() -> argparse.ArgumentParser:
     """Return the ``dnt-refine`` argument parser."""
     p = argparse.ArgumentParser(
         prog="dnt-refine",
-        description="Refine a track file: split ID switches, screen false tracks, link "
-        "fragments, drop orphans, and fill gaps.",
+        description="Refine a track file: split vehicle tracks that reverse, split ID switches, "
+        "screen false tracks, link fragments, drop orphans, and fill gaps.",
     )
     sub = p.add_subparsers(dest="command", required=True)
     run = sub.add_parser("run", help="refine a track file")

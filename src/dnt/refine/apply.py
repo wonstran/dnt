@@ -95,7 +95,7 @@ def merge_chains(
 ) -> tuple[pd.DataFrame, dict[int, int]]:
     """Merge linked tracks into chains that keep the earliest member's ID.
 
-    A later member's rows on frames the chain already has (the small overlap that stage 3's
+    A later member's rows on frames the chain already has (the small overlap that the link stage's
     gate 2 allows) are dropped; its other rows are kept, even inside the overlap span.
     """
     if not pairs:

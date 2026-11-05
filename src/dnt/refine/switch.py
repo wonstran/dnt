@@ -1,4 +1,4 @@
-"""Stage 1: ID-switch proposals (spec 6.1)."""
+"""Switch stage: ID-switch proposals (spec 6.1)."""
 
 from __future__ import annotations
 
@@ -19,7 +19,7 @@ STAGE = "switch"
 
 @dataclass
 class SwitchResult:
-    """Stage 1 proposals plus the weaker cut points screening uses (spec 6.2)."""
+    """Switch-stage proposals plus the weaker cut points screening uses (spec 6.2)."""
 
     events: list[Event]
     weak_cuts: dict[int, list[int]] = field(default_factory=dict)

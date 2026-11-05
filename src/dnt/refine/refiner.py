@@ -253,7 +253,7 @@ def fill_stage(
     protected: dict[int, list[tuple[int, int]]],
     excluded: dict[int, set[int]] | None = None,
 ) -> tuple[pd.DataFrame, list[Event]]:
-    """Run stage 4; return the filled table and its FILL / SMOOTH records (spec 6.4)."""
+    """Run the fill stage; return the filled table and its FILL / SMOOTH records (spec 6.4)."""
     if work.empty:
         return work, []
     max_gap_s = cfg.fill.max_gap if cfg.fill.max_gap is not None else cfg.link.max_gap
@@ -341,7 +341,7 @@ def embed_min_crop_px(cfg: RefineConfig) -> int:
 
 
 def stage_views(appearance, cfg: RefineConfig):
-    """Return the ``(stage 1, stage 3)`` appearance, each with its stage's ``min_crop_px``.
+    """Return the ``(switch, link)`` appearance, each with its stage's ``min_crop_px``.
 
     A provider without ``view`` (for example a custom one from an ``appearance_factory``) is
     used unchanged by both stages. A ``VideoAppearance`` (also one from a factory) gets a view

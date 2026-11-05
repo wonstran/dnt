@@ -1,4 +1,4 @@
-"""Stage 3: tracklet linking (spec 6.3), including the legacy ``link_tracklets``.
+"""Link stage: tracklet linking (spec 6.3), including the legacy ``link_tracklets``.
 
 ``link_tracklets`` moved here from ``dnt.track.post_process`` (which re-exports it) in dnt 0.4.
 """
@@ -522,7 +522,7 @@ STAGE = "link"
 
 @dataclass
 class TrackDesc:
-    """What stage 3 needs to know about one track (spec 6.3)."""
+    """What the link stage needs to know about one track (spec 6.3)."""
 
     track: int
     frames: np.ndarray
@@ -909,8 +909,8 @@ def score_candidates(
     """Gate and score every end->start pair (spec 6.3).
 
     With ``min_score``, occlusion-witnessed pairs that cannot score ``min_score`` are left out
-    before their witness scan; every other candidate is the same as without it. Stage 3 passes
-    ``link.reject_below``, below which a candidate never enters assignment. ``context`` holds
+    before their witness scan; every other candidate is the same as without it. The link stage
+    passes ``link.reject_below``, below which a candidate never enters assignment. ``context`` holds
     the occluder boxes, without the rows' own detections (``primitives.drop_context_duplicates``).
     ``reversal_sides``: no candidate joins two sides of a reversal cut (reversal spec 3.5).
     """
@@ -952,7 +952,7 @@ def score_candidates(
             if dj.track == di.track or not _class_ok(di.cls_major, dj.cls_major, lc.class_groups):
                 continue
             if lc.keep_splits and _resplit(di, dj, spans):
-                continue  # stage 1 split these halves apart; stage 3 does not undo it
+                continue  # the switch stage split these halves apart; link does not undo it
             if tags is not None and side_conflict(tags[di.track] | tags[dj.track]) is not None:
                 continue  # the two sides of a reversal cut are two vehicles (reversal spec 3.5)
             g = dj.t_s - di.t_e
@@ -1063,7 +1063,7 @@ def legacy_link_events(
 
 @dataclass
 class LinkStageResult:
-    """Stage 3 output."""
+    """Link stage output."""
 
     events: list[Event]
     accepted: list[tuple[int, int]]

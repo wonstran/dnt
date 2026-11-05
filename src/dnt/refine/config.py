@@ -139,7 +139,7 @@ class EncoderConfig:
 
 @dataclass(kw_only=True)
 class SwitchConfig:
-    """Stage 1 settings (spec 6.1)."""
+    """Switch-stage settings (spec 6.1)."""
 
     enabled: bool = True
     accept_above: float = 0.90
@@ -191,7 +191,7 @@ class ReversalConfig:
 
 @dataclass(kw_only=True)
 class ScreenConfig:
-    """Stage 2 settings (spec 6.2)."""
+    """Screen-stage settings (spec 6.2)."""
 
     enabled: bool = True
     accept_above: float = 0.85
@@ -250,7 +250,7 @@ class DedupConfig:
 
 @dataclass(kw_only=True)
 class LinkConfig:
-    """Stage 3 settings (spec 6.3)."""
+    """Link-stage settings (spec 6.3)."""
 
     enabled: bool = True
     mode: str = "scored"
@@ -313,7 +313,7 @@ class OrphanConfig:
 
 @dataclass(kw_only=True)
 class FillConfig:
-    """Stage 4 settings (spec 6.4)."""
+    """Fill-stage settings (spec 6.4)."""
 
     enabled: bool = True
     max_gap: float | None = None
@@ -759,8 +759,7 @@ def _reversal_problems(rc: ReversalConfig) -> list[str]:
         p.append(f"reversal.min_rows must be a whole number of rows >= 1, not {rc.min_rows!r}")
     if not (whole(rc.min_side_rows) and rc.min_side_rows >= 2):
         p.append(
-            "reversal.min_side_rows must be a whole number of rows >= 2, "
-            f"not {rc.min_side_rows!r}"
+            f"reversal.min_side_rows must be a whole number of rows >= 2, not {rc.min_side_rows!r}"
         )
     return p
 
