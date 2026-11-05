@@ -7,6 +7,7 @@ import hashlib
 import json
 import logging
 import re
+from bisect import bisect_right
 from collections import Counter
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
@@ -37,6 +38,7 @@ from .primitives import (
     speeds_hps,
 )
 from .reporter import Reporter, advance, current, extend, use
+from .reversal import ReversalSides, propose_reversal_splits
 from .review import review_image_dir, write_review
 from .screen import ScreenContext, propose_orphans, propose_screen
 from .switch import propose_splits
@@ -48,6 +50,7 @@ from .vlm.runner import VLMRunner
 
 log = logging.getLogger(__name__)
 LEDGER_FORMAT = "dnt.refine.ledger/1"
+_RUN_STAGES = 7  # the stages _Stages.run runs: reversal, switch, screen, dedup, link, orphan, fill
 
 
 @dataclass
@@ -393,6 +396,7 @@ class _Stages:
         self.absorbed: dict[int, int] = {}
         self.excluded: dict[int, set[int]] = {}
         self.merge_counts = {"applied": 0, "redundant": 0, "conflict": 0, "dropped_rows": 0}
+        self.reversal_sides = ReversalSides()
 
     def _route(self, evs: list[Event], band: Band, stage: str, *, use_vlm: bool = True) -> None:
         for e in evs:  # ids first: the VLM question tag uses them
@@ -453,7 +457,7 @@ class _Stages:
             n0 = _n_tracks(work)
             skipped = not getattr(self.cfg, name).enabled or work.empty
             # Prepare, when shown, is stage 1; the bar counts tracks, as every stage walks them
-            rep.stage_start(name, i + rep.n_stages - 7, 0 if skipped else n0)
+            rep.stage_start(name, i + rep.n_stages - _RUN_STAGES - 1, 0 if skipped else n0)
             out = fn(*args)
             res = out[0] if isinstance(out, tuple) else out
             rep.stage_done(
@@ -465,16 +469,50 @@ class _Stages:
             tick(name)
             return out
 
-        work, split_raw, cuts = stage(1, "switch", self._switch, work)
-        work = stage(2, "screen", self._screen, work, split_raw, cuts)
-        work = stage(3, "dedup", self._dedup, work)
-        work, protected, linked, pending, rep_of = stage(4, "link", self._link, work, occluded)
+        work, reversal_raw = stage(1, "reversal", self._reversal, work)
+        work, split_raw, cuts = stage(2, "switch", self._switch, work)
+        work = stage(3, "screen", self._screen, work, split_raw | reversal_raw, cuts)
+        work = stage(4, "dedup", self._dedup, work)
+        work, protected, linked, pending, rep_of = stage(5, "link", self._link, work, occluded)
         self._absorb(rep_of)
         linked = linked | {rep_of.get(t, t) for t in self.merged_reps}
         pending = pending | {rep_of.get(t, t) for t in self.merge_pending}
-        work = stage(5, "orphan", self._orphans, work, linked, pending)
-        work = stage(6, "fill", self._fill, work, protected)
+        work = stage(6, "orphan", self._orphans, work, linked, pending)
+        work = stage(7, "fill", self._fill, work, protected)
         return work, self.events
+
+    def _sides(self) -> ReversalSides | None:
+        """Return the reversal sides when the stage cut anything (reversal spec 3.5)."""
+        return self.reversal_sides if self.reversal_sides.cuts else None
+
+    def _reversal(self, work):
+        cfg = self.cfg
+        if not cfg.reversal.enabled or work.empty:
+            return work, set()
+        evs = propose_reversal_splits(work, cfg, self.fps)
+        raw_of: dict[int, int] = {}
+        for ev in evs:
+            self.seq["reversal"] += 1
+            ev.id = f"reversal-r0-{self.seq['reversal']:06d}"
+            decide(ev, Decision.AUTO_ACCEPT, source="auto")  # a hard rule (reversal spec 3.3)
+            t, c = ev.tracks[0], int(ev.params["cut_frame"])
+            rows = work.loc[(work["track"] == t) & (work["frame"] == c), "raw_id"]
+            raw_of[id(ev)] = int(rows.iloc[0])
+        self.events.extend(evs)
+        cuts: dict[int, list[int]] = {}
+        for ev in sorted(evs, key=lambda e: -int(e.params["cut_frame"])):  # latest cut first
+            new_id = next_track_id(work)
+            work = apply_edit(work, ev, new_id=new_id)
+            ev.applied = True
+            ev.signals["new_track"] = new_id
+            cuts.setdefault(raw_of[id(ev)], []).append(int(ev.params["cut_frame"]))
+        cuts = {raw: sorted(cs) for raw, cs in cuts.items()}
+        for ev in evs:
+            raw = raw_of[id(ev)]
+            k = bisect_right(cuts[raw], int(ev.params["cut_frame"]))
+            ev.signals["sides"] = [[raw, k - 1], [raw, k]]
+        self.reversal_sides = ReversalSides(cuts=cuts)
+        return work, set(cuts)
 
     def _switch(self, work):
         cfg = self.cfg
@@ -816,7 +854,8 @@ class TrackRefiner:
         tag = (
             "" if video_index is None or video_tot is None else f"[Video {video_index}/{video_tot}]"
         )
-        rep = Reporter(enabled=verbose, tag=tag, n_stages=7 if store is None else 8)
+        n_stages = _RUN_STAGES + 1 if store is None else _RUN_STAGES + 2  # + Save (+ Prepare)
+        rep = Reporter(enabled=verbose, tag=tag, n_stages=n_stages)
         # the runner (and its loop thread) exists only for the stage run that closes it
         runner = (
             None if backend is None else VLMRunner(cfg.vlm, backend, AnswerCache(cfg.vlm.cache_dir))

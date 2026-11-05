@@ -15,9 +15,10 @@ import numpy as np
 import pandas as pd
 
 from .apply import lineage_of_rows
-from .config import ReversalConfig, to_frames
-from .events import Event
+from .config import RefineConfig, ReversalConfig, to_frames
+from .events import Event, EventKind
 from .primitives import mean_velocity
+from .reporter import advance
 
 STAGE = "reversal"
 log = logging.getLogger(__name__)
@@ -341,3 +342,55 @@ def resolve_reversal_chains(active: list[Event], tags_of) -> list[Event]:
         active = [e for e in active if e is not ev]
         dropped.append(ev)
     return dropped
+
+
+def propose_reversal_splits(work: pd.DataFrame, cfg: RefineConfig, fps: float) -> list[Event]:
+    """Propose one undecided ``SPLIT`` event per kept cut of every track (spec 3.3).
+
+    Parameters
+    ----------
+    work : pandas.DataFrame
+        Work table from ``io.to_work``.
+    cfg : RefineConfig
+        ``cfg.reversal`` holds the thresholds.
+    fps : float
+        Video frame rate.
+
+    Returns
+    -------
+    list of Event
+        In track order, then frame order. The caller decides and applies them.
+
+    """
+    events: list[Event] = []
+    if work.empty:
+        return events
+    for tid, g in work.groupby("track", sort=True):
+        g = g.sort_values("frame")
+        found = find_reversals(
+            g["frame"].to_numpy(int), g[["x", "y", "w", "h"]].to_numpy(float), fps, cfg.reversal
+        )
+        advance()
+        lin = lineage_of_rows(g)
+        for r in found:
+            events.append(
+                Event.propose(
+                    stage=STAGE,
+                    kind=EventKind.SPLIT,
+                    tracks=[int(tid)],
+                    lineage=[lin],
+                    frames=(r.frame, r.frame),
+                    params={"cut_frame": r.frame},
+                    algo_score=1.0,
+                    signals={
+                        "angle": r.angle,
+                        "change": r.change,
+                        "run": list(r.run),
+                        "speed_before": r.speed_before,
+                        "speed_after": r.speed_after,
+                        "rows_before": r.rows_before,
+                        "rows_after": r.rows_after,
+                    },
+                )
+            )
+    return events
