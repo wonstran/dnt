@@ -1,6 +1,6 @@
 # dnt.refine: Splitting Vehicle Tracks at a Reversal (stage `reversal`)
 
-- **Status:** draft for review (rev. 4: addresses the [review 2026-11-04 21:42](../../review_2026-11-04-21-42-35.md) / [response](../../response_2026-11-04_22-10-00.md), see §11; rev. 3: addresses the [follow-up review 2026-11-04 21:16](../../review_2026-11-04-21-16-09.md) / [response](../../response_2026-11-04_21-55-00.md), see §10; rev. 2: addresses [review 2026-11-04 21:04](../../review_2026-11-04-21-04-32.md) / [response](../../response_2026-11-04_21-40-00.md); see §9)
+- **Status:** draft for review (rev. 5: addresses the [review 2026-11-04 21:56](../../review_2026-11-04-21-56-20.md) / [response](../../response_2026-11-04_22-20-00.md), see §12; rev. 4: addresses the [review 2026-11-04 21:42](../../review_2026-11-04-21-42-35.md) / [response](../../response_2026-11-04_22-10-00.md), see §11; rev. 3: addresses the [follow-up review 2026-11-04 21:16](../../review_2026-11-04-21-16-09.md) / [response](../../response_2026-11-04_21-55-00.md), see §10; rev. 2: addresses [review 2026-11-04 21:04](../../review_2026-11-04-21-04-32.md) / [response](../../response_2026-11-04_21-40-00.md); see §9)
 - **Date:** 2026-11-04
 - **Parent spec:** [2026-09-27-track-refinement-design.md](2026-09-27-track-refinement-design.md). This spec adds one stage to `dnt.refine`. Anything it does not state follows the parent spec (events §4.1, ledger §4.2, shared primitives §5, config §9). The dedup spec ([2026-10-03-track-dedup-design.md](2026-10-03-track-dedup-design.md)) set the pattern for adding a stage.
 - **Origin:** the driver script `3a1-split_reversals.py` from the Miami 20-minute pipeline (`OUT_ROOT/tracks/{stem}_veh_tracks_raw.txt` → `{stem}_veh_tracks_split.txt`). This stage replaces it.
@@ -118,14 +118,24 @@ The kept cuts of a track are applied **latest first**, with `apply_edit(work, ev
     - `own(t)` comes from the track's current lineage. Each span `(r, f0, f1)` of a cut raw ID gives `(r, k)` with `k = bisect_right(cuts[r], f0)`. A span never crosses a cut, because the reversal stage split there and nothing later puts rows of both sides back into one span.
     - `carried[t]` holds the tags of every track merged into `t`, even when none of their rows survive.
   - **Conflict.** A set of tags conflicts when it holds `(r, k1)` and `(r, k2)` with `k1 ≠ k2`. The function `side_conflict(tags) -> (r, k1, k2) | None` returns the smallest such `r`, and the two smallest differing `k` for it.
-  - **Owner.** `_Stages` keeps a `ReversalSides` object holding `cuts` (raw ID → sorted cut frames) and `carried` (work ID → set of tags). It provides `tags(track, lineage)`, `side_conflict`, and `absorb(mapping, tags_before)`, which unions the tags of each absorbed track into its representative's `carried`.
+  - **Owner.** `_Stages` keeps a `ReversalSides` object holding `cuts` (raw ID → sorted cut frames) and `carried` (work ID → set of tags). It provides `tags(track, lineage)`, `side_conflict`, and `absorb(mapping, tags_before)`.
+
+    **`absorb` contract.** `tags_before` is a snapshot of `tags(t)` (own ∪ carried) for **every** track on the table before the merges are applied, the representatives included. `mapping` is a flattened absorption map (absorbed work ID → surviving work ID), such as `MergeOutcome.absorbed` or link's `rep_of`. It has no entry for a representative itself. The transfer is:
+
+    ```python
+    for track, tags in tags_before.items():
+        representative = mapping.get(track, track)
+        carried[representative] |= tags
+    ```
+
+    A representative keeps its own pre-merge tags this way too. That matters because its own rows can all lose to an absorbed duplicate: in the replacement case below, `mapping = {3: 1}`, `tags_before[1] = {(1, 0)}` and `tags_before[3] = ∅`, so carrying only the absorbed tracks' tags would leave track 1 untagged. Because `tags_before[t]` already includes `carried[t]`, tags carried by an earlier merge (dedup) are kept when a later map (link) is applied. Tags are only ever added. Entries for IDs that no longer exist are harmless and never read.
   - **Effect on keys and evidence.** Tags are never written into lineage. Proposal keys, evidence crops and the ledger lineage keep the observed-row meaning they have today. Each applied split event records the tags of its two parts in `signals.sides`, so a reader can follow which part is which side.
 
   **How tags pass through the stages.**
   - **Reversal** creates `cuts`. `carried` starts empty: right after the split, every track's tags are its own.
   - **Switch and screen** only split tracks or drop rows. Each piece's tags come from its own lineage. Tags only need carrying where tracks are merged.
   - **Dedup** (§ *Dedup* below) computes the tags of every track on the table *before* it applies merges. `blocker` refuses a join whose union of component tags conflicts, and after applying, `ReversalSides.absorb(out.absorbed, tags_before)` adds each absorbed track's tags to its representative. In the review's case, track 1 gets `carried = {(1, 0)}` from `A`'s tags, computed before `A`'s rows are dropped. Raw 3 has no cuts, so it adds no tags of its own, and `tags(1) = {(1, 0)}`. With `tags(2) = {(1, 1)}`, the pair conflicts and is never a link candidate, whatever the heading settings.
-  - **Link** reads `tags` for its pair check and its chain check (below). After link, `_absorb(rep_of)` already composes link's merges into `absorbed`, and `ReversalSides.absorb` is called the same way, so a later joining step would see the tags too. (No stage after link joins tracks today.)
+  - **Link** reads `tags` for its pair check and its chain check (below). After link, `_absorb(rep_of)` already composes link's merges into `absorbed`. `ReversalSides.absorb(rep_of, tags_before_link)` is called with a snapshot taken from the work table link received, for every track. So a later joining step would see the tags too. (No stage after link joins tracks today.)
 
   **Link, pairs.** Link receives the `ReversalSides` and never forms a candidate `(di, dj)` for which `side_conflict(tags(di) ∪ tags(dj))` is not `None`:
   - in `score_candidates` (scored mode), next to the `keep_splits` / `_resplit` check, before gating, so a forbidden pair never becomes a candidate or an event;
@@ -212,7 +222,7 @@ A new `ReversalConfig` in `RefineConfig` (`cfg.reversal`). It is parsed, overlai
 - **Link chain, unrelated link kept:** the same fixture plus a track `Y` linked after `B`. Only a link on the `A … B` path is dropped, and `B → Y` stays applied.
 - **Link chain, legacy mode:** the chain fixture with `link.mode: legacy` (built so that `_legacy_matches` pairs `A → X` and `X → B`) leaves `A` and `B` apart.
 - **Dedup replacement, then link (the review of 21:42):** the clean out-and-back path, 10 × 10 px, class 2. `A` is work 1, raw 1, frames 0–29, score 0.8. `B` is work 2, raw 1, frames 30–59, score 0.9. Cut at 30. Work 3 is raw 3, with `A`'s boxes and frames and score 0.95. The config is the vehicle defaults **with `link.normal_heading_check = False`**, so only the cut protection can refuse the join. Dedup must still auto-accept and apply `[1, 3]`, after which track 1 holds only raw 3, and `ReversalSides.carried[1]` must contain `(1, 0)`. With `reversal_sides`, link must form no candidate `[1, 2]`. Without it, link must accept `[1, 2]` at 0.975 (the failure, pinned).
-- **Side tags (unit):** `own` tags from lineage, including several cuts of one raw ID; `side_conflict` ordering (smallest `r`, then the two smallest `k`); and `absorb` composing over a dedup map followed by a link map.
+- **Side tags (unit):** `own` tags from lineage, including several cuts of one raw ID; `side_conflict` ordering (smallest `r`, then the two smallest `k`); and `absorb` composing over a dedup map followed by a link map (a tag carried by dedup survives the link map). Also the minimal case `mapping = {3: 1}`, `tags_before = {1: {(1, 0)}, 3: ∅}`: after `absorb`, `tags(1)` must contain `(1, 0)` while track 1's own lineage gives no tag.
 - **Dedup component:** a track `X` that co-moves with `A` for 1.5 s before the cut and with `B` for 1.5 s after it (interleaved observations, so both `MERGE` events are accepted). With `reversal_sides`, one edge is skipped with `why = "reversal"`, and `A` and `B` stay apart. Without it, all three merge (the failure, pinned).
 - **Link unchanged without cuts:** with `reversal_sides=None` or with no cuts, `score_candidates` returns the same candidates as before the change.
 - **Screen hand-off:** the raw IDs of a reversal-split track are in `ScreenContext.split_raw_ids`.
@@ -282,3 +292,9 @@ Refine tests that run the vehicle target and compare exact outputs either set `r
 |---|---|
 | **[P1]** Dedup can remove every row of one side, and the side goes with them | Reproduced with production `propose_merges`, `apply_merges` and `run_link_stage`: dedup accepts `[1, 3]` at 1.0, track 1 is left holding only raw 3, and with `link.normal_heading_check = False` link accepts `[1, 2]` at 0.975. A track's side of a cut is now a **side tag** `(r, k)`. It comes from the track's own lineage plus the tags `carried` from every track merged into it, kept in `ReversalSides`. Dedup unions the tags into the representative after applying merges, link's merges do the same, and tags never enter lineage, keys or evidence. `straddles` is replaced by `side_conflict` over tags (§3.5). New tests: the replacement case run through dedup and then link, with the heading check off, plus unit tests for the tags (§6.2). |
 | **[P2]** Find the chain path by graph traversal, not first-frame intervals | Accepted. `resolve_reversal_chains` builds an undirected graph of the active links, visits components in order of their smallest member, picks the conflicting members `u` and `v` deterministically, finds the `u`–`v` path by breadth-first search with neighbours in ID order, and drops the weakest event on that path (§3.5). The review's chain whose path is not in first-frame order is a test (§6.2). |
+
+## 12. Revision 5: changes from the review of 2026-11-04 21:56
+
+| Finding | Change |
+|---|---|
+| **[P2]** `absorb` must also keep the representative's own pre-merge tags | Accepted. The `absorb` contract (§3.5) now takes a snapshot of every track's tags before the merges, the representatives included, and carries each one into `mapping.get(t, t)`. So a representative whose own rows all lost to a duplicate keeps its side, and tags carried by dedup survive the link map. The minimal case (`{3: 1}`, `tags_before[1] = {(1, 0)}`, `tags_before[3] = ∅`) is a unit test (§6.2). The design is otherwise unchanged. |
