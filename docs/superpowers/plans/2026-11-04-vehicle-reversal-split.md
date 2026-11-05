@@ -1012,10 +1012,16 @@ def test_every_path_between_the_sides_is_broken():
     assert [e.tracks for e in dropped] == [[2, 4], [3, 4]]
 
 
-def test_a_two_way_pair_uses_its_weaker_link_and_no_conflict_drops_nothing():
+def test_a_two_way_pair_loses_both_links_weaker_first():
+    # dropping the weaker link leaves the stronger one joining the same two sides, so the
+    # check repeats until the component is clear
     evs = [link_event(1, 2, 0.9), link_event(2, 1, 0.7, [[2, 0, 0]], [[1, 1, 1]])]
-    (dropped,) = resolve_reversal_chains(evs, {1: {(7, 0)}, 2: {(7, 1)}})
-    assert dropped.tracks == [2, 1]
+    dropped = resolve_reversal_chains(evs, {1: {(7, 0)}, 2: {(7, 1)}})
+    assert [e.tracks for e in dropped] == [[2, 1], [1, 2]]
+    assert not any(e.applied for e in evs)
+
+
+def test_a_pair_without_a_conflict_keeps_its_link():
     calm = [link_event(1, 2, 0.9)]
     assert resolve_reversal_chains(calm, {1: {(7, 0)}, 2: {(8, 1)}}) == []
     assert calm[0].applied
@@ -1255,7 +1261,7 @@ from dnt.refine.refiner import TrackRefiner, _Stages
 from dnt.refine.reversal import propose_reversal_splits
 
 from ._fixtures import box_rows, table
-from ._reversal import FPS, cx_out_and_back, rows, var_height, work_of
+from ._reversal import FPS, rows, var_height, work_of
 
 
 def _cfg():
@@ -1314,7 +1320,7 @@ def test_the_stage_splits_applies_and_records_the_sides():
 def test_two_reversals_make_three_ids_with_three_sides():
     t = np.arange(110)
     x = {int(f): v for f, v in zip(t, 100.0 + np.r_[0.0, np.cumsum(
-        np.where(t <= 30, 2.0, np.where(t <= 70, -2.0, 2.0))[1:])])}
+        np.where(t <= 30, 2.0, np.where(t <= 70, -2.0, 2.0))[1:])], strict=True)}
     stages = _Stages(_cfg(), FPS, None, None, None, None, {})
     out, events = stages.run(work_of(rows(1, t, lambda f: x[int(f)])))
     revs = sorted((e for e in events if e.stage == "reversal"),
@@ -2250,8 +2256,15 @@ before and after a row must both reach `min_speed` box heights per second and di
 least `min_angle` degrees. The cut goes where the velocity changes most, and each part keeps at
 least `min_rows` rows. Every split is applied (`AUTO_ACCEPT`) and recorded as a `SPLIT` event
 with stage `reversal`. Link and dedup never join the two sides of a cut again, also through a
-third track; a link or merge they refuse for this is kept in the ledger with
-`skipped_reason: reversal` (links) or `conflicts_with.why: reversal` (merges).
+third track:
+
+- a direct link between the two sides is excluded before link proposes anything, so it leaves
+  no LINK event in the ledger (in legacy mode too, where the pair is infeasible in the
+  assignment);
+- an accepted link that would chain the two sides through a third track is kept in the ledger
+  with `applied: false` and `skipped_reason: reversal`;
+- a merge refused for the same reason is kept with `skipped_reason: conflict` and
+  `conflicts_with.why: reversal`.
 
 ```yaml
 reversal:
