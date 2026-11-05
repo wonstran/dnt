@@ -426,7 +426,11 @@ class _Stages:
             log.info("dedup does not use the VLM; uncertain merges stay pending for review")
         evs = propose_merges(work, cfg, self.fps, self.link_app)
         self._route(evs, Band.of(cfg.dedup), "dedup", use_vlm=False)
-        out = apply_merges(work, evs, cfg)
+        sides = self._sides()
+        tags_before = sides.table_tags(work) if sides is not None else None
+        out = apply_merges(work, evs, cfg, reversal_sides=sides)
+        if sides is not None:
+            sides.absorb(out.absorbed, tags_before)
         self.merged_reps, self.merge_pending = out.merged_reps, out.pending_endpoints
         self.excluded = out.excluded
         self.merge_counts = out.counts

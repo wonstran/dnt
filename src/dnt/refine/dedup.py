@@ -14,6 +14,7 @@ from .events import ACCEPTED, Decision, Event, EventKind
 from .features import track_embeddings
 from .primitives import frame_runs, majority_class, ramp
 from .reporter import advance
+from .reversal import ReversalSides, side_conflict
 
 log = logging.getLogger(__name__)
 
@@ -311,7 +312,13 @@ def _dense(a: Track, b: Track, dc) -> bool:
     )
 
 
-def apply_merges(work: pd.DataFrame, events: list[Event], cfg: RefineConfig) -> MergeOutcome:
+def apply_merges(
+    work: pd.DataFrame,
+    events: list[Event],
+    cfg: RefineConfig,
+    *,
+    reversal_sides: ReversalSides | None = None,
+) -> MergeOutcome:
     """Apply the accepted ``MERGE`` events with the conflict rule of spec 3.5.
 
     Accepted edges are walked in the total order ``(-algo_score, proposal_key)`` with a
@@ -320,13 +327,19 @@ def apply_merges(work: pd.DataFrame, events: list[Event], cfg: RefineConfig) -> 
     ``applied=False`` and a ``skipped_reason``. A cannot-link pair is a pair decided
     ``VLM_REJECT`` or ``HUMAN_REJECT``, a pair of classes in different groups, or a pair that
     is densely co-observed unless a proposal marked it nested. Rows are dropped when an applied
-    edge joins two components and are attributed to that edge.
+    edge joins two components and are attributed to that edge. With ``reversal_sides``, a join
+    whose components hold two sides of a reversal cut is a cannot-link pair too (reversal
+    spec 3.5).
     """
     dc = cfg.dedup
     counts = {"applied": 0, "redundant": 0, "conflict": 0, "dropped_rows": 0}
     if work.empty or not events:
         return MergeOutcome(work, set(), set(), {}, {}, counts)
     tracks = describe(work)
+    sides = reversal_sides if reversal_sides is not None and reversal_sides.cuts else None
+    side_tags = (
+        {t: sides.tags(t, lineage_of_rows(tr.rows)) for t, tr in tracks.items()} if sides else {}
+    )
     groups = cfg.link.class_groups
     nested = {frozenset(e.tracks) for e in events if e.signals.get("nested")}
     rejected = {
@@ -355,6 +368,14 @@ def apply_merges(work: pd.DataFrame, events: list[Event], cfg: RefineConfig) -> 
                 return x, y, "class", None
             if frozenset((x, y)) not in nested and _dense(tracks[x], tracks[y], dc):
                 return x, y, "dense", None
+        if sides is not None:
+            group = members[ra] + members[rb]
+            conflict = side_conflict(set().union(*(side_tags[t] for t in group)))
+            if conflict is not None:
+                r, k1, k2 = conflict
+                u = min(t for t in group if (r, k1) in side_tags[t])
+                v = min(t for t in group if (r, k2) in side_tags[t])
+                return u, v, "reversal", None
         return None
 
     kept = pd.Series(True, index=work.index)
