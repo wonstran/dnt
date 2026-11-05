@@ -5,14 +5,22 @@ Design: docs/superpowers/specs/2026-11-04-vehicle-reversal-split-design.md.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import logging
+from bisect import bisect_right
+from collections import deque
+from dataclasses import dataclass, field
+from itertools import pairwise
 
 import numpy as np
+import pandas as pd
 
+from .apply import lineage_of_rows
 from .config import ReversalConfig, to_frames
+from .events import Event
 from .primitives import mean_velocity
 
 STAGE = "reversal"
+log = logging.getLogger(__name__)
 _TIE_RTOL = 1e-9
 
 
@@ -178,3 +186,158 @@ def find_reversals(frames, boxes, fps: float, rc: ReversalConfig) -> list[Revers
             )
         )
     return out
+
+
+Tag = tuple[int, int]
+
+
+def side_conflict(tags) -> tuple[int, int, int] | None:
+    """Return ``(r, k1, k2)`` for the smallest raw ID with two sides in ``tags``, else None.
+
+    ``k1 < k2`` are that raw ID's two smallest sides (spec 3.5).
+    """
+    by: dict[int, set[int]] = {}
+    for r, k in tags:
+        by.setdefault(int(r), set()).add(int(k))
+    for r in sorted(by):
+        ks = sorted(by[r])
+        if len(ks) > 1:
+            return r, ks[0], ks[1]
+    return None
+
+
+@dataclass
+class ReversalSides:
+    """Reversal cuts and the side tags each work track carries (spec 3.5).
+
+    A tag ``(r, k)`` is side ``k`` of raw ID ``r``: the frames from its ``k``-th cut to the next.
+    A track's tags are its own (read from its lineage) plus those it ``carried`` from tracks
+    merged into it, so a side survives a merge that drops all of its rows.
+    """
+
+    cuts: dict[int, list[int]] = field(default_factory=dict)
+    carried: dict[int, set[Tag]] = field(default_factory=dict)
+
+    def own(self, lineage) -> set[Tag]:
+        """Return the tags of a lineage's spans of cut raw IDs."""
+        out: set[Tag] = set()
+        for raw, first, _last in lineage:
+            cs = self.cuts.get(int(raw))
+            if cs:
+                out.add((int(raw), bisect_right(cs, int(first))))
+        return out
+
+    def tags(self, track: int, lineage) -> set[Tag]:
+        """Return ``own(lineage)`` plus the tags ``track`` carries."""
+        return self.own(lineage) | self.carried.get(int(track), set())
+
+    def table_tags(self, work: pd.DataFrame, excluded=None) -> dict[int, set[Tag]]:
+        """Return the tags of every track of ``work``."""
+        return {
+            int(t): self.tags(int(t), lineage_of_rows(g, excluded))
+            for t, g in work.groupby("track", sort=True)
+        }
+
+    def absorb(self, mapping, tags_before) -> None:
+        """Carry every pre-merge track's tags into the track it now belongs to.
+
+        ``tags_before`` holds the tags of every track before the merges, representatives
+        included; ``mapping`` maps absorbed work IDs to survivors (``rep_of``, ``absorbed``).
+        """
+        for track, tags in tags_before.items():
+            rep = int(mapping.get(track, track))
+            self.carried.setdefault(rep, set()).update(tags)
+
+
+def _weaker_key(e: Event) -> tuple[float, str]:
+    return (float(e.algo_score), e.proposal_key)
+
+
+def _graph(active: list[Event]) -> dict[int, dict[int, Event]]:
+    adj: dict[int, dict[int, Event]] = {}
+    for e in active:
+        a, b = int(e.tracks[0]), int(e.tracks[1])
+        for x, y in ((a, b), (b, a)):
+            nb = adj.setdefault(x, {})
+            if y not in nb or _weaker_key(e) < _weaker_key(nb[y]):
+                nb[y] = e  # two links between one pair: the path step uses the weaker
+    return adj
+
+
+def _bfs_path(adj, u: int, v: int) -> list[int]:
+    prev: dict[int, int | None] = {u: None}
+    queue = deque([u])
+    while queue:
+        x = queue.popleft()
+        if x == v:
+            break
+        for y in sorted(adj[x]):
+            if y not in prev:
+                prev[y] = x
+                queue.append(y)
+    out = [v]
+    while prev[out[-1]] is not None:
+        out.append(prev[out[-1]])
+    return out[::-1]
+
+
+def _first_side_conflict(active: list[Event], tags_of):
+    adj = _graph(active)
+    seen: set[int] = set()
+    for start in sorted(adj):  # the first unseen node is its component's smallest member
+        if start in seen:
+            continue
+        comp, queue = [], deque([start])
+        seen.add(start)
+        while queue:
+            x = queue.popleft()
+            comp.append(x)
+            for y in sorted(adj[x]):
+                if y not in seen:
+                    seen.add(y)
+                    queue.append(y)
+        conflict = side_conflict(set().union(*(tags_of.get(t, set()) for t in comp)))
+        if conflict is None:
+            continue
+        r, k1, k2 = conflict
+        u = min(t for t in comp if (r, k1) in tags_of.get(t, set()))
+        v = min(t for t in comp if (r, k2) in tags_of.get(t, set()))
+        if u == v:  # one track holds both sides; no link can undo that (spec 3.5)
+            log.warning("track %d holds both sides of raw %d's reversal cut", u, r)
+            continue
+        steps = _bfs_path(adj, u, v)
+        on_path = [adj[a][b] for a, b in pairwise(steps)]
+        return min(on_path, key=_weaker_key), r, k1, k2, u, v
+    return None
+
+
+def resolve_reversal_chains(active: list[Event], tags_of) -> list[Event]:
+    """Drop links until no chain of ``active`` links holds both sides of a cut (spec 3.5).
+
+    Each round drops the weakest link, by ``(algo_score, proposal_key)``, on the path
+    between the two smallest conflicting members of the first conflicting component.
+
+    Parameters
+    ----------
+    active : list of Event
+        Accepted LINK events that will be applied.
+    tags_of : dict
+        Work track ID to its tags (``ReversalSides.tags``), for every track in ``active``.
+
+    Returns
+    -------
+    list of Event
+        The dropped events, each with ``applied=False``, ``skipped_reason="reversal"`` and
+        ``conflicts_with``.
+
+    """
+    active = list(active)
+    dropped: list[Event] = []
+    while (hit := _first_side_conflict(active, tags_of)) is not None:
+        ev, r, k1, k2, u, v = hit
+        ev.applied = False
+        ev.signals["skipped_reason"] = "reversal"
+        ev.signals["conflicts_with"] = {"raw": r, "sides": [k1, k2], "tracks": [u, v]}
+        active = [e for e in active if e is not ev]
+        dropped.append(ev)
+    return dropped
