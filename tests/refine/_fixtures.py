@@ -67,3 +67,15 @@ def random_tracks(seed: int = 0, n_objects: int = 40, n_frames: int = 300) -> pd
 def load_raw(seed: int) -> pd.DataFrame:
     """Read a saved random track table back with named columns (the baseline input form)."""
     return pd.read_csv(DATA / f"raw_{seed}.csv", header=None, names=TRACK_COLUMNS)
+
+
+def reversal_scene() -> pd.DataFrame:
+    """A vehicle scene for the reversal stage: one ID goes out and comes back, plus others."""
+    t = np.arange(60)
+    cx = 100.0 + np.where(t < 30, 2.0 * t, 120.0 - 2.0 * t)
+    rows = [[int(f), 1, float(x) - 5.0, 95.0, 10.0, 10.0, 0.9, 2, -1, -1] for f, x in zip(t, cx)]
+    rows += box_rows(2, range(0, 120), 400.0, 300.0, w=40.0, h=30.0, cls=2, score=0.35)  # parked
+    rows += box_rows(3, range(0, 40), 600.0, 200.0, vx=3.0, w=40.0, h=30.0, cls=2)  # fragment
+    rows += box_rows(4, range(45, 90), 735.0, 200.0, vx=3.0, w=40.0, h=30.0, cls=2)  # its rest
+    rows += box_rows(5, range(10, 100), 200.0, 500.0, vx=-4.0, w=50.0, h=40.0, cls=7)  # truck
+    return table(rows)
